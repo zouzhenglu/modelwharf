@@ -5,13 +5,21 @@
 ```
 harness 工具 ──►  本网关 (OpenAI /v1  +  Anthropic /v1/messages  +  MCP /mcp)
                         │
-                        ├─ workbuddy   ← 多账号轮询 → copilot.tencent.com
-                        ├─ trae        ← 多账号轮询 → trae-api-cn.mchost.guru
-                        ├─ qwen        ← 多账号轮询 → chat.qwen.ai
-                        ├─ qoder       ← 多账号轮询 → gateway.qoder.com.cn / api1.qoder.sh
-                        ├─ qodercn     ← (国内独立池)
-                        ├─ ollama      ← 本地模型
-                        └─ openai-compat ← 官方 API/聚合站（DeepSeek/Moonshot/OpenRouter…）
+                        ├─ 逆向平台（账号池，多账号轮询）
+                        │   ├─ workbuddy / CodeBuddy (腾讯) → copilot.tencent.com
+                        │   ├─ trae (字节)                  → trae-api-cn.mchost.guru
+                        │   ├─ qwen (chat.qwen.ai)          → 千问网页版
+                        │   ├─ qoder (阿里国际)             → api1.qoder.sh
+                        │   └─ qodercn (阿里国内)           → gateway.qoder.com.cn
+                        ├─ 国际官方 API（key 即用）
+                        │   ├─ OpenAI · Anthropic · Google Gemini · xAI(Grok) · Mistral
+                        │   ├─ OpenRouter · Groq · Together · Perplexity · Cerebras · GitHub Models
+                        ├─ 国内官方 API（key 即用）
+                        │   ├─ 阿里百炼(Qwen) · 智谱GLM · 月之暗面Kimi · MiniMax · 火山方舟(豆包)
+                        │   ├─ 腾讯混元 · 百川 · 阶跃星辰 · 硅基流动 · 书生 · 魔搭 ModelScope
+                        └─ 本地 / 自定义
+                            ├─ ollama（本地模型）
+                            └─ openai-compat（任意 OpenAI 协议服务）
 ```
 
 ## 快速开始
@@ -52,7 +60,7 @@ npm start                 # 默认 http://localhost:8317
 | 网页测试 | 测试台：选模型 → 流式/非流式 → 实时输出+token+积分耗时 |
 | 剩余积分 | 账号「检查」按钮调用各平台积分接口（trae 签到状态、qoder 官方 quota、codebuddy billing、qwen 档案） |
 | 用量/禁用启用/搜索筛选 | usage 全量日志（时间/平台/账号/模型/token/积分/耗时/状态），各列表页均带搜索+筛选 |
-| 扩展接口 | provider 插件协议（见 `src/core/registry.js` 注释）；新增平台=一个文件；`openai-compat`/`ollama` 插件已内置 |
+| 扩展接口 | provider 插件协议（见 `src/core/registry.js` 注释）；新增平台=一个文件；已内置 24 个官方厂商 + openai-compat/ollama 通用插件 |
 | 账号-模型绑定管理 | 模型层面启停 + API key 级 `allowed_models` 白名单 |
 | 本地集成 | 「导入本机登录」扫描 Trae/CodeBuddy/Qoder CLI 的本地凭证文件 |
 | 主流协议 | OpenAI `/v1/chat/completions`、`/v1/completions`、`/v1/models`；Anthropic `/v1/messages`（含 thinking/tool_use）；MCP 网关 |
@@ -73,6 +81,12 @@ npm start                 # 默认 http://localhost:8317
 - Qwen: `LLM-Red-Team/qwen-free-api` 系
 
 ⚠️ 使用逆向接口请自行评估各平台服务条款与账号风险。
+
+## Git 管理
+
+- `main` 稳定发布分支（tag：`v0.1.0` 逆向平台版、`v0.2.0` +24 官方厂商）
+- `dev` 开发分支，功能验证后合入 main 并打 tag
+- `data/`（数据库）、`logs/`、`.env` 均已 gitignore，凭证不会入库
 
 ## 测试
 

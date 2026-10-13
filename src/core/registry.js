@@ -45,6 +45,15 @@ function loadAll() {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   for (const f of fs.readdirSync(dir).sort()) {
     if (!f.endsWith('.js') || f.startsWith('_')) continue;
+    // official.js exports an array of vendor plugins
+    if (f === 'official.js') {
+      try {
+        for (const plugin of require(path.join(dir, f))) register(plugin);
+      } catch (e) {
+        logger.error(`failed to load official vendors: ${e.message}`);
+      }
+      continue;
+    }
     try {
       const plugin = require(path.join(dir, f));
       register(plugin);
