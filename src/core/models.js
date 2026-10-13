@@ -11,11 +11,16 @@ const accounts = require('./accounts');
 
 /**
  * Sync models reported by plugin.listModels(account) into the models table.
- * New upstream models are inserted (enabled by default unless provider config autoDisable).
- * Rows already in the table keep their settings (multiplier, enabled...).
+ * live=true: models came from the upstream API (insert normally).
+ * live=false: fallback/static catalog — only insert when the provider has NO models yet,
+ * so dead names never pollute a live-synced list.
  */
-function syncProviderModels(plugin, account, upstreamModels) {
+function syncProviderModels(plugin, account, upstreamModels, { live = true } = {}) {
   const autoDisable = (getProviderConfig(plugin.id).autoDisableNewModels) || false;
+  if (!live) {
+    const have = db.prepare('SELECT COUNT(*) c FROM models WHERE provider_id=?').get(plugin.id).c;
+    if (have > 0) return 0;
+  }
   const insert = db.prepare(`INSERT OR IGNORE INTO models(provider_id, upstream_model, public_name, enabled, is_free, multiplier, ctx_window)
     VALUES(?,?,?,?,?,?,?)`);
   let added = 0;
@@ -84,4 +89,42 @@ function recordUsage({ apikeyId, providerId, accountId, publicModel, upstreamMod
       inputTokens || 0, outputTokens || 0, credits || 0, multiplier || 1, latencyMs || 0, status || 0, error || null, source || null);
 }
 
-module.exports = { syncProviderModels, listModels, listPublicModels, route, findModelByUpstream, recordUsage, getProviderConfig, setProviderConfig };
+// ---------- virtual models (统一模型：跨平台聚合 + 故障切换 + 对外改名) ----------
+function listVirtualModels() {
+  return db.prepare('SELECT * FROM virtual_models ORDER BY public_name').all();
+}
+function getVirtualModel(publicName) {
+  return db.prepare('SELECT * FROM virtual_models WHERE public_name=?').get(publicName);
+}
+function upsertVirtualModel({ public_name, targets, enabled = 1, note = null }) {
+  if (!public_name || !Array.isArray(targets) || !targets.length) throw new Error('public_name and targets required');
+  for (const t of targets) {
+    if (!t.provider_id || !t.public_name) throw new Error('each target needs provider_id + public_name');
+  }
+  db.prepare(`INSERT INTO virtual_models(public_name, targets, enabled, note) VALUES(?,?,?,?)
+    ON CONFLICT(public_name) DO UPDATE SET targets=excluded.targets, enabled=excluded.enabled, note=excluded.note`)
+    .run(public_name, JSON.stringify(targets), enabled ? 1 : 0, note);
+  return getVirtualModel(public_name);
+}
+function deleteVirtualModel(publicName) {
+  db.prepare('DELETE FROM virtual_models WHERE public_name=?').run(publicName);
+}
+
+/** public model list for clients: regular enabled models + virtual models */
+function listPublicModels() {
+  const regular = db.prepare(`
+    SELECT m.public_name, m.provider_id, m.upstream_model, m.multiplier, m.is_free, m.ctx_window,
+           (SELECT COUNT(*) FROM accounts a WHERE a.provider_id=m.provider_id AND a.enabled=1 AND a.status NOT IN ('invalid','banned')) AS accounts
+    FROM models m WHERE m.enabled=1
+    ORDER BY m.public_name`).all().filter(m => m.accounts > 0);
+  const virtual = db.prepare('SELECT * FROM virtual_models WHERE enabled=1').all()
+    .map(v => ({ public_name: v.public_name, provider_id: 'virtual', upstream_model: null, multiplier: 1, is_free: 0, ctx_window: null, accounts: 1, virtual: 1 }));
+  return [...regular, ...virtual];
+}
+
+/** enabled models grouped for admin "sync targets" dropdowns: only what this gateway actually has */
+function listEnabledModelNames() {
+  return db.prepare('SELECT provider_id, public_name FROM models WHERE enabled=1 ORDER BY provider_id, public_name').all();
+}
+
+module.exports = { syncProviderModels, listModels, listPublicModels, route, findModelByUpstream, recordUsage, getProviderConfig, setProviderConfig, listVirtualModels, getVirtualModel, upsertVirtualModel, deleteVirtualModel, listEnabledModelNames };

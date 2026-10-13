@@ -97,6 +97,13 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   tool_filter TEXT DEFAULT '*',   -- '*' or comma separated tool names
   created_at INTEGER DEFAULT (unixepoch())
 );
+CREATE TABLE IF NOT EXISTS virtual_models (
+  public_name TEXT PRIMARY KEY,   -- the name clients see (e.g. gpt-4o or glm-5.3)
+  enabled INTEGER DEFAULT 1,
+  targets TEXT NOT NULL,          -- JSON [{provider_id, public_name, priority}] priority ascending = tried first
+  note TEXT,
+  created_at INTEGER DEFAULT (unixepoch())
+);
 CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage(ts);
 CREATE INDEX IF NOT EXISTS idx_usage_model ON usage(public_model);
 CREATE INDEX IF NOT EXISTS idx_usage_apikey ON usage(apikey_id);

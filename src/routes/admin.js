@@ -116,6 +116,43 @@ router.post('/accounts/:id/check', async (req, res) => {
   }
 });
 
+// check ALL accounts at once (一键检测)：each account checked concurrently, results per account
+router.post('/accounts/check-all', async (req, res) => {
+  const all = accountsCore.listAccounts(null, { includeDisabled: false });
+  const results = await Promise.allSettled(all.map(async (a) => {
+    const plugin = registry.get(a.provider_id);
+    if (!plugin?.checkAccount) return { id: a.id, provider_id: a.provider_id, name: a.name, ok: null, message: 'no checker' };
+    try {
+      const r = await plugin.checkAccount(a);
+      if (r.extra) db.prepare('UPDATE accounts SET extra=? WHERE id=?').run(JSON.stringify({ ...a.extra, ...r.extra }), a.id);
+      if (r.ok === true) accountsCore.setAccountStatus(a.id, 'active');
+      else if (r.ok === false) accountsCore.setAccountStatus(a.id, r.status || 'invalid', r.message);
+      return { id: a.id, provider_id: a.provider_id, name: a.name, ok: r.ok, message: r.message || '' };
+    } catch (e) {
+      accountsCore.setAccountStatus(a.id, 'invalid', e.message);
+      return { id: a.id, provider_id: a.provider_id, name: a.name, ok: false, message: e.message };
+    }
+  }));
+  res.json({ checked: results.length, results: results.map(r => r.value) });
+});
+
+// sync credits/info for all accounts (一键同步积分)：same as check-all but never flips status
+router.post('/accounts/sync-info', async (req, res) => {
+  const all = accountsCore.listAccounts(null, { includeDisabled: false });
+  const results = await Promise.allSettled(all.map(async (a) => {
+    const plugin = registry.get(a.provider_id);
+    if (!plugin?.checkAccount) return { id: a.id, provider_id: a.provider_id, name: a.name, ok: null, message: 'no checker' };
+    try {
+      const r = await plugin.checkAccount(a);
+      if (r.extra) db.prepare('UPDATE accounts SET extra=? WHERE id=?').run(JSON.stringify({ ...a.extra, ...r.extra }), a.id);
+      return { id: a.id, provider_id: a.provider_id, name: a.name, ok: r.ok, message: r.message || '', credits: r.extra?.credits };
+    } catch (e) {
+      return { id: a.id, provider_id: a.provider_id, name: a.name, ok: false, message: e.message };
+    }
+  }));
+  res.json({ synced: results.length, results: results.map(r => r.value) });
+});
+
 // import credentials from local machine (provider plugin must implement importLocal)
 router.post('/providers/:id/import-local', async (req, res) => {
   const plugin = registry.get(req.params.id);
@@ -142,16 +179,51 @@ router.post('/providers/:id/refresh-models', async (req, res) => {
     if (!plugin.listModels) continue;
     try {
       const models = await plugin.listModels(a);
-      added += modelsCore.syncProviderModels(plugin, a, models);
+      added += modelsCore.syncProviderModels(plugin, a, models, { live: !models[0]?.static });
     } catch (e) { errors.push(`${a.name}: ${e.message}`); }
   }
   res.json({ added, errors });
 });
 
+// sync models for ONE account (账号行内同步)
+router.post('/accounts/:id/refresh-models', async (req, res) => {
+  const a = accountsCore.getAccount(req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  const plugin = registry.get(a.provider_id);
+  if (!plugin?.listModels) return res.status(400).json({ error: 'provider has no model lister' });
+  try {
+    const models = await plugin.listModels(a);
+    const added = modelsCore.syncProviderModels(plugin, a, models, { live: !models[0]?.static });
+    res.json({ added, total: models.length });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// sync models for ALL providers at once
+router.post('/refresh-models-all', async (req, res) => {
+  const providers = db.prepare('SELECT id FROM providers').all();
+  const summary = [];
+  for (const { id } of providers) {
+    const plugin = registry.get(id);
+    if (!plugin?.listModels) continue;
+    const accts = accountsCore.listAccounts(id).filter(a => a.enabled);
+    let added = 0; const errors = [];
+    for (const a of accts) {
+      try {
+        const models = await plugin.listModels(a);
+        added += modelsCore.syncProviderModels(plugin, a, models, { live: !models[0]?.static });
+      } catch (e) { errors.push(`${a.name}: ${e.message}`); }
+    }
+    summary.push({ provider: id, added, errors });
+  }
+  res.json(summary);
+});
+
 // ---------- models ----------
 router.get('/models', (req, res) => {
   const { provider_id, search, enabled, tag } = req.query;
-  res.json(modelsCore.listModels({ providerId: provider_id, search, enabled, tag }));
+  // enabled arrives as string from query; '0' must map to false (Number('0')=0 is falsy-safe here)
+  const enabledFlag = enabled === '' || enabled === undefined ? undefined : Number(enabled) ? 1 : 0;
+  res.json(modelsCore.listModels({ providerId: provider_id, search, enabled: enabledFlag, tag }));
 });
 router.post('/models', (req, res) => {
   const { provider_id, upstream_model, public_name, multiplier = 1, is_free = 0, ctx_window, tags = '', note } = req.body || {};
@@ -177,6 +249,32 @@ router.delete('/models/:id', (req, res) => { db.prepare('DELETE FROM models WHER
 router.post('/models/:id/toggle', (req, res) => {
   db.prepare('UPDATE models SET enabled = 1-enabled WHERE id=?').run(req.params.id);
   res.json({ ok: true, enabled: db.prepare('SELECT enabled FROM models WHERE id=?').get(req.params.id).enabled });
+});
+
+// batch operations (批量启用/禁用/删除)
+router.post('/models/batch', (req, res) => {
+  const { action, ids, provider_id } = req.body || {};
+  if (!action) return res.status(400).json({ error: 'action required' });
+  let affected = 0;
+  if (action === 'enable' || action === 'disable') {
+    const v = action === 'enable' ? 1 : 0;
+    if (Array.isArray(ids) && ids.length) {
+      affected = db.prepare(`UPDATE models SET enabled=? WHERE id IN (${ids.map(() => '?').join(',')})`).run(v, ...ids).changes;
+    } else if (provider_id) {
+      affected = db.prepare('UPDATE models SET enabled=? WHERE provider_id=?').run(v, provider_id).changes;
+    } else {
+      affected = db.prepare('UPDATE models SET enabled=?').run(v).changes;
+    }
+  } else if (action === 'delete') {
+    if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids required for delete' });
+    affected = db.prepare(`DELETE FROM models WHERE id IN (${ids.map(() => '?').join(',')})`).run(...ids).changes;
+  } else if (action === 'disable-dev-variants') {
+    // hide internal __dev-style duplicates
+    affected = db.prepare("UPDATE models SET enabled=0 WHERE public_name LIKE '%\\_\\_dev' ESCAPE '\\'").run().changes;
+  } else {
+    return res.status(400).json({ error: 'unknown action' });
+  }
+  res.json({ ok: true, affected });
 });
 
 // ---------- apikeys ----------
@@ -230,6 +328,62 @@ router.get('/stats', (req, res) => {
   const byProvider = db.prepare('SELECT provider_id, COUNT(*) reqs, COALESCE(SUM(credits),0) credits FROM usage WHERE ts>=? GROUP BY provider_id').all(dayStart);
   const byModel = db.prepare('SELECT public_model, COUNT(*) reqs, COALESCE(SUM(input_tokens),0) tin, COALESCE(SUM(output_tokens),0) tout FROM usage WHERE ts>=? GROUP BY public_model ORDER BY reqs DESC LIMIT 20').all(dayStart);
   res.json({ today: { ...today, errors: errToday }, total, byProvider, byModel });
+});
+
+// chart data for usage page: per-hour requests/tokens/errors for last N hours (default 24)
+router.get('/usage/chart', (req, res) => {
+  const hours = Math.min(168, Math.max(1, Number(req.query.hours || 24)));
+  const since = Math.floor(Date.now() / 1000) - hours * 3600;
+  const rows = db.prepare(`
+    SELECT (ts / 3600) * 3600 AS hour_bucket,
+           COUNT(*) AS reqs,
+           COALESCE(SUM(input_tokens),0) AS tin,
+           COALESCE(SUM(output_tokens),0) AS tout,
+           SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS errors,
+           COALESCE(SUM(credits),0) AS credits
+    FROM usage WHERE ts >= ? GROUP BY hour_bucket ORDER BY hour_bucket`).all(since);
+  // fill empty hours
+  const byBucket = Object.fromEntries(rows.map(r => [r.hour_bucket, r]));
+  const series = [];
+  const nowHour = Math.floor(Date.now() / 1000 / 3600) * 3600;
+  for (let h = nowHour - (hours - 1) * 3600; h <= nowHour; h += 3600) {
+    const r = byBucket[h] || { reqs: 0, tin: 0, tout: 0, errors: 0, credits: 0 };
+    series.push({ hour: h, label: new Date(h * 1000).toTimeString().slice(0, 5), ...r });
+  }
+  res.json({ hours, series });
+});
+
+// ---------- virtual models (统一模型) ----------
+router.get('/virtual-models', (req, res) => {
+  res.json(modelsCore.listVirtualModels());
+});
+router.post('/virtual-models', (req, res) => {
+  try {
+    const v = modelsCore.upsertVirtualModel(req.body || {});
+    res.json({ ok: true, virtual: v });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+router.put('/virtual-models/:name', (req, res) => {
+  const existing = modelsCore.getVirtualModel(req.params.name);
+  if (!existing) return res.status(404).json({ error: 'not found' });
+  const { targets, enabled, note } = req.body || {};
+  try {
+    const v = modelsCore.upsertVirtualModel({
+      public_name: existing.public_name,
+      targets: targets ?? JSON.parse(existing.targets),
+      enabled: enabled === undefined ? existing.enabled : enabled,
+      note: note ?? existing.note,
+    });
+    res.json({ ok: true, virtual: v });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+router.delete('/virtual-models/:name', (req, res) => {
+  modelsCore.deleteVirtualModel(req.params.name);
+  res.json({ ok: true });
+});
+// available regular models for building virtual targets (grouped by provider)
+router.get('/virtual-models/targets', (req, res) => {
+  res.json(modelsCore.listEnabledModelNames());
 });
 
 // ---------- mcp servers ----------

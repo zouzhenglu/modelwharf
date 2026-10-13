@@ -59,6 +59,7 @@ async function render(page) {
   if (page === 'dashboard') return renderDashboard(m);
   if (page === 'accounts') return renderAccounts(m);
   if (page === 'models') return renderModels(m);
+  if (page === 'virtual') return renderVirtual(m);
   if (page === 'apikeys') return renderApikeys(m);
   if (page === 'usage') return renderUsage(m);
   if (page === 'mcp') return renderMcp(m);
@@ -168,6 +169,8 @@ async function renderAccounts(m) {
       ${['active','cooling','invalid','banned'].map(s => `<option ${acctFilter.status === s ? 'selected' : ''} value="${s}">${s}</option>`).join('')}</select>
     <select id="fEnabled" style="width:100px"><option value="">启用+停用</option><option value="1" ${acctFilter.enabled === '1' ? 'selected' : ''}>仅启用</option><option value="0" ${acctFilter.enabled === '0' ? 'selected' : ''}>仅停用</option></select>
     <span class="spacer"></span>
+    <button class="ghost" onclick="syncAllInfo()">同步积分</button>
+    <button class="ghost" onclick="checkAllAccounts()">一键检测</button>
     <button class="ghost" onclick="importLocalAll()">扫描本机登录</button>
     <button onclick="openAccountForm()">+ 添加账号</button>
   </div>
@@ -183,6 +186,7 @@ async function renderAccounts(m) {
     <td>${switchHtml(a.enabled, `toggleAccount(${a.id}, ${a.enabled ? 0 : 1})`)}</td>
     <td>
       <button class="small ghost" onclick="checkAccount(${a.id})">检查</button>
+      <button class="small ghost" onclick="syncAccountModels(${a.id})">同步模型</button>
       <button class="small ghost" onclick="openAccountForm(${a.id})">编辑</button>
       <button class="small danger" onclick="delAccount(${a.id})">删</button>
     </td></tr>`).join('')}
@@ -210,6 +214,36 @@ async function checkAccount(id) {
     toast(r.ok ? '✓ 账号有效' + (r.message ? '：' + r.message : '') : '✗ ' + (r.message || '无效'), !r.ok);
     renderAccounts($('#main'));
   } catch (e) { toast(e.message, true); }
+}
+async function checkAllAccounts() {
+  toast('正在检测全部账号…');
+  try {
+    const r = await api('/accounts/check-all', { method: 'POST' });
+    const ok = r.results.filter(x => x.ok === true).length;
+    const bad = r.results.filter(x => x.ok === false);
+    const lines = r.results.map(x => `${x.ok === true ? '✓' : x.ok === false ? '✗' : '·'} [${x.provider_id}] ${x.name}: ${x.message || 'ok'}`);
+    openModal(`检测完成：${ok}/${r.checked} 有效`, `
+      <div class="field" style="font-size:13px;line-height:2;max-height:320px;overflow:auto">${lines.map(esc).join('<br>')}</div>
+      <div class="row"><span class="spacer"></span><button onclick="closeModal();go('accounts')">好的</button></div>`, {});
+  } catch (e) { toast(e.message, true); }
+}
+async function syncAllInfo() {
+  toast('正在同步全部账号积分…');
+  try {
+    const r = await api('/accounts/sync-info', { method: 'POST' });
+    const lines = r.results.map(x => `${x.ok === false ? '✗' : '✓'} [${x.provider_id}] ${x.name}: ${x.message || '-'}${x.credits != null ? '（积分 ' + x.credits + '）' : ''}`);
+    openModal('积分同步完成', `
+      <div class="field" style="font-size:13px;line-height:2;max-height:320px;overflow:auto">${lines.map(esc).join('<br>')}</div>
+      <div class="row"><span class="spacer"></span><button onclick="closeModal();go('accounts')">好的</button></div>`, {});
+  } catch (e) { toast(e.message, true); }
+}
+async function syncAccountModels(id) {
+  toast('同步该账号模型中…');
+  try {
+    const r = await api(`/accounts/${id}/refresh-models`, { method: 'POST' });
+    toast(`✓ 新增 ${r.added} 个（上游共 ${r.total} 个）`);
+    renderAccounts($('#main'));
+  } catch (e) { toast('同步失败: ' + e.message, true); }
 }
 
 async function openAccountForm(id) {
@@ -269,22 +303,36 @@ let modelFilter = { provider_id: '', search: '', enabled: '', tag: '' };
 async function renderModels(m) {
   const [providers, models] = await Promise.all([
     api('/providers'),
-    api('/models?' + new URLSearchParams(Object.fromEntries(Object.entries(modelFilter).filter(([, v]) => v)))),
+    api('/models?' + new URLSearchParams(Object.fromEntries(Object.entries(modelFilter).filter(([, v]) => v !== '')))),
   ]);
+  const providerOpts = providers.map(p => `<option value="${p.id}" ${modelFilter.provider_id === p.id ? 'selected' : ''}>${esc(p.label)}</option>`).join('');
   m.innerHTML = `
   <h2>模型管理 <span class="muted">(${models.length})</span></h2>
   <div class="toolbar">
-    <select id="mfProvider" style="width:150px"><option value="">全部平台</option>${providers.map(p => `<option value="${p.id}" ${modelFilter.provider_id === p.id ? 'selected' : ''}>${esc(p.label)}</option>`).join('')}</select>
+    <select id="mfProvider" style="width:150px"><option value="">全部平台</option>${providerOpts}</select>
     <input id="mfSearch" class="searchbox" placeholder="搜索模型名/标签…" value="${esc(modelFilter.search)}">
     <select id="mfEnabled" style="width:100px"><option value="">全部</option><option value="1" ${modelFilter.enabled === '1' ? 'selected' : ''}>仅启用</option><option value="0" ${modelFilter.enabled === '0' ? 'selected' : ''}>仅停用</option></select>
     <input id="mfTag" style="width:110px" placeholder="标签筛选" value="${esc(modelFilter.tag)}">
     <span class="spacer"></span>
-    ${providers.map(p => `<button class="small ghost" onclick="refreshModels('${p.id}')">同步${esc(p.label)}模型</button>`).join('')}
+    <select id="mfSyncSel" style="width:170px"><option value="">同步模型：选择平台…</option><option value="__all">全部平台</option>${providerOpts}</select>
+    <button class="ghost" id="mfSyncBtn">开始同步</button>
     <button onclick="openModelForm()">+ 手动添加</button>
   </div>
+  <div class="toolbar" style="background:var(--panel2);border-radius:8px;padding:8px 12px">
+    <span class="muted">批量：</span>
+    <label class="row" style="gap:4px;font-size:13px"><input type="checkbox" id="mfCheckAll" style="width:auto"> 全选本页</label>
+    <button class="small" onclick="batchModels('enable')">启用选中</button>
+    <button class="small ghost" onclick="batchModels('disable')">禁用选中</button>
+    <button class="small danger" onclick="batchModels('delete')">删除选中</button>
+    <span class="muted">|</span>
+    <button class="small ghost" onclick="batchScope('enable')">启用当前筛选</button>
+    <button class="small ghost" onclick="batchScope('disable')">禁用当前筛选</button>
+    <button class="small ghost" onclick="batchDevVariants()">隐藏 __dev 变体</button>
+  </div>
   <div class="card" style="padding:6px 12px">
-  <table><tr><th>对外名称</th><th>平台</th><th>上游模型</th><th>倍率</th><th>免费</th><th>可用账号</th><th>标签</th><th>启用</th><th>操作</th></tr>
+  <table><tr><th style="width:26px"></th><th>对外名称</th><th>平台</th><th>上游模型</th><th>倍率</th><th>免费</th><th>可用账号</th><th>标签</th><th>启用</th><th>操作</th></tr>
   ${models.map(md => `<tr>
+    <td><input type="checkbox" class="mfCheck" value="${md.id}" style="width:auto"></td>
     <td class="mono"><b>${esc(md.public_name)}</b>${md.note ? `<div class="muted">${esc(md.note)}</div>` : ''}</td>
     <td>${esc(md.provider_id)}</td>
     <td class="mono muted">${esc(md.upstream_model)}</td>
@@ -296,12 +344,51 @@ async function renderModels(m) {
     <td><button class="small ghost" onclick="openModelForm(${md.id})">编辑</button>
         <button class="small danger" onclick="delModel(${md.id})">删</button></td>
   </tr>`).join('')}
-  ${!models.length ? '<tr><td colspan="9" class="muted" style="text-align:center;padding:24px">暂无模型 — 添加账号后点「同步模型」，或手动添加（可用于本地/官方 API）</td></tr>' : ''}
+  ${!models.length ? '<tr><td colspan="10" class="muted" style="text-align:center;padding:24px">暂无模型 — 添加账号后在上方选择平台「开始同步」，或手动添加</td></tr>' : ''}
   </table></div>`;
   $('#mfProvider').onchange = e => { modelFilter.provider_id = e.target.value; renderModels(m); };
   $('#mfEnabled').onchange = e => { modelFilter.enabled = e.target.value; renderModels(m); };
   $('#mfSearch').onkeydown = e => { if (e.key === 'Enter') { modelFilter.search = e.target.value; renderModels(m); } };
   $('#mfTag').onkeydown = e => { if (e.key === 'Enter') { modelFilter.tag = e.target.value; renderModels(m); } };
+  $('#mfSyncBtn').onclick = () => {
+    const v = $('#mfSyncSel').value;
+    if (!v) return toast('请先选择要同步的平台', true);
+    if (v === '__all') return refreshModelsAll();
+    refreshModels(v);
+  };
+  $('#mfCheckAll').onchange = e => { document.querySelectorAll('.mfCheck').forEach(c => c.checked = e.target.checked); };
+}
+function checkedModelIds() { return [...document.querySelectorAll('.mfCheck:checked')].map(c => Number(c.value)); }
+async function batchModels(action) {
+  const ids = checkedModelIds();
+  if (!ids.length) return toast('请先勾选模型', true);
+  if (action === 'delete' && !confirm(`删除选中的 ${ids.length} 个模型？`)) return;
+  const r = await api('/models/batch', { method: 'POST', body: { action, ids } });
+  toast(`已${action === 'enable' ? '启用' : action === 'disable' ? '禁用' : '删除'} ${r.affected} 个`);
+  renderModels($('#main'));
+}
+async function batchScope(action) {
+  const body = { action };
+  if (modelFilter.provider_id) body.provider_id = modelFilter.provider_id;
+  else if (!confirm(`对${modelFilter.enabled === '0' ? '已筛选' : '全部'}模型执行「${action === 'enable' ? '启用' : '禁用'}」？范围较大，请确认。`)) return;
+  const r = await api('/models/batch', { method: 'POST', body });
+  toast(`已${action === 'enable' ? '启用' : '禁用'} ${r.affected} 个`);
+  renderModels($('#main'));
+}
+async function batchDevVariants() {
+  const r = await api('/models/batch', { method: 'POST', body: { action: 'disable-dev-variants' } });
+  toast(`已禁用 ${r.affected} 个 __dev 变体`);
+  renderModels($('#main'));
+}
+async function refreshModelsAll() {
+  toast('同步全部平台模型中…');
+  try {
+    const r = await api('/refresh-models-all', { method: 'POST' });
+    const total = r.reduce((s, x) => s + (x.added || 0), 0);
+    const errs = r.flatMap(x => x.errors || []);
+    toast(`同步完成：共新增 ${total} 个${errs.length ? '，错误: ' + errs.slice(0, 2).join('; ') : ''}`, errs.length > 0);
+    go('models');
+  } catch (e) { toast(e.message, true); }
 }
 async function toggleModel(id) { await api('/models/' + id + '/toggle', { method: 'POST' }); renderModels($('#main')); }
 async function delModel(id) { if (!confirm('删除该模型映射？')) return; await api('/models/' + id, { method: 'DELETE' }); renderModels($('#main')); }
@@ -334,7 +421,90 @@ async function saveModel(id) {
   } catch (e) { toast(e.message, true); }
 }
 
-// ---------- apikeys ----------
+// ---------- virtual models (统一模型) ----------
+async function renderVirtual(m) {
+  const [virtuals, targets] = await Promise.all([api('/virtual-models'), api('/virtual-models/targets')]);
+  const byProvider = {};
+  for (const t of targets) (byProvider[t.provider_id] = byProvider[t.provider_id] || []).push(t.public_name);
+  m.innerHTML = `
+  <h2>统一模型 <span class="muted">(${virtuals.length})</span></h2>
+  <p class="muted" style="margin-bottom:12px">统一模型把多个平台的真实模型聚合成一个对外名称：客户端请求它时，网关按目标顺序依次尝试，<b>失败自动切换下一个</b>。也可以用来改名（如对外叫 <span class="mono">gpt-4o</span>，实际走 DeepSeek/GLM）。与「模型管理」里的直接模型相互独立，都可通过 /v1/models 看到。</p>
+  <div class="toolbar"><span class="spacer"></span><button onclick="openVirtualForm()">+ 新建统一模型</button></div>
+  <div class="card" style="padding:6px 12px">
+  <table><tr><th>对外名称</th><th>目标链（按优先级）</th><th>启用</th><th>备注</th><th>操作</th></tr>
+  ${virtuals.map(v => {
+    const ts = JSON.parse(v.targets || '[]').sort((a, b) => (a.priority ?? 100) - (b.priority ?? 100));
+    return `<tr>
+    <td class="mono"><b>${esc(v.public_name)}</b></td>
+    <td>${ts.map((t, i) => `${i > 0 ? '<span class="muted"> → </span>' : ''}<span class="badge blue">${esc(t.provider_id)}/${esc(t.public_name)}</span>`).join('')}</td>
+    <td>${switchHtml(v.enabled, `toggleVirtual('${esc(v.public_name)}', ${v.enabled ? 0 : 1})`)}</td>
+    <td class="muted">${esc(v.note || '')}</td>
+    <td><button class="small ghost" onclick="openVirtualForm('${esc(v.public_name)}')">编辑</button>
+        <button class="small danger" onclick="delVirtual('${esc(v.public_name)}')">删</button></td>
+  </tr>`;
+  }).join('')}
+  ${!virtuals.length ? '<tr><td colspan="5" class="muted" style="text-align:center;padding:24px">暂无统一模型 — 点「新建」把多个平台的同名模型聚合成一条故障切换链</td></tr>' : ''}
+  </table></div>`;
+  window._virtualTargets = byProvider;
+}
+async function toggleVirtual(name, enabled) { await api('/virtual-models/' + encodeURIComponent(name), { method: 'PUT', body: { enabled } }); renderVirtual($('#main')); }
+async function delVirtual(name) { if (!confirm(`删除统一模型「${name}」？`)) return; await api('/virtual-models/' + encodeURIComponent(name), { method: 'DELETE' }); renderVirtual($('#main')); }
+async function openVirtualForm(name) {
+  const byProvider = window._virtualTargets || {};
+  const v = name ? (await api('/virtual-models')).find(x => x.public_name === name) : null;
+  const targets = v ? JSON.parse(v.targets || '[]').sort((a, b) => (a.priority ?? 100) - (b.priority ?? 100)) : [{ provider_id: '', public_name: '', priority: 100 }];
+  openModal(v ? `编辑统一模型 — ${name}` : '新建统一模型', `
+    <div class="field"><label>对外名称（客户端填的 model，可与真实模型重名以"伪装"）</label>
+      <input id="vfName" value="${esc(v?.public_name || '')}" placeholder="如 gpt-4o 或 glm-5.3" ${v ? 'readonly style="opacity:.6"' : ''}></div>
+    <div class="field"><label>目标链（从上到下依次尝试，失败自动切下一个）</label>
+      <div id="vfTargets">
+      ${targets.map((t, i) => virtualTargetRow(i, t, byProvider)).join('')}
+      </div>
+      <button class="small ghost" onclick="addVirtualTargetRow()">+ 添加目标</button></div>
+    <div class="field"><label>备注</label><input id="vfNote" value="${esc(v?.note || '')}"></div>
+    <div class="row"><span class="spacer"></span><button class="ghost" onclick="closeModal()">取消</button>
+    <button onclick="saveVirtual('${esc(name || '')}')">保存</button></div>`, {});
+}
+function virtualTargetRow(i, t, byProvider) {
+  const provs = Object.keys(byProvider);
+  return `<div class="row vtRow" style="margin-bottom:6px" data-i="${i}">
+    <span class="muted mono">${i + 1}.</span>
+    <select class="vtProvider" style="width:150px" onchange="vtProviderChange(this)">
+      <option value="">选平台…</option>${provs.map(p => `<option value="${esc(p)}" ${t.provider_id === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select>
+    <select class="vtModel" style="width:220px">${(byProvider[t.provider_id] || []).map(mm => `<option value="${esc(mm)}" ${t.public_name === mm ? 'selected' : ''}>${esc(mm)}</option>`).join('') || `<option value="${esc(t.public_name || '')}">${esc(t.public_name || '（先选平台）')}</option>`}</select>
+    <button class="small ghost" onclick="this.parentElement.remove();renumberVirtualRows()">✕</button>
+  </div>`;
+}
+function vtProviderChange(sel) {
+  const row = sel.closest('.vtRow');
+  const models = (window._virtualTargets || {})[sel.value] || [];
+  row.querySelector('.vtModel').innerHTML = models.map(mm => `<option value="${esc(mm)}">${esc(mm)}</option>`).join('');
+}
+function addVirtualTargetRow() {
+  const box = $('#vfTargets');
+  const i = box.children.length;
+  box.insertAdjacentHTML('beforeend', virtualTargetRow(i, { provider_id: '', public_name: '' }, window._virtualTargets || {}));
+}
+function renumberVirtualRows() {
+  document.querySelectorAll('#vfTargets .vtRow').forEach((r, i) => r.querySelector('.muted').textContent = (i + 1) + '.');
+}
+async function saveVirtual(origName) {
+  const targets = [...document.querySelectorAll('#vfTargets .vtRow')].map((row, i) => ({
+    provider_id: row.querySelector('.vtProvider').value,
+    public_name: row.querySelector('.vtModel').value,
+    priority: (i + 1) * 10,
+  })).filter(t => t.provider_id && t.public_name);
+  const body = { public_name: $('#vfName').value.trim(), targets, note: $('#vfNote').value };
+  if (!body.public_name) return toast('请填对外名称', true);
+  if (!targets.length) return toast('至少需要一个有效目标', true);
+  try {
+    if (origName) await api('/virtual-models/' + encodeURIComponent(origName), { method: 'PUT', body });
+    else await api('/virtual-models', { method: 'POST', body });
+    closeModal(); toast('已保存'); go('virtual');
+  } catch (e) { toast(e.message, true); }
+}
+
+
 let keySearch = '';
 async function renderApikeys(m) {
   const keys = await api('/apikeys?' + (keySearch ? 'search=' + encodeURIComponent(keySearch) : ''));
@@ -402,12 +572,25 @@ function showKeyOnce(key) {
 // ---------- usage ----------
 let usageFilter = { provider_id: '', model: '', status: '', page: 1 };
 async function renderUsage(m) {
-  const [providers, usage] = await Promise.all([
+  const [providers, usage, chart] = await Promise.all([
     api('/providers'),
     api('/usage?' + new URLSearchParams(Object.fromEntries(Object.entries({ ...usageFilter }).filter(([, v]) => v)))),
+    api('/usage/chart?hours=24'),
   ]);
+  const maxReqs = Math.max(1, ...chart.series.map(s => s.reqs));
   m.innerHTML = `
   <h2>用量日志</h2>
+  <div class="card">
+    <h3 style="font-size:14px;margin-bottom:10px">最近 24 小时 <span class="muted" style="font-size:12px">柱高=请求数，红点=错误</span></h3>
+    <div style="display:flex;align-items:flex-end;gap:3px;height:110px;padding:0 4px">
+      ${chart.series.map(s => `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%" title="${s.label} · ${s.reqs} 请求 · 错误 ${s.errors} · in ${s.tin}/out ${s.tout} tok">
+        <div style="width:70%;background:${s.errors ? 'linear-gradient(180deg,var(--red),var(--accent))' : 'var(--accent)'};border-radius:3px 3px 0 0;height:${Math.round(s.reqs / maxReqs * 88)}%;min-height:${s.reqs ? '3px' : '0'}"></div>
+      </div>`).join('')}
+    </div>
+    <div style="display:flex;gap:3px;padding:4px 4px 0">
+      ${chart.series.filter((s, i) => i % 4 === 0).map(s => `<span class="muted mono" style="flex:1;font-size:10px;text-align:center">${s.label}</span>`).join('')}
+    </div>
+  </div>
   <div class="toolbar">
     <select id="uProvider" style="width:150px"><option value="">全部平台</option>${providers.map(p => `<option value="${p.id}" ${usageFilter.provider_id === p.id ? 'selected' : ''}>${esc(p.label)}</option>`).join('')}</select>
     <input id="uModel" class="searchbox" placeholder="模型名…" value="${esc(usageFilter.model)}">

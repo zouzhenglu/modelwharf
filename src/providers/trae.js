@@ -151,7 +151,8 @@ module.exports = {
       return [...models.values()];
     } catch (e) {
       logger.warn(`trae listModels failed: ${e.message} — falling back to static list`);
-      return ['glm-5.2', 'glm-5.3', 'DeepSeek-V4-Pro', 'DeepSeek-V4-Flash', 'Doubao-Seed-2.1-Pro', 'kimi-k2.6', 'qwen-3.7-plus', 'minimax-m3'].map(m => ({ upstream: m }));
+      return ['glm-5.2', 'glm-5.3', 'DeepSeek-V4-Pro', 'DeepSeek-V4-Flash', 'Doubao-Seed-2.1-Pro', 'kimi-k2.6', 'qwen-3.7-plus', 'minimax-m3']
+        .map(m => ({ upstream: m, static: true }));
     }
   },
 

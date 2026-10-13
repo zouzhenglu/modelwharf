@@ -124,7 +124,7 @@ module.exports = {
     }
   },
   _staticModels: ['glm-5.3', 'glm-5.2', 'kimi-k3', 'kimi-k2.7', 'minimax-m3', 'deepseek-v4-pro', 'deepseek-v4-flash', 'hy3', 'hy4-preview', 'auto']
-    .map(m => ({ upstream: m, free: m.startsWith('hy3') })),
+    .map(m => ({ upstream: m, free: m.startsWith('hy3'), static: true })),
 
   async checkAccount(account) {
     await ensureToken(account);

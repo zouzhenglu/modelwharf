@@ -13,14 +13,20 @@ function fingerprint(credentials) {
   return JSON.stringify(credentials);
 }
 
+// providers that share the same upstream credential pool — a fingerprint found in
+// one is considered existing in the others (qoder/qodercn both read com.qodercn.app.stable)
+const SHARED_CREDENTIAL_POOLS = [['qoder', 'qodercn']];
+
 /**
  * @param {string} providerId
  * @param {Array<{label,suggestName?,credentials?,extra?}>} found
  * @param {string[]} names  user-provided names, aligned with found
  */
 function importFound(providerId, found, names = []) {
-  const existing = db.prepare('SELECT id,name,credentials FROM accounts WHERE provider_id=?').all(providerId)
-    .map(r => ({ name: r.name, fp: fingerprint(JSON.parse(r.credentials || '{}')) }));
+  const pool = SHARED_CREDENTIAL_POOLS.find(g => g.includes(providerId)) || [providerId];
+  const existing = db.prepare(`SELECT id,name,provider_id,credentials FROM accounts WHERE provider_id IN (${pool.map(() => '?').join(',')})`)
+    .all(...pool)
+    .map(r => ({ name: r.name, provider_id: r.provider_id, fp: fingerprint(JSON.parse(r.credentials || '{}')) }));
   const results = [];
   let imported = 0;
   for (let i = 0; i < (found || []).length; i++) {
@@ -31,13 +37,19 @@ function importFound(providerId, found, names = []) {
     }
     const fp = fingerprint(f.credentials);
     const dup = existing.find(a => a.fp === fp);
-    if (dup) { results.push({ label: f.label, imported: false, reason: `已存在（账号「${dup.name}」）` }); continue; }
+    if (dup) {
+      const msg = dup.provider_id === providerId
+        ? `已存在（账号「${dup.name}」）`
+        : `同一凭证已导入为 ${dup.provider_id} 账号「${dup.name}」`;
+      results.push({ label: f.label, imported: false, reason: msg });
+      continue;
+    }
     const base = names[i] || f.suggestName || `${providerId}-local`;
     let name = base, n = 2;
     while (db.prepare('SELECT 1 FROM accounts WHERE provider_id=? AND name=?').get(providerId, name)) name = `${base}-${n++}`;
     db.prepare('INSERT INTO accounts(provider_id,name,credentials,extra) VALUES(?,?,?,?)')
       .run(providerId, name, JSON.stringify(f.credentials), JSON.stringify(f.extra || {}));
-    existing.push({ name, fp });
+    existing.push({ name, provider_id: providerId, fp });
     imported++;
     results.push({ label: f.label, imported: true, name });
   }

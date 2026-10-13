@@ -1,13 +1,21 @@
 'use strict';
 /**
- * End-to-end test: boots nothing (expects server running on :8317 with a fresh DB),
- * exercises admin API + gateway with a mock provider account (openai-compat pointed at an internal mock).
+ * End-to-end test: boots its own isolated server (fresh temp DB) on :8397,
+ * exercises admin API + gateway with a mock provider account.
+ * Run: npm test
  */
 const assert = require('assert');
 const http = require('http');
+const { spawn } = require('child_process');
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
 
-const BASE = 'http://localhost:8317';
+const PORT = 8397;
+const BASE = `http://localhost:${PORT}`;
+const TMPDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-e2e-'));
 let TOKEN = '';
+let serverProc = null;
 
 async function call(method, path, body, headers = {}) {
   const resp = await fetch(BASE + path, {
@@ -18,6 +26,18 @@ async function call(method, path, body, headers = {}) {
   const text = await resp.text();
   let json = null; try { json = JSON.parse(text); } catch {}
   return { status: resp.status, json, text };
+}
+
+async function startServer() {
+  serverProc = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'server.js')], {
+    env: { ...process.env, DSH_PORT: String(PORT), DSH_DATA_DIR: TMPDIR, DSH_ADMIN_PASSWORD: 'admin' },
+    stdio: 'ignore',
+  });
+  for (let i = 0; i < 40; i++) {
+    try { const r = await fetch(BASE + '/health'); if (r.ok) return; } catch {}
+    await new Promise(r => setTimeout(r, 250));
+  }
+  throw new Error('server failed to start');
 }
 
 async function main() {
@@ -186,9 +206,86 @@ async function main() {
     assert.ok(r2.status === 403 || r2.status === 503, `got ${r2.status}`);
   });
 
+  console.log('== batch model ops ==');
+  await t('batch disable+enable', async () => {
+    const models = await call('GET', '/admin/api/models?provider_id=openai-compat', null, auth);
+    const ids = models.json.map(m => m.id);
+    let r = await call('POST', '/admin/api/models/batch', { action: 'disable', ids }, auth);
+    assert.ok(r.json.affected >= 2);
+    r = await call('POST', '/admin/api/models/batch', { action: 'enable', ids }, auth);
+    assert.ok(r.json.affected >= 2);
+  });
+  await t('batch delete removes model', async () => {
+    const add = await call('POST', '/admin/api/models', { provider_id: 'openai-compat', upstream_model: 'mock-model-a', public_name: 'to-delete' }, auth);
+    const r = await call('POST', '/admin/api/models/batch', { action: 'delete', ids: [add.json.id] }, auth);
+    assert.equal(r.json.affected, 1);
+  });
+
+  console.log('== virtual models (统一模型 + 故障切换) ==');
+  await t('create virtual model with fallback chain', async () => {
+    // primary: a model whose only "account" is a dead endpoint; fallback: mock-a
+    const dead = await call('POST', '/admin/api/models', { provider_id: 'openai-compat', upstream_model: 'mock-model-a', public_name: 'dead-model' }, auth);
+    assert.equal(dead.status, 200);
+    // point the openai-compat account at a dead port via a second account
+    await call('POST', '/admin/api/accounts', { provider_id: 'openai-compat', name: 'dead-upstream', credentials: { baseUrl: 'http://127.0.0.1:1/v1', apiKey: 'x' } }, auth);
+    const r = await call('POST', '/admin/api/virtual-models', {
+      public_name: 'uni-test',
+      targets: [
+        { provider_id: 'openai-compat', public_name: 'dead-model', priority: 10 },
+        { provider_id: 'openai-compat', public_name: 'mock-a', priority: 20 },
+      ],
+    }, auth);
+    assert.equal(r.status, 200, r.text);
+    // widen the test key to allow the virtual names too
+    await call('PUT', '/admin/api/apikeys/' + keyId, { allowed_models: '*' }, auth);
+  });
+  await t('virtual model fails over to second target', async () => {
+    const r = await call('POST', '/v1/chat/completions', { model: 'uni-test', messages: [{ role: 'user', content: 'hi' }] }, { Authorization: 'Bearer ' + fullKey });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.choices[0].message.content, '你好，世界！');
+  });
+  await t('virtual model appears in /v1/models', async () => {
+    const r = await call('GET', '/v1/models', null, { Authorization: 'Bearer ' + fullKey });
+    assert.ok(r.json.data.find(m => m.id === 'uni-test'));
+  });
+  await t('virtual rename: external gpt-name serves mock upstream', async () => {
+    const r = await call('POST', '/admin/api/virtual-models', {
+      public_name: 'gpt-4o',
+      targets: [{ provider_id: 'openai-compat', public_name: 'mock-a', priority: 10 }],
+    }, auth);
+    assert.equal(r.status, 200);
+    const chat = await call('POST', '/v1/chat/completions', { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] }, { Authorization: 'Bearer ' + fullKey });
+    assert.equal(chat.status, 200);
+    assert.equal(chat.json.model, 'gpt-4o');
+  });
+
+  console.log('== usage chart ==');
+  await t('chart endpoint returns series', async () => {
+    const r = await call('GET', '/admin/api/usage/chart?hours=24', null, auth);
+    assert.equal(r.status, 200);
+    assert.equal(r.json.series.length, 24);
+  });
+
+  console.log('== enabled filter fix ==');
+  await t('models?enabled=0 returns only disabled', async () => {
+    // disable one model then filter
+    const models = await call('GET', '/admin/api/models?provider_id=openai-compat', null, auth);
+    const victim = models.json.find(m => m.public_name === 'mock-model-b');
+    await call('POST', `/admin/api/models/${victim.id}/toggle`, {}, auth); // disable
+    const r = await call('GET', '/admin/api/models?provider_id=openai-compat&enabled=0', null, auth);
+    assert.ok(r.json.length >= 1);
+    assert.ok(r.json.every(m => m.enabled === 0), 'filter returned enabled rows');
+    await call('POST', `/admin/api/models/${victim.id}/toggle`, {}, auth); // restore
+  });
+
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   mock.close();
+  if (serverProc) serverProc.kill();
+  try { fs.rmSync(TMPDIR, { recursive: true, force: true }); } catch { /* windows may hold the db briefly */ }
   process.exit(fail ? 1 : 0);
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+(async () => {
+  await startServer();
+  await main();
+})().catch(e => { console.error(e); if (serverProc) serverProc.kill(); process.exit(1); });
