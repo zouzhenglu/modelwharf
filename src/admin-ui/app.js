@@ -171,6 +171,7 @@ async function renderAccounts(m) {
     <span class="spacer"></span>
     <button class="ghost" onclick="syncAllInfo()">同步积分</button>
     <button class="ghost" onclick="checkAllAccounts()">一键检测</button>
+    <button class="ghost" onclick="resetOnlineModels()">恢复在线模型</button>
     <button class="ghost" onclick="importLocalAll()">扫描本机登录</button>
     <button onclick="openAccountForm()">+ 添加账号</button>
   </div>
@@ -240,6 +241,23 @@ async function syncAllInfo() {
     openModal('积分同步完成', `
       <div class="field" style="font-size:13px;line-height:2;max-height:320px;overflow:auto">${lines.map(esc).join('<br>')}</div>
       <div class="row"><span class="spacer"></span><button onclick="closeModal();go('accounts')">好的</button></div>`, {});
+  } catch (e) { toast(e.message, true); }
+}
+async function resetOnlineModels(providerId) {
+  let pid = providerId;
+  if (!pid) {
+    // pick a provider that supports it (has accounts): default to workbuddy-style detection server-side
+    pid = prompt('输入平台 ID（如 workbuddy；该功能需要平台支持在线目录）：');
+    if (!pid) return;
+  }
+  if (!confirm(`恢复「${pid}」的在线模型目录？\n该平台现有模型列表会被替换为上游实际可用的模型（自定义条目会被移除）。`)) return;
+  toast('获取在线目录中…');
+  try {
+    const r = await api(`/providers/${pid}/reset-online-models`, { method: 'POST' });
+    openModal(`✓ 已恢复在线目录 — ${pid}`, `
+      <p style="margin-bottom:8px">来源：${esc(r.source || '上游')} · 删除 ${r.deleted} 个旧条目 · 导入 ${r.added} 个在线模型</p>
+      ${r.models?.length ? `<div class="field" style="font-size:13px;line-height:2;max-height:280px;overflow:auto">${r.models.map(m => `<span class="mono">${esc(m.name)}</span>${m.vision ? ' <span class="badge blue">vision</span>' : ''}${m.ctx ? ` <span class="muted">${m.ctx >= 1000 ? (m.ctx/1000) + 'k' : m.ctx}</span>` : ''}`).join('<br>')}</div>` : ''}
+      <div class="row"><span class="spacer"></span><button onclick="closeModal();go('models')">好的</button></div>`, {});
   } catch (e) { toast(e.message, true); }
 }
 async function syncAccountModels(id) {
@@ -321,6 +339,7 @@ async function renderModels(m) {
     <span class="spacer"></span>
     <select id="mfSyncSel" style="width:170px"><option value="">同步模型：选择平台…</option><option value="__all">全部平台</option>${providerOpts}</select>
     <button class="ghost" id="mfSyncBtn">开始同步</button>
+    <button class="ghost" id="mfResetBtn" title="只拉取上游实际可用的模型目录，替换现有列表">恢复在线模型</button>
     <button onclick="openModelForm()">+ 手动添加</button>
   </div>
   <div class="toolbar" style="background:var(--panel2);border-radius:8px;padding:8px 12px">
@@ -360,6 +379,11 @@ async function renderModels(m) {
     if (!v) return toast('请先选择要同步的平台', true);
     if (v === '__all') return refreshModelsAll();
     refreshModels(v);
+  };
+  $('#mfResetBtn').onclick = () => {
+    const v = $('#mfSyncSel').value;
+    if (!v || v === '__all') return toast('请先在左侧下拉选择一个平台（恢复在线目录按平台执行）', true);
+    resetOnlineModels(v);
   };
   $('#mfCheckAll').onchange = e => { document.querySelectorAll('.mfCheck').forEach(c => c.checked = e.target.checked); };
 }

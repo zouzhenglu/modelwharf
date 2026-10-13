@@ -10,6 +10,25 @@ const { db } = require('../store');
 const accounts = require('./accounts');
 
 /**
+ * Reset a provider's model list to its online catalog (恢复在线模型):
+ * delete all existing rows for the provider, then insert exactly what the
+ * upstream reports as available. Custom rows are removed by design.
+ */
+function resetProviderModelsToOnline(plugin, onlineModels) {
+  const del = db.prepare('DELETE FROM models WHERE provider_id=?').run(plugin.id);
+  const insert = db.prepare(`INSERT INTO models(provider_id, upstream_model, public_name, enabled, is_free, multiplier, ctx_window, tags, note)
+    VALUES(?,?,?,?,?,?,?,?,?)`);
+  let added = 0;
+  for (const m of onlineModels) {
+    const upstream = m.upstream || m;
+    insert.run(plugin.id, upstream, m.publicName || upstream, 1, m.free ? 1 : 0, m.multiplier || 1, m.ctx || null,
+      m.online ? 'online' : '', m.images ? 'vision' : null);
+    added++;
+  }
+  return { deleted: del.changes, added };
+}
+
+/**
  * Sync models reported by plugin.listModels(account) into the models table.
  * live=true: models came from the upstream API (insert normally).
  * live=false: fallback/static catalog — only insert when the provider has NO models yet,
@@ -127,4 +146,4 @@ function listEnabledModelNames() {
   return db.prepare('SELECT provider_id, public_name FROM models WHERE enabled=1 ORDER BY provider_id, public_name').all();
 }
 
-module.exports = { syncProviderModels, listModels, listPublicModels, route, findModelByUpstream, recordUsage, getProviderConfig, setProviderConfig, listVirtualModels, getVirtualModel, upsertVirtualModel, deleteVirtualModel, listEnabledModelNames };
+module.exports = { syncProviderModels, listModels, listPublicModels, route, findModelByUpstream, recordUsage, getProviderConfig, setProviderConfig, listVirtualModels, getVirtualModel, upsertVirtualModel, deleteVirtualModel, listEnabledModelNames, resetProviderModelsToOnline };

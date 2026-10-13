@@ -185,6 +185,22 @@ router.post('/providers/:id/refresh-models', async (req, res) => {
   res.json({ added, errors });
 });
 
+// 恢复在线模型：只取上游实际可用的目录，替换该平台现有模型列表（自定义会被移除）
+router.post('/providers/:id/reset-online-models', async (req, res) => {
+  const plugin = registry.get(req.params.id);
+  if (!plugin) return res.status(404).json({ error: 'no such provider' });
+  const account = accountsCore.listAccounts(req.params.id).find(a => a.enabled) || accountsCore.getAccount(req.body?.accountId);
+  if (!account) return res.status(400).json({ error: '该平台没有可用账号，无法获取在线目录' });
+  if (typeof plugin.listOnlineModels !== 'function') return res.status(400).json({ error: '该平台不支持在线目录恢复' });
+  try {
+    const { models, source } = await plugin.listOnlineModels(account);
+    const r = modelsCore.resetProviderModelsToOnline(plugin, models);
+    res.json({ ok: true, source, deleted: r.deleted, added: r.added, models: models.map(m => ({ name: m.publicName, ctx: m.ctx, vision: m.images })) });
+  } catch (e) {
+    res.status(502).json({ error: `获取在线目录失败: ${e.message}` });
+  }
+});
+
 // sync models for ONE account (账号行内同步)
 router.post('/accounts/:id/refresh-models', async (req, res) => {
   const a = accountsCore.getAccount(req.params.id);

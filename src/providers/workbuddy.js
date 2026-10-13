@@ -92,6 +92,47 @@ module.exports = {
   ],
   docs: '从本机 %LOCALAPPDATA%\\CodeBuddyExtension\\Data\\Public\\auth\\*.info 读取（新版本若为 $wbEncrypted 加密信封则需手动抓包取 token）；或登录网页版后从请求头复制 Authorization。',
 
+  /**
+   * 恢复在线目录：只取 CLI 账号实际可用的模型（/v3/config → agents[cli].models，
+   * 与 WorkBuddy 客户端里看到的一致）。返回 { models, replace: true } —— replace 表示
+   * 调用方应删除该平台现有模型行后全量重建（自定义列表会被在线目录替换）。
+   * 参考 @axiaohungry/dsh-llm-workbuddy 的 modelsFromConfig。
+   */
+  async listOnlineModels(account) {
+    await ensureToken(account);
+    const r = await httpJson(`${base(account)}/v3/config`, {
+      headers: headers(account, {
+        Accept: 'application/json',
+        'User-Agent': 'CLI/unknown CodeBuddy/2.137.1',
+        'x-product': 'SaaS',
+      }),
+      timeoutMs: 15000,
+    });
+    if (r.status !== 200 || r.json?.code !== 0 && r.json?.code !== undefined && r.json?.code !== 0) {
+      throw new Error(`workbuddy config ${r.status}`);
+    }
+    const data = r.json?.data;
+    const agents = Array.isArray(data?.agents) ? data.agents : data?.agent?.agents;
+    const cli = Array.isArray(agents) ? agents.find(x => x?.name === 'cli') : undefined;
+    const allowed = Array.isArray(cli?.models) ? cli.models : [];
+    const source = Array.isArray(data?.models) ? data.models : [];
+    const byId = new Map(source.map(m => [m?.id, m]));
+    const models = [];
+    for (const id of allowed) {
+      const raw = byId.get(id);
+      if (!id) continue;
+      models.push({
+        upstream: id,
+        publicName: id.toLowerCase(),
+        free: /^hy3/.test(id),
+        ctx: raw ? (raw.maxInputTokens || raw.maxAllowedSize || null) : null,
+        images: raw?.supportsImages === true,
+        online: true,
+      });
+    }
+    return { models, replace: true, source: '/v3/config agents[cli]' };
+  },
+
   async listModels(account) {
     try {
       await ensureToken(account);
