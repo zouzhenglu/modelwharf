@@ -67,8 +67,22 @@ async function render(page) {
 }
 
 // ---------- dashboard ----------
+const VENDOR_GROUPS = [
+  { name: '逆向平台（账号池）', ids: ['trae', 'workbuddy', 'qoder', 'qodercn', 'qwen'] },
+  { name: '国际官方 API', ids: ['openai', 'anthropic', 'gemini', 'xai', 'openrouter', 'mistral', 'groq', 'together', 'perplexity', 'cerebras', 'github-copilot'] },
+  { name: '国内官方 API', ids: ['dashscope', 'zhipu', 'moonshot', 'minimax', 'doubao', 'hunyuan', 'baichuan', 'stepfun', 'siliconflow', 'internvl', 'modelscope'] },
+  { name: '本地 / 自定义', ids: ['ollama', 'openai-compat'] },
+];
+function groupProviders(providers) {
+  const byId = Object.fromEntries(providers.map(p => [p.id, p]));
+  const grouped = VENDOR_GROUPS.map(g => ({ ...g, providers: g.ids.map(id => byId[id]).filter(Boolean) }));
+  const rest = providers.filter(p => !VENDOR_GROUPS.some(g => g.ids.includes(p.id)));
+  if (rest.length) grouped.push({ name: '其他', providers: rest });
+  return grouped.filter(g => g.providers.length);
+}
 async function renderDashboard(m) {
   const [stats, providers] = await Promise.all([api('/stats'), api('/providers')]);
+  const groups = groupProviders(providers);
   m.innerHTML = `
   <h2>仪表盘</h2>
   <div class="statgrid">
@@ -78,18 +92,19 @@ async function renderDashboard(m) {
     <div class="stat"><div class="l">今日错误</div><div class="v" style="color:${stats.today.errors ? 'var(--red)' : 'var(--green)'}">${stats.today.errors}</div></div>
     <div class="stat"><div class="l">累计请求</div><div class="v">${stats.total.reqs}</div></div>
   </div>
-  <div class="card"><h2 style="font-size:14px">平台状态</h2>
+  ${groups.map(g => `
+  <div class="card"><h2 style="font-size:14px">${esc(g.name)} <span class="muted">(${g.providers.length})</span></h2>
     <table><tr><th>平台</th><th>状态</th><th>账号</th><th>操作</th></tr>
-    ${providers.map(p => `<tr>
-      <td><b>${esc(p.label)}</b> <span class="muted mono">${esc(p.id)}</span> ${p.enabled ? '' : badge('已禁用','gray')}</td>
+    ${g.providers.map(p => `<tr>
+      <td><b>${esc(p.label)}</b> <span class="muted mono">${esc(p.id)}</span></td>
       <td>${p.enabled ? badge('启用','green') : badge('停用','gray')}</td>
       <td>${p.account_count}</td>
       <td><button class="small ghost" onclick="refreshModels('${p.id}')">同步模型</button>
           ${p.importLocal ? `<button class="small ghost" onclick="importLocal('${p.id}')">导入本机登录</button>` : ''}</td>
     </tr>`).join('')}
     </table>
-    <p class="muted" style="margin-top:8px">模型为空时：先添加账号 → 点「同步模型」从上游拉取。</p>
-  </div>
+  </div>`).join('')}
+  <p class="muted" style="margin:8px 0 16px">模型为空时：先添加账号 → 点「同步模型」从上游拉取。官方 API 平台添加 key 后模型列表自动带出。</p>
   <div class="card"><h2 style="font-size:14px">今日模型 Top</h2>
     ${stats.byModel.length ? `<table><tr><th>模型</th><th>请求</th><th>输入 tok</th><th>输出 tok</th></tr>
     ${stats.byModel.map(r => `<tr><td class="mono">${esc(r.public_model)}</td><td>${r.reqs}</td><td>${r.tin}</td><td>${r.tout}</td></tr>`).join('')}</table>` : '<p class="muted">暂无数据</p>'}
