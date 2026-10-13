@@ -92,13 +92,8 @@ module.exports = {
   ],
   docs: '从本机 %LOCALAPPDATA%\\CodeBuddyExtension\\Data\\Public\\auth\\*.info 读取（新版本若为 $wbEncrypted 加密信封则需手动抓包取 token）；或登录网页版后从请求头复制 Authorization。',
 
-  /**
-   * 恢复在线目录：只取 CLI 账号实际可用的模型（/v3/config → agents[cli].models，
-   * 与 WorkBuddy 客户端里看到的一致）。返回 { models, replace: true } —— replace 表示
-   * 调用方应删除该平台现有模型行后全量重建（自定义列表会被在线目录替换）。
-   * 参考 @axiaohungry/dsh-llm-workbuddy 的 modelsFromConfig。
-   */
-  async listOnlineModels(account) {
+  /** parse /v3/config into the true online catalog: rates, tags, ctx, vision */
+  async fetchConfigCatalog(account) {
     await ensureToken(account);
     const r = await httpJson(`${base(account)}/v3/config`, {
       headers: headers(account, {
@@ -108,9 +103,7 @@ module.exports = {
       }),
       timeoutMs: 15000,
     });
-    if (r.status !== 200 || r.json?.code !== 0 && r.json?.code !== undefined && r.json?.code !== 0) {
-      throw new Error(`workbuddy config ${r.status}`);
-    }
+    if (r.status !== 200) throw new Error(`workbuddy config ${r.status}`);
     const data = r.json?.data;
     const agents = Array.isArray(data?.agents) ? data.agents : data?.agent?.agents;
     const cli = Array.isArray(agents) ? agents.find(x => x?.name === 'cli') : undefined;
@@ -121,19 +114,49 @@ module.exports = {
     for (const id of allowed) {
       const raw = byId.get(id);
       if (!id) continue;
+      const rate = raw ? (parseFloat(String(raw.credits || '').replace(/[^0-9.]/g, '')) || null) : null;
+      const tags = [];
+      if (raw?.supportsImages) tags.push('vision');
+      if (raw?.supportsReasoning || raw?.onlyReasoning) tags.push('thinking');
+      if (raw?.supportsToolCall) tags.push('tools');
+      if (raw?.onlyReasoning) tags.push('reasoning-only');
+      const free = rate == null || rate === 0; // hy3 / image models have no rate = free
+      if (free) tags.push('free');
+      if (raw?.reasoning?.effort) tags.push(`effort:${raw.reasoning.effort}`);
       models.push({
         upstream: id,
         publicName: id.toLowerCase(),
-        free: /^hy3/.test(id),
+        free,
+        multiplier: free ? 0 : rate,
         ctx: raw ? (raw.maxInputTokens || raw.maxAllowedSize || null) : null,
+        maxOutput: raw?.maxOutputTokens || null,
         images: raw?.supportsImages === true,
+        reasoning: !!(raw?.supportsReasoning || raw?.onlyReasoning),
+        tags,
         online: true,
       });
     }
     return { models, replace: true, source: '/v3/config agents[cli]' };
   },
 
+  /**
+   * 恢复在线目录：只取 CLI 账号实际可用的模型（/v3/config → agents[cli].models，
+   * 与 WorkBuddy 客户端里看到的一致，含倍率/标签）。返回 replace: true 表示
+   * 调用方应删除该平台现有模型行后全量重建。
+   */
+  async listOnlineModels(account) {
+    return this.fetchConfigCatalog(account);
+  },
+
   async listModels(account) {
+    // normal sync uses the same true catalog (with rates/tags) when reachable;
+    // falls back to the plain id list (static-flagged) otherwise
+    try {
+      const cat = await this.fetchConfigCatalog(account);
+      return cat.models;
+    } catch (e) {
+      logger.warn(`workbuddy config catalog failed: ${e.message}`);
+    }
     try {
       await ensureToken(account);
       const r = await httpJson(`${base(account)}/console/enterprises/personal/models`, {
@@ -158,7 +181,7 @@ module.exports = {
         const cliModels = r2.json?.data?.agents?.cli?.models || [];
         for (const m of cliModels) { const n = m.model || m.name || m; if (n && !seen.has(n)) { seen.add(n); out.push({ upstream: n }); } }
       }
-      return out.length ? out : this._staticModels;
+      return out.length ? out.map(m => ({ ...m, static: true })) : this._staticModels;
     } catch (e) {
       logger.warn(`workbuddy listModels failed: ${e.message}`);
       return this._staticModels;

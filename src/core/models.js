@@ -16,13 +16,13 @@ const accounts = require('./accounts');
  */
 function resetProviderModelsToOnline(plugin, onlineModels) {
   const del = db.prepare('DELETE FROM models WHERE provider_id=?').run(plugin.id);
-  const insert = db.prepare(`INSERT INTO models(provider_id, upstream_model, public_name, enabled, is_free, multiplier, ctx_window, tags, note)
-    VALUES(?,?,?,?,?,?,?,?,?)`);
+  const insert = db.prepare(`INSERT INTO models(provider_id, upstream_model, public_name, enabled, is_free, multiplier, ctx_window, max_output, tags, note)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`);
   let added = 0;
   for (const m of onlineModels) {
     const upstream = m.upstream || m;
-    insert.run(plugin.id, upstream, m.publicName || upstream, 1, m.free ? 1 : 0, m.multiplier || 1, m.ctx || null,
-      m.online ? 'online' : '', m.images ? 'vision' : null);
+    insert.run(plugin.id, upstream, m.publicName || upstream, 1, m.free ? 1 : 0, m.multiplier ?? 1, m.ctx || null, m.maxOutput || null,
+      (m.tags || []).join(',') || (m.online ? 'online' : ''), m.vision ? 'vision' : (m.images ? 'vision' : null));
     added++;
   }
   return { deleted: del.changes, added };
@@ -40,14 +40,21 @@ function syncProviderModels(plugin, account, upstreamModels, { live = true } = {
     const have = db.prepare('SELECT COUNT(*) c FROM models WHERE provider_id=?').get(plugin.id).c;
     if (have > 0) return 0;
   }
-  const insert = db.prepare(`INSERT OR IGNORE INTO models(provider_id, upstream_model, public_name, enabled, is_free, multiplier, ctx_window)
-    VALUES(?,?,?,?,?,?,?)`);
+  const insert = db.prepare(`INSERT OR IGNORE INTO models(provider_id, upstream_model, public_name, enabled, is_free, multiplier, ctx_window, max_output, tags, note)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`);
+  const updateRate = db.prepare('UPDATE models SET multiplier=?, is_free=?, ctx_window=COALESCE(?,ctx_window), max_output=COALESCE(?,max_output), tags=CASE WHEN ? != \'\' THEN ? ELSE tags END WHERE provider_id=? AND upstream_model=?');
   let added = 0;
   for (const m of upstreamModels) {
     const upstream = m.upstream || m;
     const free = m.free ? 1 : 0;
-    const r = insert.run(plugin.id, upstream, m.publicName || upstream, autoDisable ? 0 : 1, free, m.multiplier || 1, m.ctx || null);
+    const r = insert.run(plugin.id, upstream, m.publicName || upstream, autoDisable ? 0 : 1, free, m.multiplier ?? 1, m.ctx || null, m.maxOutput || null,
+      (m.tags || []).join(','), m.vision || m.images ? 'vision' : null);
     if (r.changes > 0) added++;
+    // enrich existing rows with rate/tags from live catalogs
+    if (live && (m.multiplier != null || m.tags?.length || m.ctx || m.maxOutput)) {
+      updateRate.run(m.multiplier ?? 1, free, m.ctx || null, m.maxOutput || null,
+        (m.tags || []).join(','), (m.tags || []).join(','), plugin.id, upstream);
+    }
     if (free) db.prepare('UPDATE models SET is_free=1 WHERE provider_id=? AND upstream_model=?').run(plugin.id, upstream);
   }
   return added;

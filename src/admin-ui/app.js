@@ -222,23 +222,27 @@ async function checkAccount(id) {
   } catch (e) { toast(e.message, true); }
 }
 async function checkAllAccounts() {
-  toast('正在检测全部账号…');
+  toast('正在深度检测全部账号（含真实对话探测，约 10-60 秒）…');
   try {
     const r = await api('/accounts/check-all', { method: 'POST' });
-    const ok = r.results.filter(x => x.ok === true).length;
-    const bad = r.results.filter(x => x.ok === false);
-    const lines = r.results.map(x => `${x.ok === true ? '✓' : x.ok === false ? '✗' : '·'} [${x.provider_id}] ${x.name}: ${x.message || 'ok'}`);
-    openModal(`检测完成：${ok}/${r.checked} 有效`, `
+    const ok = r.results.filter(x => x.ok === true && x.probe?.ok !== false).length;
+    const lines = r.results.map(x => {
+      const probe = x.probe == null ? '' : x.probe.ok ? ` · 探测✓ (${x.probe.model})` : ` · 探测✗ ${x.probe.error || ''}`;
+      return `${x.ok === true ? (x.probe?.ok === false ? '△' : '✓') : x.ok === false ? '✗' : '·'} [${x.provider_id}] ${x.name}: ${x.message || 'ok'}${probe}`;
+    });
+    openModal(`深度检测完成：${ok}/${r.checked} 全链路可用`, `
+      <p class="muted" style="margin-bottom:8px;font-size:12px">✓=档案+探测都通过　△=档案有效但对话探测失败（已进入冷却）　✗=档案接口失败</p>
       <div class="field" style="font-size:13px;line-height:2;max-height:320px;overflow:auto">${lines.map(esc).join('<br>')}</div>
       <div class="row"><span class="spacer"></span><button onclick="closeModal();go('accounts')">好的</button></div>`, {});
   } catch (e) { toast(e.message, true); }
 }
 async function syncAllInfo() {
-  toast('正在同步全部账号积分…');
+  toast('正在同步全部账号积分与档案…');
   try {
     const r = await api('/accounts/sync-info', { method: 'POST' });
     const lines = r.results.map(x => `${x.ok === false ? '✗' : '✓'} [${x.provider_id}] ${x.name}: ${x.message || '-'}${x.credits != null ? '（积分 ' + x.credits + '）' : ''}`);
     openModal('积分同步完成', `
+      <p class="muted" style="margin-bottom:8px;font-size:12px">只刷新积分/档案信息，不改变账号状态、不做对话探测。</p>
       <div class="field" style="font-size:13px;line-height:2;max-height:320px;overflow:auto">${lines.map(esc).join('<br>')}</div>
       <div class="row"><span class="spacer"></span><button onclick="closeModal();go('accounts')">好的</button></div>`, {});
   } catch (e) { toast(e.message, true); }
@@ -285,7 +289,7 @@ function mFormAccount(acct, providers, p) {
     ${supportsOAuth ? `
     <div class="card" style="background:var(--panel2);padding:12px 16px;margin-bottom:12px">
       <b style="font-size:13px">推荐：网页授权登录</b>
-      <p class="muted" style="font-size:12px;margin:4px 0 8px">点击后自动打开 ${esc(p.label)} 授权页，登录成功后账号自动添加（无需手动填 token）。</p>
+      <p class="muted" style="font-size:12px;margin:4px 0 8px">点击后自动打开 ${esc(p.label)} 授权页，登录成功后账号自动添加（无需手动填 token）。<b>轮询最长 10 分钟</b>：超时或你点取消即停止，服务器端不留任何后台轮询——登录成功与否都由这次点击驱动。</p>
       <button id="afOAuthBtn" onclick="startOAuthLogin('${p.id}')">🌐 打开授权页面登录</button>
       <span id="afOAuthStatus" class="muted" style="margin-left:10px;font-size:12px"></span>
     </div>` : ''}

@@ -117,20 +117,51 @@ router.post('/accounts/:id/check', async (req, res) => {
 });
 
 // check ALL accounts at once (一键检测)：each account checked concurrently, results per account
+// check-all (一键检测)：深度验证——除了调 checkAccount（积分/档案），还会做一次轻量
+// 真实对话探测（探测模型取该平台第一个启用模型），验证整条链路真的能出字；
+// 并按结果流转账号状态（失效/冷却/恢复 active）。这是它和「同步积分」的本质区别。
 router.post('/accounts/check-all', async (req, res) => {
   const all = accountsCore.listAccounts(null, { includeDisabled: false });
+  const engine = require('../core/engine');
   const results = await Promise.allSettled(all.map(async (a) => {
     const plugin = registry.get(a.provider_id);
-    if (!plugin?.checkAccount) return { id: a.id, provider_id: a.provider_id, name: a.name, ok: null, message: 'no checker' };
+    if (!plugin?.checkAccount) return { id: a.id, provider_id: a.provider_id, name: a.name, ok: null, message: 'no checker', probe: null };
     try {
       const r = await plugin.checkAccount(a);
       if (r.extra) db.prepare('UPDATE accounts SET extra=? WHERE id=?').run(JSON.stringify({ ...a.extra, ...r.extra }), a.id);
       if (r.ok === true) accountsCore.setAccountStatus(a.id, 'active');
       else if (r.ok === false) accountsCore.setAccountStatus(a.id, r.status || 'invalid', r.message);
-      return { id: a.id, provider_id: a.provider_id, name: a.name, ok: r.ok, message: r.message || '' };
+      // link probe: send a 1-token chat through THIS account's provider to prove the full chain
+      let probe = null;
+      if (r.ok === true) {
+        const pm = db.prepare(`SELECT public_name FROM models WHERE provider_id=? AND enabled=1 ORDER BY (multiplier=0) DESC, multiplier ASC LIMIT 1`).get(a.provider_id);
+        if (pm) {
+          try {
+            const onEvent = () => true;
+            const savedPick = accountsCore.pickAccount;
+            // force this specific account for the probe
+            accountsCore.pickAccount = () => a;
+            try {
+              await engine.runSingle({
+                messages: [{ role: 'user', text: 'hi' }], params: { max_tokens: 8 },
+                source: 'probe', apikeyId: null, publicModel: pm.public_name,
+              }, db.prepare('SELECT * FROM models WHERE provider_id=? AND public_name=?').get(a.provider_id, pm.public_name),
+              onEvent, null, Date.now(), pm.public_name);
+              probe = { ok: true, model: pm.public_name };
+            } finally {
+              accountsCore.pickAccount = savedPick;
+            }
+          } catch (pe) {
+            probe = { ok: false, error: String(pe.message || pe).slice(0, 120) };
+            // probe failure means the chain is broken even if the profile endpoint worked
+            accountsCore.setAccountStatus(a.id, 'cooling', `探测失败: ${String(pe.message || pe).slice(0, 80)}`);
+          }
+        }
+      }
+      return { id: a.id, provider_id: a.provider_id, name: a.name, ok: r.ok, message: r.message || '', probe };
     } catch (e) {
       accountsCore.setAccountStatus(a.id, 'invalid', e.message);
-      return { id: a.id, provider_id: a.provider_id, name: a.name, ok: false, message: e.message };
+      return { id: a.id, provider_id: a.provider_id, name: a.name, ok: false, message: e.message, probe: null };
     }
   }));
   res.json({ checked: results.length, results: results.map(r => r.value) });
