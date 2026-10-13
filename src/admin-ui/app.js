@@ -57,6 +57,7 @@ function go(page) {
 async function render(page) {
   const m = $('#main');
   if (page === 'dashboard') return renderDashboard(m);
+  if (page === 'platforms') return renderPlatforms(m);
   if (page === 'accounts') return renderAccounts(m);
   if (page === 'models') return renderModels(m);
   if (page === 'virtual') return renderVirtual(m);
@@ -65,6 +66,34 @@ async function render(page) {
   if (page === 'mcp') return renderMcp(m);
   if (page === 'playground') return renderPlayground(m);
   if (page === 'settings') return renderSettings(m);
+}
+
+// ---------- platforms page (平台列表：每平台 获取全部模型/恢复在线模型) ----------
+async function renderPlatforms(m) {
+  const providers = await api('/providers');
+  const groups = groupProviders(providers);
+  const supportsOnline = p => ['workbuddy', 'trae', 'qwen'].includes(p.id);
+  m.innerHTML = `
+  <h2>平台 <span class="muted">(${providers.length})</span></h2>
+  <p class="muted" style="margin-bottom:12px">
+    <b>获取全部模型</b>：把上游报给该账号的模型同步进来（增量补充，最全）。　
+    <b>恢复在线模型</b>：只保留上游<b>当前实际可用</b>的目录（与官方客户端一致，会替换现有列表；trae/workbuddy/qwen 支持）。
+  </p>
+  ${groups.map(g => `
+  <div class="card"><h2 style="font-size:14px">${esc(g.name)} <span class="muted">(${g.providers.length})</span></h2>
+    <table><tr><th>平台</th><th>状态</th><th>账号</th><th>模型</th><th>操作</th></tr>
+    ${g.providers.map(p => `<tr>
+      <td><b>${esc(p.label)}</b> <span class="muted mono">${esc(p.id)}</span></td>
+      <td>${p.enabled ? badge('启用','green') : badge('停用','gray')}</td>
+      <td>${p.account_count}</td>
+      <td class="muted">${p.model_count ?? '-'}</td>
+      <td>
+        <button class="small ghost" onclick="refreshModels('${p.id}')">获取全部模型</button>
+        ${supportsOnline(p) ? `<button class="small ghost" onclick="resetOnlineModels('${p.id}')">恢复在线模型</button>` : ''}
+      </td>
+    </tr>`).join('')}
+    </table>
+  </div>`).join('')}`;
 }
 
 // ---------- dashboard ----------
@@ -82,34 +111,47 @@ function groupProviders(providers) {
   return grouped.filter(g => g.providers.length);
 }
 async function renderDashboard(m) {
-  const [stats, providers] = await Promise.all([api('/stats'), api('/providers')]);
-  const groups = groupProviders(providers);
+  const [stats, chart] = await Promise.all([api('/stats'), api('/usage/chart?hours=24')]);
+  const maxReqs = Math.max(1, ...chart.series.map(s => s.reqs));
   m.innerHTML = `
   <h2>仪表盘</h2>
   <div class="statgrid">
-    <div class="stat"><div class="l">今日请求</div><div class="v">${stats.today.reqs}</div></div>
-    <div class="stat"><div class="l">今日 Token</div><div class="v">${(stats.today.tin/1000).toFixed(1)}k / ${(stats.today.tout/1000).toFixed(1)}k</div></div>
+    <div class="stat"><div class="l">今日请求</div><div class="v">${stats.today.reqs}</div><div class="l" style="color:${stats.today.errors ? 'var(--red)' : 'var(--green)'}">失败 ${stats.today.errors}</div></div>
+    <div class="stat"><div class="l">今日 Token</div><div class="v">${(stats.today.tin/1000).toFixed(1)}k / ${(stats.today.tout/1000).toFixed(1)}k</div><div class="l">输入 / 输出</div></div>
     <div class="stat"><div class="l">今日积分消耗</div><div class="v">${stats.today.credits.toFixed(2)}</div></div>
-    <div class="stat"><div class="l">今日错误</div><div class="v" style="color:${stats.today.errors ? 'var(--red)' : 'var(--green)'}">${stats.today.errors}</div></div>
-    <div class="stat"><div class="l">累计请求</div><div class="v">${stats.total.reqs}</div></div>
+    <div class="stat"><div class="l">累计请求</div><div class="v">${stats.total.reqs}</div><div class="l">累计积分 ${stats.total.credits.toFixed(1)}</div></div>
   </div>
-  ${groups.map(g => `
-  <div class="card"><h2 style="font-size:14px">${esc(g.name)} <span class="muted">(${g.providers.length})</span></h2>
-    <table><tr><th>平台</th><th>状态</th><th>账号</th><th>操作</th></tr>
-    ${g.providers.map(p => `<tr>
-      <td><b>${esc(p.label)}</b> <span class="muted mono">${esc(p.id)}</span></td>
-      <td>${p.enabled ? badge('启用','green') : badge('停用','gray')}</td>
-      <td>${p.account_count}</td>
-      <td><button class="small ghost" onclick="refreshModels('${p.id}')">同步模型</button>
-          ${p.importLocal ? `<button class="small ghost" onclick="importLocal('${p.id}')">导入本机登录</button>` : ''}</td>
-    </tr>`).join('')}
-    </table>
-  </div>`).join('')}
-  <p class="muted" style="margin:8px 0 16px">模型为空时：先添加账号 → 点「同步模型」从上游拉取。官方 API 平台添加 key 后模型列表自动带出。</p>
-  <div class="card"><h2 style="font-size:14px">今日模型 Top</h2>
-    ${stats.byModel.length ? `<table><tr><th>模型</th><th>请求</th><th>输入 tok</th><th>输出 tok</th></tr>
-    ${stats.byModel.map(r => `<tr><td class="mono">${esc(r.public_model)}</td><td>${r.reqs}</td><td>${r.tin}</td><td>${r.tout}</td></tr>`).join('')}</table>` : '<p class="muted">暂无数据</p>'}
+  <div class="card">
+    <div class="toolbar" style="margin-bottom:8px"><h3 style="font-size:14px">最近 24 小时趋势</h3><span class="spacer"></span>
+      <a href="javascript:go('usage')" style="font-size:13px">查看完整用量 →</a></div>
+    <div style="display:flex;align-items:flex-end;gap:3px;height:110px;padding:0 4px">
+      ${chart.series.map(s => `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%" title="${s.label} · ${s.reqs} 请求 · 失败 ${s.errors}">
+        <div style="width:70%;background:${s.errors ? 'linear-gradient(180deg,var(--red),var(--accent))' : 'var(--accent)'};border-radius:3px 3px 0 0;height:${Math.round(s.reqs / maxReqs * 92)}%;min-height:${s.reqs ? '3px' : '0'}"></div>
+      </div>`).join('')}
+    </div>
+    <div style="display:flex;gap:3px;padding:4px 4px 0">
+      ${chart.series.filter((s, i) => i % Math.ceil(chart.series.length / 12) === 0).map(s => `<span class="muted mono" style="flex:1;font-size:10px;text-align:center">${s.label}</span>`).join('')}
+    </div>
+  </div>
+  <div style="display:flex;gap:16px;flex-wrap:wrap">
+    <div class="card" style="flex:1;min-width:300px"><h2 style="font-size:14px">账号健康 <a href="javascript:go('accounts')" style="font-size:12px;font-weight:400">管理 →</a></h2>
+      <div id="dashAccounts" class="muted">加载中…</div>
+    </div>
+    <div class="card" style="flex:1;min-width:300px"><h2 style="font-size:14px">今日模型 Top <a href="javascript:go('usage')" style="font-size:12px;font-weight:400">全部 →</a></h2>
+      ${stats.byModel.length ? `<table style="font-size:13px"><tr><th>模型</th><th>请求</th><th>tok</th></tr>
+      ${stats.byModel.slice(0, 8).map(r => `<tr><td class="mono">${esc(r.public_model)}</td><td>${r.reqs}</td><td class="muted">${((r.tin+r.tout)/1000).toFixed(1)}k</td></tr>`).join('')}</table>` : '<p class="muted">暂无数据</p>'}
+    </div>
   </div>`;
+  api('/accounts').then(accounts => {
+    const groups = {};
+    for (const a of accounts) {
+      (groups[a.provider_id] = groups[a.provider_id] || []).push(a);
+    }
+    $('#dashAccounts').innerHTML = Object.entries(groups).map(([pid, list]) => `
+      <div style="margin-bottom:6px"><b class="mono" style="font-size:12.5px">${esc(pid)}</b>
+      ${list.map(a => `<span title="${esc(a.status_message || '')}" style="margin-left:6px">${statusBadge(a.status)} <span style="font-size:12.5px">${esc(a.name)}</span></span>`).join('')}
+      </div>`).join('') || '暂无账号';
+  }).catch(() => {});
 }
 
 async function importLocalAll() {
@@ -163,7 +205,9 @@ async function renderAccounts(m) {
   m.innerHTML = `
   <h2>平台账号 <span class="muted">(${accounts.length})</span></h2>
   <div class="toolbar">
-    <select id="fProvider" style="width:150px"><option value="">全部平台</option>${providers.map(p => `<option value="${p.id}" ${acctFilter.provider_id === p.id ? 'selected' : ''}>${esc(p.label)}</option>`).join('')}</select>
+    <select id="fProvider" style="width:170px"><option value="">全部平台</option>
+      ${groupProviders(providers).filter(g => g.name !== '其他').map(g => `<optgroup label="${esc(g.name)}">${g.providers.map(p => `<option value="${p.id}" ${acctFilter.provider_id === p.id ? 'selected' : ''}>${esc(p.label)}</option>`).join('')}</optgroup>`).join('')}
+    </select>
     <input id="fSearch" class="searchbox" placeholder="搜索名称/信息…" value="${esc(acctFilter.search)}">
     <select id="fStatus" style="width:110px"><option value="">全部状态</option>
       ${['active','cooling','invalid','banned'].map(s => `<option ${acctFilter.status === s ? 'selected' : ''} value="${s}">${s}</option>`).join('')}</select>
@@ -171,7 +215,6 @@ async function renderAccounts(m) {
     <span class="spacer"></span>
     <button class="ghost" onclick="syncAllInfo()">同步积分</button>
     <button class="ghost" onclick="checkAllAccounts()">一键检测</button>
-    <button class="ghost" onclick="resetOnlineModels()">恢复在线模型</button>
     <button class="ghost" onclick="importLocalAll()">扫描本机登录</button>
     <button onclick="openAccountForm()">+ 添加账号</button>
   </div>
@@ -185,9 +228,10 @@ async function renderAccounts(m) {
     <td>${a.priority}</td><td>${a.max_concurrency}</td>
     <td class="muted">${fmtTime(a.last_used_at)}</td>
     <td>${switchHtml(a.enabled, `toggleAccount(${a.id}, ${a.enabled ? 0 : 1})`)}</td>
-    <td>
-      <button class="small ghost" onclick="checkAccount(${a.id})">检查</button>
-      <button class="small ghost" onclick="syncAccountModels(${a.id})">同步模型</button>
+    <td style="white-space:nowrap">
+      <button class="small ghost" onclick="checkAccount(${a.id})">检测</button>
+      <button class="small ghost" title="上游报给该账号的全部模型，增量补充" onclick="syncAccountModels(${a.id})">获取全部模型</button>
+      <button class="small ghost" title="只保留上游当前实际可用的模型（trae/workbuddy/qwen）" onclick="resetOnlineAccount(${a.id})">恢复在线</button>
       <button class="small ghost" onclick="openAccountForm(${a.id})">编辑</button>
       <button class="small danger" onclick="delAccount(${a.id})">删</button>
     </td></tr>`).join('')}
@@ -271,6 +315,15 @@ async function syncAccountModels(id) {
     toast(`✓ 新增 ${r.added} 个（上游共 ${r.total} 个）`);
     renderAccounts($('#main'));
   } catch (e) { toast('同步失败: ' + e.message, true); }
+}
+async function resetOnlineAccount(id) {
+  if (!confirm('恢复在线模型？\n该平台现有模型列表会被替换为上游当前实际可用的模型（自定义条目会被移除）。')) return;
+  toast('获取在线目录中…');
+  try {
+    const r = await api(`/accounts/${id}/reset-online-models`, { method: 'POST' });
+    toast(`✓ 已恢复：删除 ${r.deleted} 个 → 导入 ${r.added} 个在线模型`);
+    renderAccounts($('#main'));
+  } catch (e) { toast(e.message, true); }
 }
 
 async function openAccountForm(id) {
@@ -703,7 +756,7 @@ async function renderUsage(m) {
     api('/usage/chart?hours=' + usageChartHours),
   ]);
   const maxReqs = Math.max(1, ...chart.series.map(s => s.reqs));
-  const maxDim = Math.max(1, ...(chart.byModel[0]?.reqs || 1), ...(chart.byProvider[0]?.reqs || 1));
+  const maxDim = Math.max(1, chart.byModel[0]?.reqs || 1, chart.byProvider[0]?.reqs || 1);
   const bar = (v, total, color = 'var(--accent)') => `<div style="background:${color};height:8px;border-radius:4px;width:${Math.round(v / Math.max(1, total) * 100)}%"></div>`;
   const dimTable = (title, rows, cols) => !rows.length ? '' : `
     <div style="flex:1;min-width:260px">

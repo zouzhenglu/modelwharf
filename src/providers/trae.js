@@ -188,7 +188,7 @@ module.exports = {
       if (u.status === 200 && u.json) {
         const info = u.json.Result || u.json.data || u.json;
         uid = info.UserID != null ? String(info.UserID) : (uid || info.userID || null);
-        uname = info.UserName || info.userName || info.NickName || null;
+        uname = info.ScreenName || info.UserName || info.userName || info.NickName || info.nickname || null;
       }
     } catch { /* identity is best-effort */ }
     // JWT claims fallback for username/email

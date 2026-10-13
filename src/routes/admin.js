@@ -48,7 +48,9 @@ router.get('/providers', (req, res) => {
   const rows = db.prepare('SELECT * FROM providers').all();
   res.json(rows.map(r => {
     const p = registry.get(r.id);
-    return { ...r, config: JSON.parse(r.config || '{}'), label: p?.label || r.id, homepage: p?.homepage, credFields: p?.credFields || [], docs: p?.docs, account_count: db.prepare('SELECT COUNT(*) c FROM accounts WHERE provider_id=?').get(r.id).c };
+    return { ...r, config: JSON.parse(r.config || '{}'), label: p?.label || r.id, homepage: p?.homepage, credFields: p?.credFields || [], docs: p?.docs,
+      account_count: db.prepare('SELECT COUNT(*) c FROM accounts WHERE provider_id=?').get(r.id).c,
+      model_count: db.prepare('SELECT COUNT(*) c FROM models WHERE provider_id=? AND enabled=1').get(r.id).c };
   }));
 });
 router.put('/providers/:id', (req, res) => {
@@ -131,26 +133,19 @@ router.post('/accounts/check-all', async (req, res) => {
       if (r.extra) db.prepare('UPDATE accounts SET extra=? WHERE id=?').run(JSON.stringify({ ...a.extra, ...r.extra }), a.id);
       if (r.ok === true) accountsCore.setAccountStatus(a.id, 'active');
       else if (r.ok === false) accountsCore.setAccountStatus(a.id, r.status || 'invalid', r.message);
-      // link probe: send a 1-token chat through THIS account's provider to prove the full chain
+      // link probe: send a 1-token chat forced through THIS account to prove the full chain
       let probe = null;
       if (r.ok === true) {
         const pm = db.prepare(`SELECT public_name FROM models WHERE provider_id=? AND enabled=1 ORDER BY (multiplier=0) DESC, multiplier ASC LIMIT 1`).get(a.provider_id);
         if (pm) {
           try {
-            const onEvent = () => true;
-            const savedPick = accountsCore.pickAccount;
-            // force this specific account for the probe
-            accountsCore.pickAccount = () => a;
-            try {
-              await engine.runSingle({
-                messages: [{ role: 'user', text: 'hi' }], params: { max_tokens: 8 },
-                source: 'probe', apikeyId: null, publicModel: pm.public_name,
-              }, db.prepare('SELECT * FROM models WHERE provider_id=? AND public_name=?').get(a.provider_id, pm.public_name),
-              onEvent, null, Date.now(), pm.public_name);
-              probe = { ok: true, model: pm.public_name };
-            } finally {
-              accountsCore.pickAccount = savedPick;
-            }
+            await engine.runSingle({
+              messages: [{ role: 'user', text: 'hi' }], params: { max_tokens: 8 },
+              source: 'probe', apikeyId: null, publicModel: pm.public_name,
+              forceAccount: a,
+            }, db.prepare('SELECT * FROM models WHERE provider_id=? AND public_name=?').get(a.provider_id, pm.public_name),
+              () => true, null, Date.now(), pm.public_name);
+            probe = { ok: true, model: pm.public_name };
           } catch (pe) {
             probe = { ok: false, error: String(pe.message || pe).slice(0, 120) };
             // probe failure means the chain is broken even if the profile endpoint worked
@@ -216,7 +211,21 @@ router.post('/providers/:id/refresh-models', async (req, res) => {
   res.json({ added, errors });
 });
 
-// 恢复在线模型：只取上游实际可用的目录，替换该平台现有模型列表（自定义会被移除）
+// 恢复在线模型（按账号）：只取该账号上游实际可用的目录，替换该平台模型列表
+router.post('/accounts/:id/reset-online-models', async (req, res) => {
+  const a = accountsCore.getAccount(req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  const plugin = registry.get(a.provider_id);
+  if (typeof plugin?.listOnlineModels !== 'function') return res.status(400).json({ error: '该平台不支持在线目录恢复' });
+  try {
+    const { models, source } = await plugin.listOnlineModels(a);
+    const r = modelsCore.resetProviderModelsToOnline(plugin, models);
+    res.json({ ok: true, source, deleted: r.deleted, added: r.added });
+  } catch (e) { res.status(502).json({ error: `获取在线目录失败: ${e.message}` }); }
+});
+
+// 恢复在线模型（按平台，取第一个可用账号）
+// 恢复在线模型（按平台，取第一个可用账号）
 router.post('/providers/:id/reset-online-models', async (req, res) => {
   const plugin = registry.get(req.params.id);
   if (!plugin) return res.status(404).json({ error: 'no such provider' });

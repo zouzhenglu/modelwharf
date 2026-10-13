@@ -68,7 +68,10 @@ async function runChat(opts, onEvent, onUsage) {
 
 /** execute against one concrete model row */
 async function runSingle(opts, model, onEvent, onUsage, started, usagePublicModel) {
-  const account = accounts.pickAccount(model.provider_id);
+  // forceAccount (probe path) bypasses pool routing; normal path uses the pool
+  const account = opts.forceAccount && opts.forceAccount.provider_id === model.provider_id
+    ? opts.forceAccount
+    : accounts.pickAccount(model.provider_id);
   if (!account) {
     throw new UpstreamError(503, `no healthy account available for provider '${model.provider_id}' (all cooling/invalid/disabled)`);
   }
@@ -130,4 +133,4 @@ async function runSingle(opts, model, onEvent, onUsage, started, usagePublicMode
   }
 }
 
-module.exports = { runChat, UpstreamError };
+module.exports = { runChat, runSingle, UpstreamError };
