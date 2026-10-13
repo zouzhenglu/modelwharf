@@ -106,6 +106,19 @@ module.exports = {
       .map(m => ({ upstream: m, free: true }));
   },
 
+  /**
+   * 恢复在线目录：/api/models 就是 chat.qwen.ai 网页当前提供的真实模型清单。
+   */
+  async listOnlineModels(account) {
+    const models = (await this.listModels(account)).filter(m => !m.static);
+    if (!models.length) throw new Error('上游未返回可用模型');
+    return {
+      models: models.map(m => ({ upstream: m.upstream, publicName: m.upstream.toLowerCase(), free: true, online: true })),
+      replace: true,
+      source: 'chat.qwen.ai /api/models',
+    };
+  },
+
   async checkAccount(account) {
     await ensureToken(account);
     try {

@@ -185,12 +185,18 @@ module.exports = {
           remain += Number(it.CapacityRemain || 0);
           size += Number(it.CapacitySize || 0);
         }
-        // identity: uid / uin
-        const uid = account.credentials.userId || null;
+        // identity: nickname/email/phone from JWT claims + uid/uin
+        const { decodeJwtClaims } = require('../utils/jwt');
+        const claims = decodeJwtClaims(account.credentials.token) || {};
+        const uid = account.credentials.userId || claims.sub || null;
         return {
           ok: true,
-          message: `积分 ${remain} / ${size}${uid ? ` · uid ${String(uid).slice(0, 8)}` : ''}`,
-          extra: { credits: remain, quota: size, packages: items.length, uid, uin: items[0]?.Uin || null },
+          message: `${claims.nickname || claims.phone || uid?.slice(0, 8) || '有效'} · 积分 ${remain} / ${size}`,
+          extra: {
+            credits: remain, quota: size, packages: items.length,
+            uid, uin: items[0]?.Uin || claims.phone || null,
+            username: claims.nickname || null, email: claims.email || null, phone: claims.phone || null,
+          },
         };
       }
       if (r.status === 401 || r.status === 403) return { ok: false, status: 'invalid', message: `auth ${r.status}` };
@@ -257,15 +263,18 @@ module.exports = {
   // Scans every *.info (including timestamped history files) — newer client versions
   // encrypt tokens as {"$wbEncrypted":1,"envelope":...} which we cannot decrypt; those
   // entries are reported so the user knows to re-login in the desktop app or paste a token.
+  // Dedupes by account identity (uid from JWT sub / account.uid), NOT by token:
+  // the same account refreshes tokens frequently, so token-fingerprint dedup leaks duplicates.
   discoverLocal() {
     const fs = require('fs'), os = require('os'), path = require('path');
+    const { decodeJwtClaims } = require('../utils/jwt');
     const dirs = [
       path.join(process.env.LOCALAPPDATA || '', 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
       path.join(os.homedir(), 'Library', 'Application Support', 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
       path.join(os.homedir(), '.local', 'share', 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
     ];
     const found = [];
-    const seenFp = new Set();
+    const seenIdentity = new Set();
     for (const dir of dirs) {
       let files = [];
       try { files = fs.readdirSync(dir).filter(f => f.endsWith('.info') && !f.endsWith('.observation.json')).sort().reverse(); } catch { continue; }
@@ -280,13 +289,20 @@ module.exports = {
           const uid = j.account?.uid || auth.uid || j.userId || null;
           if (!token || typeof token !== 'string') continue;
           if (token.startsWith('$wbEncrypted') || auth['$wbEncrypted']) { encryptedSeen = true; continue; }
-          // dedupe identical tokens across history files
-          const fp = token.slice(-32);
-          if (seenFp.has(fp)) continue;
-          seenFp.add(fp);
+          // identity = uid or JWT sub; skip files from the same account (fresh token wins: files sorted newest first)
+          const claims = decodeJwtClaims(token);
+          const identity = String(uid || claims?.sub || '') || null;
+          if (identity) {
+            if (seenIdentity.has(identity)) continue;
+            seenIdentity.add(identity);
+          } else {
+            const fp = token.slice(-32);
+            if (seenIdentity.has(fp)) continue;
+            seenIdentity.add(fp);
+          }
           found.push({
-            label: (f === 'workbuddy-desktop.info' ? 'workbuddy-desktop (当前)' : f.replace(/workbuddy-desktop\.|\.info/g, '').slice(0, 16)) + (uid ? ` (${uid.slice(0, 8)})` : ''),
-            suggestName: 'wb-' + (found.filter(x => x.credentials).length + 1),
+            label: (f === 'workbuddy-desktop.info' ? 'workbuddy-desktop (当前)' : f.replace(/workbuddy-desktop\.|\.info/g, '').slice(0, 16)) + (claims?.nickname ? ` (${claims.nickname})` : uid ? ` (${String(uid).slice(0, 8)})` : ''),
+            suggestName: claims?.nickname ? `wb-${claims.nickname}` : ('wb-' + (found.filter(x => x.credentials).length + 1)),
             credentials: {
               token,
               refreshToken: auth.refreshToken || null,
@@ -302,6 +318,51 @@ module.exports = {
       }
     }
     return found;
+  },
+
+  // ---------- OAuth device-flow login (添加账号自动跳授权页) ----------
+  // Port of @axiaohungry/dsh-llm-workbuddy loginWorkBuddy():
+  //   POST /v2/plugin/auth/state?platform=CLI -> {state, authUrl}
+  //   open authUrl in browser -> user logs in
+  //   poll GET /v2/plugin/auth/token?state=... until tokens arrive (10min)
+  //   poll GET /v2/plugin/login/account?state=... for account info (60s)
+  async startOAuth() {
+    const { httpJson } = require('../utils/http');
+    const BASE = 'https://copilot.tencent.com/v2/plugin';
+    const H = { accept: 'application/json', 'content-type': 'application/json', 'user-agent': 'CLI/unknown CodeBuddy/2.137.1', 'x-product': 'SaaS', 'X-No-Authorization': 'true', 'X-No-User-Id': 'true', 'X-No-Enterprise-Id': 'true', 'X-No-Department-Info': 'true' };
+    const r = await httpJson(`${BASE}/auth/state?platform=CLI`, { method: 'POST', headers: H, body: {}, timeoutMs: 15000 });
+    if (r.status !== 200 || !r.json?.data?.state || !r.json?.data?.authUrl) {
+      throw new Error(`创建登录会话失败: ${r.status} ${JSON.stringify(r.json).slice(0, 120)}`);
+    }
+    return { state: r.json.data.state, authUrl: r.json.data.authUrl };
+  },
+
+  /** poll once (called repeatedly by admin UI until tokens arrive or timeout) */
+  async pollOAuth(state) {
+    const { httpJson } = require('../utils/http');
+    const BASE = 'https://copilot.tencent.com/v2/plugin';
+    const H = { accept: 'application/json', 'user-agent': 'CLI/unknown CodeBuddy/2.137.1', 'x-product': 'SaaS', 'X-No-Authorization': 'true', 'X-No-User-Id': 'true', 'X-No-Enterprise-Id': 'true', 'X-No-Department-Info': 'true' };
+    const t = await httpJson(`${BASE}/auth/token?state=${encodeURIComponent(state)}`, { headers: H, timeoutMs: 15000 });
+    if (!(t.status === 200 && t.json?.code === 0 && t.json?.data?.accessToken)) {
+      return { pending: true };
+    }
+    const auth = t.json.data;
+    const authHeaders = { ...H, 'X-No-User-Id': 'true', 'X-No-Enterprise-Id': 'true', 'X-No-Department-Info': 'true', Authorization: `Bearer ${auth.accessToken}` };
+    const acct = await httpJson(`${BASE}/login/account?state=${encodeURIComponent(state)}`, { headers: authHeaders, timeoutMs: 15000 }).catch(() => ({ json: null }));
+    const account = acct.json?.data || {};
+    const { decodeJwtClaims } = require('../utils/jwt');
+    const claims = decodeJwtClaims(auth.accessToken) || {};
+    return {
+      pending: false,
+      credentials: {
+        token: auth.accessToken,
+        refreshToken: auth.refreshToken || null,
+        userId: account.userId || account.uid || claims.sub || null,
+        expiresAt: auth.expiresAt ? Number(auth.expiresAt) : (auth.expiresIn ? Date.now() + Number(auth.expiresIn) * 1000 : null),
+        region: 'cn',
+      },
+      identity: { nickname: claims.nickname || account.displayName || null, email: claims.email || null, phone: claims.preferred_username || null },
+    };
   },
 
   async importLocal(opts = {}) {

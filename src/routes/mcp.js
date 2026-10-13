@@ -110,7 +110,36 @@ async function listTools(server) {
 process.on('exit', () => { for (const [, s] of procs) { try { s.proc.kill(); } catch {} } });
 
 // ---------- gateway MCP endpoint (clients connect here) ----------
-// Streamable-HTTP-style: POST /mcp with JSON-RPC; GET returns info.
+// Streamable-HTTP-style: POST /mcp with JSON-RPC; GET returns info page (browsers) or SSE stream
+router.get('/', (req, res) => {
+  // Streamable HTTP clients may send GET with SSE Accept for server->client stream; we have no
+  // server-initiated messages, so acknowledge per spec. Browsers get a human-readable page.
+  if ((req.headers['accept'] || '').includes('text/event-stream')) {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+    res.write(': mcp gateway ready\n\n');
+    return;
+  }
+  const servers = listServers().filter(s => s.enabled);
+  res.type('html').send(`<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>MCP Gateway</title>
+<style>body{background:#0f1115;color:#e6e9ef;font:14px/1.7 -apple-system,"Segoe UI",sans-serif;max-width:720px;margin:48px auto;padding:0 20px}
+code{background:#1e222b;border:1px solid #2a2f3a;border-radius:6px;padding:2px 8px;font-family:ui-monospace,Consolas,monospace;font-size:13px}
+.card{background:#171a21;border:1px solid #2a2f3a;border-radius:12px;padding:20px 24px;margin:16px 0}</style></head><body>
+<h1>🛰 MCP Gateway</h1>
+<div class="card"><p>这是 dsh-free-api 的 MCP 网关端点，使用 <b>JSON-RPC over HTTP</b>（Streamable HTTP 传输）。</p>
+<p>客户端配置（如 Claude Desktop / Cursor 的 mcp 配置）：</p>
+<pre style="background:#1e222b;border:1px solid #2a2f3a;border-radius:8px;padding:12px;overflow:auto">{
+  "mcpServers": {
+    "dsh-free-api": {
+      "type": "http",
+      "url": "http://localhost:8317/mcp"
+    }
+  }
+}</pre></div>
+<div class="card"><p>已注册的 MCP 服务（${servers.length} 个）：${servers.length ? servers.map(s => `<code>${String(s.id).replace(/[<>&]/g, '')}</code>`).join('、') : '（无，去管理面板 → MCP 服务 添加）'}</p>
+<p class="muted" style="color:#8b93a5">工具将以 <code>服务id__工具名</code> 聚合暴露。用 <code>POST /mcp</code> 发送 JSON-RPC：<code>initialize</code> / <code>tools/list</code> / <code>tools/call</code>。</p></div>
+</body></html>`);
+});
+
 router.post('/', async (req, res) => {
   const { method, params, id } = req.body || {};
   try {

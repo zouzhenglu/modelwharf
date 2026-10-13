@@ -201,6 +201,34 @@ router.post('/providers/:id/reset-online-models', async (req, res) => {
   }
 });
 
+// ---------- OAuth login flows (添加账号自动跳授权) ----------
+// start: create login session, return authUrl for the panel to open
+router.post('/providers/:id/oauth/start', async (req, res) => {
+  const plugin = registry.get(req.params.id);
+  if (typeof plugin?.startOAuth !== 'function') return res.status(400).json({ error: '该平台不支持网页授权登录' });
+  try { res.json(await plugin.startOAuth()); }
+  catch (e) { res.status(502).json({ error: e.message }); }
+});
+// poll: called by the panel every ~2s until tokens arrive; saves the account on success
+router.post('/providers/:id/oauth/poll', async (req, res) => {
+  const plugin = registry.get(req.params.id);
+  if (typeof plugin?.pollOAuth !== 'function') return res.status(400).json({ error: 'unsupported' });
+  try {
+    const r = await plugin.pollOAuth(req.body?.state);
+    if (r.pending) return res.json({ pending: true });
+    const name = r.identity?.nickname ? `${req.params.id === 'workbuddy' ? 'wb' : req.params.id}-${r.identity.nickname}` : `${req.params.id}-oauth`;
+    let finalName = name, n = 2;
+    while (db.prepare('SELECT 1 FROM accounts WHERE provider_id=? AND name=?').get(req.params.id, finalName)) finalName = `${name}-${n++}`;
+    const ins = db.prepare('INSERT INTO accounts(provider_id,name,credentials,extra) VALUES(?,?,?,?)')
+      .run(req.params.id, finalName, JSON.stringify(r.credentials), JSON.stringify(r.identity || {}));
+    if (r.identity?.uid) {
+      // keep extra.uid for later dedup/display
+      db.prepare('UPDATE accounts SET extra=? WHERE id=?').run(JSON.stringify({ ...r.identity, uid: r.identity.uid }), ins.lastInsertRowid);
+    }
+    res.json({ pending: false, account_id: ins.lastInsertRowid, name: finalName, identity: r.identity });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
 // sync models for ONE account (账号行内同步)
 router.post('/accounts/:id/refresh-models', async (req, res) => {
   const a = accountsCore.getAccount(req.params.id);
@@ -346,27 +374,37 @@ router.get('/stats', (req, res) => {
   res.json({ today: { ...today, errors: errToday }, total, byProvider, byModel });
 });
 
-// chart data for usage page: per-hour requests/tokens/errors for last N hours (default 24)
+// chart data for usage page: hourly buckets + dimension breakdowns (model/provider/status)
 router.get('/usage/chart', (req, res) => {
-  const hours = Math.min(168, Math.max(1, Number(req.query.hours || 24)));
+  const hours = Math.min(720, Math.max(1, Number(req.query.hours || 24)));
   const since = Math.floor(Date.now() / 1000) - hours * 3600;
+  // bucket size: hours<=48 -> hourly; else daily
+  const bucketSec = hours <= 48 ? 3600 : 86400;
   const rows = db.prepare(`
-    SELECT (ts / 3600) * 3600 AS hour_bucket,
+    SELECT (ts / ${bucketSec}) * ${bucketSec} AS bucket,
            COUNT(*) AS reqs,
            COALESCE(SUM(input_tokens),0) AS tin,
            COALESCE(SUM(output_tokens),0) AS tout,
            SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS errors,
            COALESCE(SUM(credits),0) AS credits
-    FROM usage WHERE ts >= ? GROUP BY hour_bucket ORDER BY hour_bucket`).all(since);
-  // fill empty hours
-  const byBucket = Object.fromEntries(rows.map(r => [r.hour_bucket, r]));
+    FROM usage WHERE ts >= ? GROUP BY bucket ORDER BY bucket`).all(since);
+  const byBucket = Object.fromEntries(rows.map(r => [r.bucket, r]));
   const series = [];
-  const nowHour = Math.floor(Date.now() / 1000 / 3600) * 3600;
-  for (let h = nowHour - (hours - 1) * 3600; h <= nowHour; h += 3600) {
-    const r = byBucket[h] || { reqs: 0, tin: 0, tout: 0, errors: 0, credits: 0 };
-    series.push({ hour: h, label: new Date(h * 1000).toTimeString().slice(0, 5), ...r });
+  const nowBucket = Math.floor(Date.now() / 1000 / bucketSec) * bucketSec;
+  for (let b = nowBucket - (Math.ceil(hours * 3600 / bucketSec) - 1) * bucketSec; b <= nowBucket; b += bucketSec) {
+    const r = byBucket[b] || { reqs: 0, tin: 0, tout: 0, errors: 0, credits: 0 };
+    const d = new Date(b * 1000);
+    series.push({
+      bucket: b,
+      label: bucketSec === 3600 ? `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}` : `${d.getMonth() + 1}/${d.getDate()}`,
+      reqs: r.reqs, tin: r.tin, tout: r.tout, errors: r.errors, credits: r.credits,
+    });
   }
-  res.json({ hours, series });
+  const byModel = db.prepare(`SELECT COALESCE(public_model,'?') AS key, COUNT(*) reqs, COALESCE(SUM(input_tokens),0) tin, COALESCE(SUM(output_tokens),0) tout FROM usage WHERE ts>=? GROUP BY key ORDER BY reqs DESC LIMIT 10`).all(since);
+  const byProvider = db.prepare(`SELECT COALESCE(provider_id,'?') AS key, COUNT(*) reqs, COALESCE(SUM(credits),0) credits, COALESCE(SUM(input_tokens),0) tin, COALESCE(SUM(output_tokens),0) tout FROM usage WHERE ts>=? GROUP BY key ORDER BY reqs DESC LIMIT 10`).all(since);
+  const byAccount = db.prepare(`SELECT COALESCE(CAST(account_id AS TEXT),'-') AS key, COUNT(*) reqs, COALESCE(SUM(credits),0) credits FROM usage WHERE ts>=? GROUP BY key ORDER BY reqs DESC LIMIT 10`).all(since);
+  const byStatus = db.prepare(`SELECT CASE WHEN status>=400 THEN '失败' ELSE '成功' END AS key, COUNT(*) reqs FROM usage WHERE ts>=? GROUP BY key`).all(since);
+  res.json({ hours, bucketSec, series, byModel, byProvider, byAccount, byStatus });
 });
 
 // ---------- virtual models (统一模型) ----------

@@ -117,6 +117,30 @@ module.exports = {
     return Object.entries(this._modelMap).map(([display, key]) => ({ upstream: key, publicName: 'qoder-' + display.toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-|-$/g, '') }));
   },
 
+  /**
+   * 恢复在线目录：/algo/api/v2/model/list 需要 COSY 签名（未实现），
+   * 因此用官方 quota 接口的可用性判断 + 已知目录对照——PAT 模式下无法拿到
+   * 完整在线清单时返回明确错误，让用户走普通同步。
+   */
+  async listOnlineModels(account) {
+    // try unsigned model/list first (works on some deployments with PAT)
+    const { httpJson } = require('../utils/http');
+    const r = await httpJson(`${gw(account)}/algo/api/v2/model/list?Encode=1`, {
+      headers: { ...cosyHeaders(account, { Accept: 'application/json' }) }, timeoutMs: 15000,
+    });
+    if (r.status === 200 && r.json?.data) {
+      const list = r.json?.data?.models || r.json?.data?.model_list || r.json?.data || [];
+      const models = [];
+      for (const m of Array.isArray(list) ? list : []) {
+        const key = m.key || m.model_key || m.id;
+        if (!key) continue;
+        models.push({ upstream: key, publicName: key.toLowerCase(), free: !!m.free, ctx: m.maxInputTokens || null, online: true });
+      }
+      if (models.length) return { models, replace: true, source: 'model/list' };
+    }
+    throw new Error('Qoder 在线模型目录需要 COSY 签名（未支持）。请使用普通「同步模型」+ 已知目录，或在面板手动添加。');
+  },
+
   async checkAccount(account) {
     // official quota endpoint needs securityOauthToken; PAT fallback -> /user/status
     const c = account.credentials;

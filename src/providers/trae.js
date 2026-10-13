@@ -156,6 +156,20 @@ module.exports = {
     }
   },
 
+  /**
+   * 恢复在线目录：get_detail_param 返回的就是 Trae 当前真实可用的模型目录，
+   * 与 IDE 里看到的一致。标记 online 供 reset 流程替换现有列表。
+   */
+  async listOnlineModels(account) {
+    const models = (await this.listModels(account)).filter(m => !m.static);
+    if (!models.length) throw new Error('上游未返回可用模型（账号可能失效）');
+    return {
+      models: models.map(m => ({ upstream: m.upstream, publicName: m.upstream.toLowerCase(), free: !!m.free, online: true })),
+      replace: true,
+      source: 'get_detail_param',
+    };
+  },
+
   async checkAccount(account) {
     const c = account.credentials;
     await ensureToken(account);
@@ -177,6 +191,12 @@ module.exports = {
         uname = info.UserName || info.userName || info.NickName || null;
       }
     } catch { /* identity is best-effort */ }
+    // JWT claims fallback for username/email
+    if (!uname) {
+      const { decodeJwtClaims } = require('../utils/jwt');
+      const claims = decodeJwtClaims(c.token);
+      if (claims) { uname = claims.nickname || uname; }
+    }
     return {
       ok: true,
       message: `${d.credits != null ? `剩余积分 ${d.credits}` : '有效'}${uname ? ` · ${uname}` : ''}${uid ? ` (uid ${uid})` : ''}`,

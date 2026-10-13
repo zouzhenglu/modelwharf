@@ -278,10 +278,18 @@ async function openAccountForm(id) {
   mFormAccount(acct, providers, p);
 }
 function mFormAccount(acct, providers, p) {
+  const supportsOAuth = !acct && ['workbuddy'].includes(p?.id); // platforms with device-flow login
   openModal(acct ? '编辑账号' : '添加账号', `
     <div class="field"><label>平台</label>
       <select id="afProvider" ${acct ? 'disabled' : ''}>${providers.map(x => `<option value="${x.id}" ${p?.id === x.id ? 'selected' : ''}>${esc(x.label)} (${x.id})</option>`).join('')}</select></div>
-    <div class="field"><label>名称（用于区分多账号）</label><input id="afName" value="${esc(acct?.name || '')}" placeholder="如 main / 小号1"></div>
+    ${supportsOAuth ? `
+    <div class="card" style="background:var(--panel2);padding:12px 16px;margin-bottom:12px">
+      <b style="font-size:13px">推荐：网页授权登录</b>
+      <p class="muted" style="font-size:12px;margin:4px 0 8px">点击后自动打开 ${esc(p.label)} 授权页，登录成功后账号自动添加（无需手动填 token）。</p>
+      <button id="afOAuthBtn" onclick="startOAuthLogin('${p.id}')">🌐 打开授权页面登录</button>
+      <span id="afOAuthStatus" class="muted" style="margin-left:10px;font-size:12px"></span>
+    </div>` : ''}
+    <div class="field"><label>名称（用于区分多账号，留空自动起名）</label><input id="afName" value="${esc(acct?.name || '')}" placeholder="如 main / 小号1"></div>
     <div id="afCreds">${credFieldsHtml(p, acct)}</div>
     <div class="row" style="margin-top:4px">
       <div class="field" style="width:140px"><label>优先级(小=优先)</label><input id="afPriority" type="number" value="${acct?.priority ?? 100}"></div>
@@ -293,9 +301,36 @@ function mFormAccount(acct, providers, p) {
       <button onclick="saveAccount(${acct?.id || 'null'})">保存</button></div>`, {});
   $('#afProvider')?.addEventListener('change', e => {
     const np = providers.find(x => x.id === e.target.value);
+    // re-render the whole form for oauth-capable platforms
+    if (!acct && ['workbuddy'].includes(np?.id)) { mFormAccount(null, providers, np); return; }
     $('#afCreds').innerHTML = credFieldsHtml(np, null);
     const d = $('#afDocs'); if (d) d.textContent = np?.docs || '';
   });
+}
+async function startOAuthLogin(providerId) {
+  const btn = $('#afOAuthBtn'), status = $('#afOAuthStatus');
+  btn.disabled = true;
+  status.textContent = '正在创建授权会话…';
+  try {
+    const r = await api(`/providers/${providerId}/oauth/start`, { method: 'POST' });
+    status.innerHTML = `已打开授权页。若未弹出，<a href="${esc(r.authUrl)}" target="_blank">点此打开</a>。登录后自动完成…`;
+    window.open(r.authUrl, '_blank');
+    // poll every 2.5s up to 10min
+    const deadline = Date.now() + 10 * 60 * 1000;
+    const timer = setInterval(async () => {
+      if (Date.now() > deadline) { clearInterval(timer); status.textContent = '超时（10 分钟），请重试'; btn.disabled = false; return; }
+      try {
+        const p = await api(`/providers/${providerId}/oauth/poll`, { method: 'POST', body: { state: r.state } });
+        if (!p.pending) {
+          clearInterval(timer);
+          status.textContent = `✓ 登录成功：${p.identity?.nickname || p.name}（账号「${p.name}」已添加）`;
+          setTimeout(() => { closeModal(); toast(`✓ 已添加账号 ${p.name}`); go('accounts'); }, 1200);
+        } else {
+          status.textContent = '等待你在授权页完成登录…';
+        }
+      } catch (e) { clearInterval(timer); status.textContent = '轮询失败: ' + e.message; btn.disabled = false; }
+    }, 2500);
+  } catch (e) { status.textContent = '失败: ' + e.message; btn.disabled = false; }
 }
 function credFieldsHtml(p, acct) {
   const creds = acct?.credentials || {};
@@ -656,30 +691,56 @@ function showKeyOnce(key) {
 
 // ---------- usage ----------
 let usageFilter = { provider_id: '', model: '', status: '', page: 1 };
+let usageChartHours = 24;
 async function renderUsage(m) {
   const [providers, usage, chart] = await Promise.all([
     api('/providers'),
     api('/usage?' + new URLSearchParams(Object.fromEntries(Object.entries({ ...usageFilter }).filter(([, v]) => v)))),
-    api('/usage/chart?hours=24'),
+    api('/usage/chart?hours=' + usageChartHours),
   ]);
   const maxReqs = Math.max(1, ...chart.series.map(s => s.reqs));
+  const maxDim = Math.max(1, ...(chart.byModel[0]?.reqs || 1), ...(chart.byProvider[0]?.reqs || 1));
+  const bar = (v, total, color = 'var(--accent)') => `<div style="background:${color};height:8px;border-radius:4px;width:${Math.round(v / Math.max(1, total) * 100)}%"></div>`;
+  const dimTable = (title, rows, cols) => !rows.length ? '' : `
+    <div style="flex:1;min-width:260px">
+      <h4 style="font-size:13px;margin-bottom:8px;color:var(--muted)">${title}</h4>
+      <table style="font-size:12.5px">${rows.map(r => `<tr>
+        <td class="mono" style="padding:3px 8px 3px 0;white-space:nowrap">${esc(r.key)}${r.key.includes('#') || /^\d+$/.test(r.key) ? badge('账号', 'gray') : ''}</td>
+        ${cols.map(c => `<td style="padding:3px 10px 3px 0;color:var(--muted)">${c(r)}</td>`).join('')}
+        <td style="width:36%">${bar(r.reqs, maxDim)}</td>
+      </tr>`).join('')}</table>
+    </div>`;
   m.innerHTML = `
   <h2>用量日志</h2>
   <div class="card">
-    <h3 style="font-size:14px;margin-bottom:10px">最近 24 小时 <span class="muted" style="font-size:12px">柱高=请求数，红点=错误</span></h3>
-    <div style="display:flex;align-items:flex-end;gap:3px;height:110px;padding:0 4px">
-      ${chart.series.map(s => `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%" title="${s.label} · ${s.reqs} 请求 · 错误 ${s.errors} · in ${s.tin}/out ${s.tout} tok">
-        <div style="width:70%;background:${s.errors ? 'linear-gradient(180deg,var(--red),var(--accent))' : 'var(--accent)'};border-radius:3px 3px 0 0;height:${Math.round(s.reqs / maxReqs * 88)}%;min-height:${s.reqs ? '3px' : '0'}"></div>
+    <div class="toolbar" style="margin-bottom:10px">
+      <h3 style="font-size:14px">趋势</h3>
+      <span class="spacer"></span>
+      <select id="ucHours" style="width:130px">
+        ${[[24, '最近 24 小时'], [48, '最近 48 小时'], [168, '最近 7 天'], [720, '最近 30 天']].map(([v, l]) => `<option value="${v}" ${usageChartHours === v ? 'selected' : ''}>${l}</option>`).join('')}
+      </select>
+    </div>
+    <div style="display:flex;align-items:flex-end;gap:3px;height:120px;padding:0 4px">
+      ${chart.series.map(s => `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%" title="${s.label} · ${s.reqs} 请求 · 失败 ${s.errors} · in ${s.tin}/out ${s.tout} tok · 积分 ${Number(s.credits).toFixed(2)}">
+        <span class="mono muted" style="font-size:9px;margin-bottom:2px">${s.reqs || ''}</span>
+        <div style="width:70%;background:${s.errors ? 'linear-gradient(180deg,var(--red),var(--accent))' : 'var(--accent)'};border-radius:3px 3px 0 0;height:${Math.round(s.reqs / maxReqs * 92)}%;min-height:${s.reqs ? '3px' : '0'}"></div>
       </div>`).join('')}
     </div>
     <div style="display:flex;gap:3px;padding:4px 4px 0">
-      ${chart.series.filter((s, i) => i % 4 === 0).map(s => `<span class="muted mono" style="flex:1;font-size:10px;text-align:center">${s.label}</span>`).join('')}
+      ${chart.series.filter((s, i) => i % Math.ceil(chart.series.length / 12) === 0).map(s => `<span class="muted mono" style="flex:1;font-size:10px;text-align:center">${s.label}</span>`).join('')}
     </div>
+  </div>
+  <div class="card" style="display:flex;gap:24px;flex-wrap:wrap">
+    ${dimTable('模型 Top（请求数）', chart.byModel, [r => `${r.reqs} 次`, r => `${((r.tin||0)/1000).toFixed(1)}k/${((r.tout||0)/1000).toFixed(1)}k`])}
+    ${dimTable('平台（请求/积分）', chart.byProvider, [r => `${r.reqs} 次`, r => `积分 ${Number(r.credits).toFixed(1)}`])}
+    ${dimTable('账号', chart.byAccount, [r => `${r.reqs} 次`, r => `积分 ${Number(r.credits).toFixed(1)}`])}
+    ${dimTable('结果', chart.byStatus, [r => `${r.reqs} 次`])}
   </div>
   <div class="toolbar">
     <select id="uProvider" style="width:150px"><option value="">全部平台</option>${providers.map(p => `<option value="${p.id}" ${usageFilter.provider_id === p.id ? 'selected' : ''}>${esc(p.label)}</option>`).join('')}</select>
     <input id="uModel" class="searchbox" placeholder="模型名…" value="${esc(usageFilter.model)}">
     <select id="uStatus" style="width:110px"><option value="">全部</option><option value="ok" ${usageFilter.status === 'ok' ? 'selected' : ''}>成功</option><option value="error" ${usageFilter.status === 'error' ? 'selected' : ''}>失败</option></select>
+    <span class="spacer"></span><span class="muted">明细（最近在前）</span>
   </div>
   <div class="card" style="padding:6px 12px">
   <table><tr><th>时间</th><th>平台</th><th>账号</th><th>模型</th><th>输入</th><th>输出</th><th>积分</th><th>耗时</th><th>状态</th></tr>
@@ -697,6 +758,7 @@ async function renderUsage(m) {
   </div></div>`;
   $('#uProvider').onchange = e => { usageFilter.provider_id = e.target.value; usageFilter.page = 1; renderUsage(m); };
   $('#uStatus').onchange = e => { usageFilter.status = e.target.value; usageFilter.page = 1; renderUsage(m); };
+  $('#ucHours').onchange = e => { usageChartHours = Number(e.target.value); renderUsage(m); };
   $('#uModel').onkeydown = e => { if (e.key === 'Enter') { usageFilter.model = e.target.value; usageFilter.page = 1; renderUsage(m); } };
 }
 
