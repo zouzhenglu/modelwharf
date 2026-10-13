@@ -1,0 +1,17 @@
+# Secrets & credentials — never commit
+.env
+*.key
+data/
+logs/
+
+# Node
+node_modules/
+package-lock.json
+*.log
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Test artifacts
+/tmp/
