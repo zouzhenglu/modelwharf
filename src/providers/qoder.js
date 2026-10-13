@@ -90,6 +90,62 @@ function cosyHeaders(account, extra = {}) {
   };
 }
 
+// COSY session cache per account id (identity encrypted once; payload re-signed per request)
+const cosySessions = new Map(); // accountId -> session
+function getCosySession(account) {
+  let s = cosySessions.get(account.id);
+  if (!s) {
+    const c = account.credentials;
+    const { createSession } = require('../utils/cosy');
+    s = createSession({
+      uid: c.userId || c.uid || '',
+      user_type: c.userType || 'personal_standard',
+      securityOauthToken: c.securityOauthToken || c.jobToken || c.pat || '',
+      refreshToken: c.refreshToken || '',
+    });
+    cosySessions.set(account.id, s);
+  }
+  return s;
+}
+
+/** signed data-plane request (chat / model list) — returns headers + encoded body string */
+function cosyBearer(account, { path, bodyObj, accept, modelKey } = {}) {
+  const { bearerRequest } = require('../utils/cosy');
+  return bearerRequest(getCosySession(account), { path, bodyObj, accept, modelKey });
+}
+
+/**
+ * PAT → jobToken exchange (signature plane). The gateway REQUIRES a PAT (pt-…) here:
+ * a dt- OAuth token cannot be exchanged (source: fengyinxia/qoder2api qoder_auth.py —
+ * "The gateway always requires personalToken (a PAT) on this endpoint").
+ * Response provides jobToken + full identity (uid/userType/org) used for the COSY session.
+ */
+async function exchangePAT(account) {
+  const c = account.credentials;
+  const pat = c.pat || '';
+  if (!pat) throw Object.assign(new Error('Qoder 聊天通道需要 PAT：客户端 → 设置 → Integrations 创建（pt- 开头）后填入账号'), { status: 401 });
+  const { httpJson } = require('../utils/http');
+  const { signatureHeaders, qoderEncode } = require('../utils/cosy');
+  const inner = JSON.stringify({ userId: c.userId || '', personalToken: pat, securityOauthToken: '', refreshToken: '', needRefresh: false, authInfo: {} });
+  const body = JSON.stringify({ payload: inner, encodeVersion: '1' });
+  const r = await httpJson(`${gw(account)}/algo/api/v3/user/jobToken?Encode=1`, {
+    method: 'POST', headers: { ...signatureHeaders(), Authorization: `Bearer ${pat}` }, body, timeoutMs: 20000,
+  });
+  if (r.status !== 200) throw Object.assign(new Error(`jobToken 交换失败 ${r.status}: ${String(r.text || '').slice(0, 120)}`), { status: 502 });
+  const d = r.json?.data || r.json || {};
+  return { jobToken: d.jobToken || d.job_token, identity: d.identity || d, raw: d };
+}
+
+/** ensure a COSY session built from a PAT exchange (cached) */
+function ensurePATSession(account) {
+  const c = account.credentials;
+  if (c.pat && !cosySessions.get(account.id)) {
+    // session identity fields will be refreshed from jobToken on first exchange
+    return null;
+  }
+  return cosySessions.get(account.id);
+}
+
 module.exports = {
   id: 'qoder',
   label: 'Qoder (阿里)',
@@ -118,27 +174,34 @@ module.exports = {
   },
 
   /**
-   * 恢复在线目录：/algo/api/v2/model/list 需要 COSY 签名（未实现），
-   * 因此用官方 quota 接口的可用性判断 + 已知目录对照——PAT 模式下无法拿到
-   * 完整在线清单时返回明确错误，让用户走普通同步。
+   * 恢复在线目录：COSY 签名的 /algo/api/v2/model/list?Encode=1（GET，需带 "$kwm" body）。
+   * 返回服务器当前真实可用模型（含内部 key 与显示名）。
    */
   async listOnlineModels(account) {
-    // try unsigned model/list first (works on some deployments with PAT)
     const { httpJson } = require('../utils/http');
+    const { headers, body } = cosyBearer(account, { path: '/api/v2/model/list', bodyObj: {}, accept: 'application/json' });
     const r = await httpJson(`${gw(account)}/algo/api/v2/model/list?Encode=1`, {
-      headers: { ...cosyHeaders(account, { Accept: 'application/json' }) }, timeoutMs: 15000,
+      method: 'GET', headers, body, timeoutMs: 20000,
     });
-    if (r.status === 200 && r.json?.data) {
-      const list = r.json?.data?.models || r.json?.data?.model_list || r.json?.data || [];
-      const models = [];
-      for (const m of Array.isArray(list) ? list : []) {
-        const key = m.key || m.model_key || m.id;
-        if (!key) continue;
-        models.push({ upstream: key, publicName: key.toLowerCase(), free: !!m.free, ctx: m.maxInputTokens || null, online: true });
-      }
-      if (models.length) return { models, replace: true, source: 'model/list' };
+    if (r.status !== 200) throw new Error(`model/list ${r.status}: ${String(r.text || '').slice(0, 150)}`);
+    const data = r.json?.data || r.json || {};
+    const list = data.models || data.model_list || (Array.isArray(data) ? data : []);
+    const models = [];
+    const seen = new Set();
+    for (const m of list) {
+      const key = m.key || m.model_key || m.id || m.name;
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      models.push({
+        upstream: key,
+        publicName: key.toLowerCase(),
+        free: m.free === true || m.is_free === true,
+        ctx: m.maxInputTokens || m.max_input_tokens || null,
+        online: true,
+      });
     }
-    throw new Error('Qoder 在线模型目录需要 COSY 签名（未支持）。请使用普通「同步模型」+ 已知目录，或在面板手动添加。');
+    if (!models.length) throw new Error('在线目录返回为空');
+    return { models, replace: true, source: 'model/list (COSY)' };
   },
 
   async checkAccount(account) {
@@ -185,16 +248,25 @@ module.exports = {
       // fallthrough to user/status
     }
     const r2 = await httpJson(`${gw(account)}/algo/api/v3/user/status?Encode=1`, {
-      method: 'POST', headers: cosyHeaders(account, { Accept: 'application/json' }), body: {}, timeoutMs: 15000,
+      method: 'POST',
+      headers: { ...require('../utils/cosy').signatureHeaders(), Authorization: authHeader(account), 'cosy-machinetoken': getCosySession(account).machine.machineToken, 'cosy-machinetype': getCosySession(account).machine.machineType, 'cosy-machineid': getCosySession(account).machine.machineId },
+      body: require('../utils/cosy').qoderEncode(JSON.stringify({})), timeoutMs: 15000,
     });
-    if (r2.status === 200) return { ok: true, message: '有效' };
+    if (r2.status === 200) return { ok: true, message: 'COSY 链路有效' };
     return { ok: false, status: r2.status === 401 ? 'invalid' : 'cooling', message: `status ${r2.status}` };
   },
 
   async *chat({ account, upstreamModel, messages, tools, params, signal, onUsage }) {
+    // chat requires PAT→jobToken→COSY. dt- tokens cannot use the chat channel.
+    if (account.credentials.pat) {
+      try { await exchangePAT(account); } catch (e) { if (e.status === 401) throw e; /* fall through with cached session */ }
+    } else if (!account.credentials.jobToken) {
+      throw Object.assign(new Error('Qoder 聊天通道需要 PAT（dt- 登录 token 不被聊天网关接受）：客户端 → 设置 → Integrations 创建 pt- PAT，编辑账号填入'), { status: 401 });
+    }
     const rid = crypto.randomUUID();
     const userMsg = [...messages].reverse().find(m => m.role === 'user');
-    const body = {
+    const lastUserParts = userMsg?.parts;
+    const bodyObj = {
       request_id: rid,
       chat_record_id: rid,
       request_set_id: crypto.randomUUID(),
@@ -203,15 +275,29 @@ module.exports = {
       stream: true,
       model_config: { key: upstreamModel },
       chat_context: {
-        text: { text: userMsg?.text || '' },
-        extra: { modelConfig: { key: upstreamModel }, originalContent: { text: userMsg?.text || '' } },
+        text: {
+          // vision: image parts carried as image_url entries alongside text
+          ...(lastUserParts?.some(p => p.type === 'image_url') ? {
+            content: [
+              { type: 'text', text: userMsg?.text || '' },
+              ...lastUserParts.filter(p => p.type === 'image_url').map(p => ({ type: 'image_url', image_url: p.url })),
+            ],
+          } : {}),
+          text: userMsg?.text || '',
+        },
+        extra: { modelConfig: { key: upstreamModel, ...(params.reasoning_effort ? { reasoningEffort: params.reasoning_effort } : {}) }, originalContent: { text: userMsg?.text || '' } },
         // send short history (upstream expects its own context format; flat messages usually tolerated via text)
         history: messages.slice(0, -1).map(m => ({ role: m.role, text: m.text || '' })),
       },
       ...(params.max_tokens ? { max_tokens: params.max_tokens } : {}),
     };
+    // COSY-signed request: body must be the custom-encoded string that was signed
+    const { headers, body } = cosyBearer(account, {
+      path: '/api/v2/service/pro/sse/agent_chat_generation',
+      bodyObj, accept: 'text/event-stream', modelKey: upstreamModel,
+    });
     const resp = await httpRequest(`${gw(account)}/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1`, {
-      method: 'POST', headers: cosyHeaders(account), body, signal, timeoutMs: config.requestTimeoutMs,
+      method: 'POST', headers, body, signal, timeoutMs: config.requestTimeoutMs,
     });
     if (resp.statusCode >= 400) {
       const text = await resp.body.text().catch(() => '');
