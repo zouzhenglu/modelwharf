@@ -126,10 +126,35 @@ module.exports = {
       });
       if (r.status === 200) {
         const q = r.json?.userQuota || r.json?.data?.userQuota || {};
+        const addOn = r.json?.addOnQuota || r.json?.data?.addOnQuota || null;
+        // 每日签到活动：顶层 claimable / campaigns（每日通常 +100 进 addOnQuota）
+        let checkin = null;
+        try {
+          const camp = await httpJson(`${openapiHost(account)}/sash/api/v1/me/campaigns`, {
+            headers: { Authorization: authHeader(account), 'User-Agent': 'Qoder', Accept: 'application/json' }, timeoutMs: 12000,
+          });
+          if (camp.status === 200 && camp.json) {
+            checkin = {
+              claimable: camp.json.claimable ? 1 : 0,
+              showCampaign: !!camp.json.showCampaign,
+              campaigns: (camp.json.campaigns || []).length,
+            };
+          }
+        } catch { /* 签到接口失败不影响账号检查 */ }
+        const remain = (q.remaining ?? 0) + (addOn?.remaining ?? 0);
+        const total = (q.total ?? 0) + (addOn?.total ?? 0);
         return {
           ok: true,
-          message: `积分 ${q.remaining ?? '?'} / ${q.total ?? '?'}${q.isQuotaExceeded ? ' (已超额)' : ''}`,
-          extra: { credits: q.remaining, quota: q.total, percentage: q.percentage },
+          message: `积分 ${remain} / ${total}${q.total ? `（基础 ${q.remaining}/${q.total}` : ''}${addOn ? ` + 附加 ${addOn.remaining}/${addOn.total}）` : ''}${q.isQuotaExceeded ? ' (已超额)' : ''}${checkin?.claimable ? ' · 今日签到可领' : ''}`,
+          extra: {
+            credits: remain, quota: total,
+            baseQuota: q.remaining != null ? `${q.remaining}/${q.total}` : null,
+            addOnQuota: addOn ? `${addOn.remaining}/${addOn.total}` : null,
+            percentage: q.percentage, checkin,
+            uid: r.json?.userId || r.json?.userQuota?.userId || null,
+            userType: r.json?.userType || null,
+            expiresAt: q.expiresAt != null && q.expiresAt < 32503680000000 ? q.expiresAt : null,
+          },
         };
       }
       if (r.status === 401 || r.status === 403) return { ok: false, status: 'invalid', message: `auth ${r.status}` };

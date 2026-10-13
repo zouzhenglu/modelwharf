@@ -43,11 +43,31 @@ function makeGeneric(id, label, docs, defaults = {}) {
       const base = account.credentials.baseUrl.replace(/\/+$/, '');
       const body = {
         model: upstreamModel,
-        messages: messages.map(m => ({ role: m.role, content: m.text ?? '' })),
+        messages: messages.map(m => {
+          const out = { role: m.role };
+          // vision: parts carry images (data URLs and http URLs)
+          if (m.parts?.some(p => p.type === 'image_url')) {
+            out.content = m.parts.map(p => p.type === 'text'
+              ? { type: 'text', text: p.text }
+              : { type: 'image_url', image_url: { url: p.url } });
+          } else {
+            out.content = m.text ?? '';
+          }
+          if (m.tool_calls) out.tool_calls = m.tool_calls;
+          if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
+          if (m.name) out.name = m.name;
+          return out;
+        }),
         stream: true,
         ...(params.max_tokens ? { max_tokens: params.max_tokens } : {}),
         ...(params.temperature != null ? { temperature: params.temperature } : {}),
         ...(params.top_p != null ? { top_p: params.top_p } : {}),
+        ...(params.reasoning_effort ? { reasoning_effort: params.reasoning_effort } : {}),
+        ...(params.enable_thinking !== undefined ? { enable_thinking: params.enable_thinking } : {}),
+        ...(params.thinking_budget ? { thinking_budget: params.thinking_budget } : {}),
+        ...(params.thinking ? { thinking: params.thinking } : {}),
+        ...(params.reasoning_enabled !== undefined ? { reasoning_enabled: params.reasoning_enabled } : {}),
+        ...(params.enable_enhancement !== undefined ? { enable_enhancement: params.enable_enhancement } : {}),
         ...(tools?.length ? { tools, tool_choice: params.tool_choice || 'auto' } : {}),
       };
       const resp = await httpRequest(`${base}/chat/completions`, {

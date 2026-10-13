@@ -278,6 +278,33 @@ async function main() {
     await call('POST', `/admin/api/models/${victim.id}/toggle`, {}, auth); // restore
   });
 
+  console.log('== responses api (Codex) ==');
+  await t('POST /v1/responses non-stream', async () => {
+    const r = await call('POST', '/v1/responses', {
+      model: 'mock-a', input: 'hello', instructions: 'be brief',
+    }, { Authorization: 'Bearer ' + fullKey });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.object, 'response');
+    assert.equal(r.json.status, 'completed');
+    assert.equal(r.json.output_text, '你好，世界！');
+    assert.ok(r.json.output.find(o => o.type === 'message'));
+  });
+  await t('POST /v1/responses streaming events', async () => {
+    const resp = await fetch(BASE + '/v1/responses', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + fullKey },
+      body: JSON.stringify({ model: 'mock-a', input: 'hi', stream: true }),
+    });
+    assert.equal(resp.status, 200);
+    const text = await resp.text();
+    assert.ok(text.includes('"type":"response.created"'));
+    assert.ok(text.includes('"type":"response.output_text.delta"'));
+    assert.ok(text.includes('"type":"response.completed"'));
+  });
+  await t('reasoning suffix -think routes to base model', async () => {
+    const r = await call('POST', '/v1/chat/completions', { model: 'mock-a-think', messages: [{ role: 'user', content: 'hi' }] }, { Authorization: 'Bearer ' + fullKey });
+    assert.equal(r.status, 200, r.text);
+  });
+
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   mock.close();
   if (serverProc) serverProc.kill();

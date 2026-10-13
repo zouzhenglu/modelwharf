@@ -200,10 +200,15 @@ async function renderAccounts(m) {
 function summarizeExtra(extra) {
   if (!extra || typeof extra !== 'object') return '';
   const bits = [];
-  if (extra.credits != null) bits.push(`积分 ${extra.credits}`);
-  if (extra.plan) bits.push(extra.plan);
+  if (extra.username) bits.push(extra.username);
   if (extra.email) bits.push(extra.email);
-  if (extra.quota != null) bits.push(`配额 ${extra.quota}`);
+  if (extra.uid) bits.push(`uid ${String(extra.uid).slice(0, 10)}`);
+  if (extra.credits != null) bits.push(`积分 ${extra.credits}/${extra.quota ?? '?'}`);
+  if (extra.baseQuota) bits.push(`基础 ${extra.baseQuota}`);
+  if (extra.addOnQuota) bits.push(`附加 ${extra.addOnQuota}`);
+  if (extra.plan) bits.push(extra.plan);
+  if (extra.checkin?.claimable) bits.push('签到可领');
+  if (extra.userType) bits.push(extra.userType);
   return bits.join(' · ');
 }
 async function toggleAccount(id, enabled) { await api('/accounts/' + id, { method: 'PUT', body: { enabled } }); renderAccounts($('#main')); }
@@ -423,13 +428,21 @@ async function saveModel(id) {
 
 // ---------- virtual models (统一模型) ----------
 async function renderVirtual(m) {
-  const [virtuals, targets] = await Promise.all([api('/virtual-models'), api('/virtual-models/targets')]);
+  const [virtuals, targets, presets] = await Promise.all([api('/virtual-models'), api('/virtual-models/targets'), api('/virtual-models/presets')]);
   const byProvider = {};
   for (const t of targets) (byProvider[t.provider_id] = byProvider[t.provider_id] || []).push(t.public_name);
   m.innerHTML = `
   <h2>统一模型 <span class="muted">(${virtuals.length})</span></h2>
   <p class="muted" style="margin-bottom:12px">统一模型把多个平台的真实模型聚合成一个对外名称：客户端请求它时，网关按目标顺序依次尝试，<b>失败自动切换下一个</b>。也可以用来改名（如对外叫 <span class="mono">gpt-4o</span>，实际走 DeepSeek/GLM）。与「模型管理」里的直接模型相互独立，都可通过 /v1/models 看到。</p>
-  <div class="toolbar"><span class="spacer"></span><button onclick="openVirtualForm()">+ 新建统一模型</button></div>
+  <div class="toolbar">
+    <span class="muted">快速创建（同名多平台聚合）：</span>
+    <select id="vpSel" style="width:260px"><option value="">选择预设…</option>
+      ${presets.filter(p => p.multiProvider).map(p => `<option value="${esc(p.base)}">${esc(p.base)}（${p.targets.length} 平台: ${esc(p.providers.join(','))}）</option>`).join('')}
+    </select>
+    <button class="ghost" id="vpCreate">一键创建</button>
+    <span class="spacer"></span>
+    <button onclick="openVirtualForm()">+ 自定义</button>
+  </div>
   <div class="card" style="padding:6px 12px">
   <table><tr><th>对外名称</th><th>目标链（按优先级）</th><th>启用</th><th>备注</th><th>操作</th></tr>
   ${virtuals.map(v => {
@@ -443,9 +456,18 @@ async function renderVirtual(m) {
         <button class="small danger" onclick="delVirtual('${esc(v.public_name)}')">删</button></td>
   </tr>`;
   }).join('')}
-  ${!virtuals.length ? '<tr><td colspan="5" class="muted" style="text-align:center;padding:24px">暂无统一模型 — 点「新建」把多个平台的同名模型聚合成一条故障切换链</td></tr>' : ''}
+  ${!virtuals.length ? '<tr><td colspan="5" class="muted" style="text-align:center;padding:24px">暂无统一模型 — 用上方预设一键创建，或「自定义」</td></tr>' : ''}
   </table></div>`;
   window._virtualTargets = byProvider;
+  $('#vpCreate').onclick = async () => {
+    const base = $('#vpSel').value;
+    if (!base) return toast('先选一个预设', true);
+    const p = presets.find(x => x.base === base);
+    try {
+      await api('/virtual-models', { method: 'POST', body: { public_name: base, targets: p.targets.map((t, i) => ({ ...t, priority: (i + 1) * 10 })), note: `聚合 ${p.targets.length} 个平台，失败自动切换` } });
+      toast(`✓ 已创建统一模型 ${base}（${p.targets.length} 平台）`); go('virtual');
+    } catch (e) { toast(e.message, true); }
+  };
 }
 async function toggleVirtual(name, enabled) { await api('/virtual-models/' + encodeURIComponent(name), { method: 'PUT', body: { enabled } }); renderVirtual($('#main')); }
 async function delVirtual(name) { if (!confirm(`删除统一模型「${name}」？`)) return; await api('/virtual-models/' + encodeURIComponent(name), { method: 'DELETE' }); renderVirtual($('#main')); }
@@ -468,12 +490,20 @@ async function openVirtualForm(name) {
 function virtualTargetRow(i, t, byProvider) {
   const provs = Object.keys(byProvider);
   return `<div class="row vtRow" style="margin-bottom:6px" data-i="${i}">
-    <span class="muted mono">${i + 1}.</span>
+    <span class="muted mono vtNum">${i + 1}.</span>
     <select class="vtProvider" style="width:150px" onchange="vtProviderChange(this)">
       <option value="">选平台…</option>${provs.map(p => `<option value="${esc(p)}" ${t.provider_id === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select>
     <select class="vtModel" style="width:220px">${(byProvider[t.provider_id] || []).map(mm => `<option value="${esc(mm)}" ${t.public_name === mm ? 'selected' : ''}>${esc(mm)}</option>`).join('') || `<option value="${esc(t.public_name || '')}">${esc(t.public_name || '（先选平台）')}</option>`}</select>
-    <button class="small ghost" onclick="this.parentElement.remove();renumberVirtualRows()">✕</button>
+    <button class="small ghost" title="上移" onclick="moveVirtualRow(this,-1)">↑</button>
+    <button class="small ghost" title="下移" onclick="moveVirtualRow(this,1)">↓</button>
+    <button class="small ghost" title="移除" onclick="this.parentElement.remove();renumberVirtualRows()">✕</button>
   </div>`;
+}
+function moveVirtualRow(btn, dir) {
+  const row = btn.closest('.vtRow');
+  if (dir < 0 && row.previousElementSibling) row.previousElementSibling.before(row);
+  if (dir > 0 && row.nextElementSibling) row.nextElementSibling.after(row);
+  renumberVirtualRows();
 }
 function vtProviderChange(sel) {
   const row = sel.closest('.vtRow');
@@ -486,7 +516,7 @@ function addVirtualTargetRow() {
   box.insertAdjacentHTML('beforeend', virtualTargetRow(i, { provider_id: '', public_name: '' }, window._virtualTargets || {}));
 }
 function renumberVirtualRows() {
-  document.querySelectorAll('#vfTargets .vtRow').forEach((r, i) => r.querySelector('.muted').textContent = (i + 1) + '.');
+  document.querySelectorAll('#vfTargets .vtRow').forEach((r, i) => r.querySelector('.vtNum').textContent = (i + 1) + '.');
 }
 async function saveVirtual(origName) {
   const targets = [...document.querySelectorAll('#vfTargets .vtRow')].map((row, i) => ({
@@ -535,25 +565,56 @@ async function delKey(id) { if (!confirm('删除该 key？使用它的客户端�
 async function openKeyForm(id) {
   const keys = await api('/apikeys');
   const k = id ? keys.find(x => x.id === id) : null;
-  const models = await api('/models');
+  const [models, virtuals] = await Promise.all([api('/models?size=1000'), api('/virtual-models')]);
+  const allNames = [
+    ...virtuals.map(v => ({ name: v.public_name, tag: '统一' })),
+    ...models.filter(md => md.enabled).map(md => ({ name: md.public_name, tag: md.provider_id })),
+  ];
+  const selected = new Set((k?.allowed_models || '*') === '*' ? [] : (k?.allowed_models || '').split(',').map(s => s.trim()).filter(Boolean));
+  const isAll = (k?.allowed_models || '*') === '*';
+  window._keyModels = { allNames, selected };
   openModal(k ? '编辑 Key' : '生成 Key', `
     <div class="field"><label>名称</label><input id="kfName" value="${esc(k?.name || '')}" placeholder="如 my-trae-client"></div>
-    <div class="field"><label>允许的模型（* = 全部；逗号分隔模型名）</label>
-      <input id="kfModels" list="modelList" value="${esc(k?.allowed_models || '*')}">
-      <datalist id="modelList">${models.map(md => `<option value="${esc(md.public_name)}">`).join('')}</datalist></div>
+    <div class="field"><label>允许的模型</label>
+      <label class="row" style="gap:6px;font-size:13px;margin-bottom:6px"><input type="checkbox" id="kfAll" style="width:auto" ${isAll ? 'checked' : ''} onchange="kfToggleAll(this)"> 全部模型（不限制）</label>
+      <div id="kfPicker" style="${isAll ? 'display:none' : ''}">
+        <input id="kfSearch" placeholder="输入筛选（如 glm、kimi、qoder…）" oninput="kfRenderList()" style="margin-bottom:6px">
+        <div id="kfList" style="max-height:220px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px"></div>
+        <p class="muted" style="margin-top:4px" id="kfCount"></p>
+      </div></div>
     <div class="row">
       <div class="field" style="width:130px"><label>RPM 限制(0=∞)</label><input id="kfRpm" type="number" value="${k?.rpm_limit ?? 0}"></div>
       <div class="field" style="width:150px"><label>日限积分(0=∞)</label><input id="kfDaily" type="number" value="${k?.daily_limit ?? 0}"></div>
     </div>
     <div class="row"><span class="spacer"></span><button class="ghost" onclick="closeModal()">取消</button>
     <button onclick="saveKey(${id || 'null'})">保存</button></div>`, {});
+  kfRenderList();
   if (!id) {
     const r = await api('/apikeys', { method: 'POST', body: { name: '(生成中)' } });
     window._pendingKey = r.key; window._pendingKeyId = r.id;
   }
 }
+function kfToggleAll(cb) { $('#kfPicker').style.display = cb.checked ? 'none' : ''; }
+function kfRenderList() {
+  const q = ($('#kfSearch')?.value || '').toLowerCase();
+  const { allNames, selected } = window._keyModels;
+  const filtered = allNames.filter(m => !q || m.name.toLowerCase().includes(q) || m.tag.toLowerCase().includes(q));
+  $('#kfList').innerHTML = filtered.map(m => `
+    <label class="row" style="gap:6px;font-size:13px;padding:2px 4px;cursor:pointer">
+      <input type="checkbox" style="width:auto" ${selected.has(m.name) ? 'checked' : ''} onchange="kfPick('${esc(m.name)}', this.checked)">
+      <span class="mono">${esc(m.name)}</span> ${m.tag === '统一' ? '<span class="badge purple">统一</span>' : `<span class="badge gray">${esc(m.tag)}</span>`}
+    </label>`).join('') || '<p class="muted" style="padding:6px">无匹配模型</p>';
+  $('#kfCount').textContent = `已选 ${selected.size} 个模型`;
+}
+function kfPick(name, on) {
+  const { selected } = window._keyModels;
+  if (on) selected.add(name); else selected.delete(name);
+  $('#kfCount').textContent = `已选 ${selected.size} 个模型`;
+}
 async function saveKey(id) {
-  const body = { name: $('#kfName').value, allowed_models: $('#kfModels').value, rpm_limit: Number($('#kfRpm').value), daily_limit: Number($('#kfDaily').value) };
+  const all = $('#kfAll').checked;
+  const allowed = all ? '*' : [...window._keyModels.selected].join(',');
+  const body = { name: $('#kfName').value, allowed_models: allowed, rpm_limit: Number($('#kfRpm').value), daily_limit: Number($('#kfDaily').value) };
   try {
     if (!id && window._pendingKeyId) { await api('/apikeys/' + window._pendingKeyId, { method: 'PUT', body }); closeModal(); showKeyOnce(window._pendingKey); window._pendingKey = null; }
     else { await api('/apikeys/' + id, { method: 'PUT', body }); closeModal(); toast('已保存'); }
@@ -739,9 +800,19 @@ async function pgSend() {
 
 // ---------- settings ----------
 async function renderSettings(m) {
-  const s = await api('/settings');
+  const [s, ar] = await Promise.all([api('/settings'), api('/settings/auto-refresh')]);
   m.innerHTML = `
   <h2>设置</h2>
+  <div class="card">
+    <h3 style="font-size:14px;margin-bottom:10px">模型自动刷新 <span class="muted" style="font-size:12px">— 各公司模型更新很快，定时同步保持模型列表最新</span></h3>
+    <div class="row" style="max-width:400px">
+      <select id="stAutoRefresh" style="width:200px">
+        <option value="0" ${ar.minutes === 0 ? 'selected' : ''}>关闭（手动同步）</option>
+        ${[15, 30, 60, 120, 360, 720].map(v => `<option value="${v}" ${ar.minutes === v ? 'selected' : ''}>每 ${v < 60 ? v + ' 分钟' : (v / 60) + ' 小时'}</option>`).join('')}
+      </select>
+      <button onclick="saveAutoRefresh()">保存</button>
+    </div>
+  </div>
   <div class="card">
     <h3 style="font-size:14px;margin-bottom:10px">修改管理密码</h3>
     <div class="row" style="max-width:400px">
@@ -753,9 +824,11 @@ async function renderSettings(m) {
     <h3 style="font-size:14px;margin-bottom:10px">接入信息</h3>
     <div class="kv">
       <span class="muted">OpenAI 端点</span><span class="mono">http://localhost:8317/v1/chat/completions</span>
+      <span class="muted">Responses 端点</span><span class="mono">http://localhost:8317/v1/responses（Codex 等）</span>
       <span class="muted">Anthropic 端点</span><span class="mono">http://localhost:8317/v1/messages</span>
       <span class="muted">模型列表</span><span class="mono">http://localhost:8317/v1/models</span>
       <span class="muted">MCP 端点</span><span class="mono">http://localhost:8317/mcp</span>
+      <span class="muted">思考控制</span><span class="mono">模型名后缀 -think / -think-high / -xhigh / -nothink</span>
       <span class="muted">网关状态</span><span>${s.gatewayOpen ? badge('开放模式（未设置任何 key）','yellow') : badge('需要 API Key','green')}</span>
     </div>
     <p class="muted" style="margin-top:8px">环境变量：DSH_PORT / DSH_ADMIN_PASSWORD / DSH_API_KEYS（逗号分隔）/ DSH_DATA_DIR</p>
@@ -771,6 +844,12 @@ async function loadLogs() {
   const r = await api('/logs?size=120');
   $('#logPre').textContent = r.lines.join('\n') || '(空)';
   $('#logPre').scrollTop = $('#logPre').scrollHeight;
+}
+async function saveAutoRefresh() {
+  try {
+    const r = await api('/settings/auto-refresh', { method: 'PUT', body: { minutes: Number($('#stAutoRefresh').value) } });
+    toast(r.minutes ? `✓ 已开启：每 ${r.minutes < 60 ? r.minutes + ' 分钟' : (r.minutes / 60) + ' 小时'} 自动同步模型` : '已关闭自动同步');
+  } catch (e) { toast(e.message, true); }
 }
 async function savePw() {
   try { await api('/settings', { method: 'PUT', body: { adminPassword: $('#stPw').value } }); toast('已保存，下次登录生效'); }

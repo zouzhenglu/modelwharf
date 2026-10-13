@@ -386,6 +386,60 @@ router.get('/virtual-models/targets', (req, res) => {
   res.json(modelsCore.listEnabledModelNames());
 });
 
+// presets for one-click virtual model creation: group enabled real models by
+// normalized base name across providers (e.g. glm-5.2 exists on workbuddy + trae)
+router.get('/virtual-models/presets', (req, res) => {
+  const rows = modelsCore.listEnabledModelNames();
+  const norm = (n) => n.toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-|-$/g, '');
+  const groups = new Map();
+  for (const r of rows) {
+    const key = norm(r.public_name);
+    if (!groups.has(key)) groups.set(key, { base: key, targets: [] });
+    groups.get(key).targets.push({ provider_id: r.provider_id, public_name: r.public_name });
+  }
+  const presets = [...groups.values()]
+    .map(g => ({ ...g, multiProvider: g.targets.length > 1, providers: g.targets.map(t => t.provider_id) }))
+    .sort((a, b) => (b.multiProvider - a.multiProvider) || a.base.localeCompare(b.base));
+  res.json(presets);
+});
+
+// auto-refresh: run model sync on an interval (admin-configurable, minutes; 0 = off)
+let autoRefreshTimer = null;
+function setupAutoRefresh() {
+  if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
+  const minutes = Number(getSetting('autoRefreshModelsMinutes', 0));
+  if (!minutes || minutes < 5) return;
+  autoRefreshTimer = setInterval(async () => {
+    try {
+      const registry = require('../core/registry');
+      const accountsCore = require('../core/accounts');
+      const providers = db.prepare('SELECT id FROM providers').all();
+      for (const { id } of providers) {
+        const plugin = registry.get(id);
+        if (!plugin?.listModels) continue;
+        for (const a of accountsCore.listAccounts(id).filter(x => x.enabled)) {
+          try {
+            const models = await plugin.listModels(a);
+            modelsCore.syncProviderModels(plugin, a, models, { live: !models[0]?.static });
+          } catch { /* per-account failure ignored on schedule */ }
+        }
+      }
+      logger.info(`[auto-refresh] models synced (every ${minutes}min)`);
+    } catch (e) { logger.warn(`[auto-refresh] failed: ${e.message}`); }
+  }, minutes * 60 * 1000);
+  logger.info(`[auto-refresh] scheduled every ${minutes} min`);
+}
+router.get('/settings/auto-refresh', (req, res) => {
+  res.json({ minutes: Number(getSetting('autoRefreshModelsMinutes', 0)) });
+});
+router.put('/settings/auto-refresh', (req, res) => {
+  const minutes = Math.max(0, Math.min(1440, Number(req.body?.minutes || 0)));
+  setSetting('autoRefreshModelsMinutes', minutes);
+  setupAutoRefresh();
+  res.json({ ok: true, minutes });
+});
+router.setupAutoRefresh = setupAutoRefresh;
+
 // ---------- mcp servers ----------
 const mcp = require('./mcp');
 router.get('/mcp', (req, res) => { res.json(mcp.listServers()); });

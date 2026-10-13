@@ -133,11 +133,27 @@ for (const [id, label, baseUrl, homepage, models, docs] of VENDORS) {
       const { sseParse } = require('../utils/sse');
       const body = {
         model: opts.upstreamModel,
-        messages: opts.messages.map(m => ({ role: m.role, content: m.text ?? '' })),
+        messages: opts.messages.map(m => {
+          const out = { role: m.role };
+          if (m.parts?.some(p => p.type === 'image_url')) {
+            out.content = m.parts.map(p => p.type === 'text'
+              ? { type: 'text', text: p.text }
+              : { type: 'image_url', image_url: { url: p.url } });
+          } else {
+            out.content = m.text ?? '';
+          }
+          if (m.tool_calls) out.tool_calls = m.tool_calls;
+          if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
+          return out;
+        }),
         stream: true,
         ...(opts.params.max_tokens ? { max_tokens: opts.params.max_tokens } : {}),
         ...(opts.params.temperature != null ? { temperature: opts.params.temperature } : {}),
         ...(opts.params.top_p != null ? { top_p: opts.params.top_p } : {}),
+        ...(opts.params.reasoning_effort ? { reasoning_effort: opts.params.reasoning_effort } : {}),
+        ...(opts.params.enable_thinking !== undefined ? { enable_thinking: opts.params.enable_thinking } : {}),
+        ...(opts.params.thinking_budget ? { thinking_budget: opts.params.thinking_budget } : {}),
+        ...(opts.params.thinking ? { thinking: opts.params.thinking } : {}),
         ...(opts.tools?.length ? { tools: opts.tools, tool_choice: opts.params.tool_choice || 'auto' } : {}),
       };
       const resp = await httpRequest(`${base}/chat/completions`, {

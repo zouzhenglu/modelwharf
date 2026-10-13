@@ -128,14 +128,29 @@ module.exports = {
 
   async checkAccount(account) {
     await ensureToken(account);
-    // credits via CN portal
+    // identity + credits via CN portal (billing/meter/get-user-resource returns capacity packages)
     if (account.credentials.region !== 'intl') {
       const r = await httpJson(`${CN_PORTAL}/billing/meter/get-user-resource`, {
         method: 'POST', headers: headers(account, { Accept: 'application/json', Origin: CN_PORTAL, Referer: CN_PORTAL + '/' }), body: {}, timeoutMs: 15000,
       });
       if (r.status === 200) {
-        const d = r.json?.data || {};
-        return { ok: true, message: d.credit != null ? `积分 ${d.credit}/${d.limitNum ?? '?'}` : '有效', extra: { credits: d.credit, quota: d.limitNum } };
+        const items = r.json?.data?.Response?.Data?.Accounts || [];
+        // sum active capacity packages (CapacityRemain/CapacitySize are per-package credits)
+        let remain = 0, size = 0;
+        const now = Date.now();
+        for (const it of items) {
+          if (it.CapacityUnit !== 'credits') continue;
+          if (it.DeductionEndTime && Number(it.DeductionEndTime) < now) continue; // expired package
+          remain += Number(it.CapacityRemain || 0);
+          size += Number(it.CapacitySize || 0);
+        }
+        // identity: uid / uin
+        const uid = account.credentials.userId || null;
+        return {
+          ok: true,
+          message: `积分 ${remain} / ${size}${uid ? ` · uid ${String(uid).slice(0, 8)}` : ''}`,
+          extra: { credits: remain, quota: size, packages: items.length, uid, uin: items[0]?.Uin || null },
+        };
       }
       if (r.status === 401 || r.status === 403) return { ok: false, status: 'invalid', message: `auth ${r.status}` };
     }
@@ -147,11 +162,25 @@ module.exports = {
     const convId = crypto.randomUUID();
     const body = {
       model: upstreamModel,
-      messages: messages.map(m => ({ role: m.role === 'tool' ? 'tool' : m.role, content: m.text ?? '' })),
+      messages: messages.map(m => {
+        const out = { role: m.role === 'tool' ? 'tool' : m.role };
+        // vision: OpenAI-style image_url parts pass through directly (upstream is OpenAI-shaped)
+        if (m.parts?.some(p => p.type === 'image_url')) {
+          out.content = m.parts.map(p => p.type === 'text'
+            ? { type: 'text', text: p.text }
+            : { type: 'image_url', image_url: { url: p.url } });
+        } else {
+          out.content = m.text ?? '';
+        }
+        if (m.tool_calls) out.tool_calls = m.tool_calls;
+        if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
+        return out;
+      }),
       stream: true,
       stream_options: { include_usage: true },
       ...(params.max_tokens ? { max_tokens: params.max_tokens } : {}),
       ...(params.temperature != null ? { temperature: params.temperature } : {}),
+      ...(params.reasoning_effort ? { reasoning_effort: params.reasoning_effort } : {}),
       ...(tools?.length ? { tools, tool_choice: params.tool_choice || 'auto' } : {}),
       metadata: { conversation_id: convId },
     };

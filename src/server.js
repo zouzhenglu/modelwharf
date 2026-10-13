@@ -6,6 +6,7 @@ const logger = require('./logger');
 const registry = require('./core/registry');
 const openaiRoutes = require('./routes/openai');
 const anthropicRoutes = require('./routes/anthropic');
+const responsesRoutes = require('./routes/responses');
 const mcp = require('./routes/mcp');
 const adminRoutes = require('./routes/admin');
 
@@ -25,6 +26,7 @@ app.get('/health', (req, res) => res.json({ ok: true, version: config.version, p
 
 // API gateways
 app.use('/v1', openaiRoutes);
+app.use('/v1', responsesRoutes);        // /v1/responses (Codex / Responses API clients)
 app.use('/v1', anthropicRoutes);        // /v1/messages, /v1/models handled after openai (no conflicts)
 app.use('/mcp', mcp.router);            // MCP gateway (JSON-RPC over HTTP)
 app.use('/admin/api', adminRoutes);     // admin REST
@@ -42,6 +44,7 @@ app.use((err, req, res, next) => {
 
 function start() {
   registry.loadAll();
+  adminRoutes.setupAutoRefresh?.();
   const server = app.listen(config.port, config.host, () => {
     logger.info(`dsh-free-api v${config.version} listening on http://${config.host}:${config.port}`);
     logger.info(`admin panel: http://localhost:${config.port}/admin  (password: ${config.adminPassword === 'admin' ? 'admin (default, change it!)' : '(from env/settings)'})`);

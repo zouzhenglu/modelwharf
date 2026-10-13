@@ -37,17 +37,18 @@ function headers(account, extra = {}) {
 }
 
 /** fold multi-turn history into the JSONL envelope upstream requires (single user message) */
-function foldHistory(messages, model) {
+function foldHistory(messages, model, imageUrls = []) {
+  const last = messages[messages.length - 1];
+  let content = last?.text || '';
   if (messages.length <= 1) {
-    return { text: messages[0]?.text || '', feature: { thinking_enabled: true } };
+    return { text: content, images: imageUrls, feature: { thinking_enabled: true } };
   }
   const history = messages.slice(0, -1).map(m => ({ role: m.role, content: m.text || '' }));
-  const last = messages[messages.length - 1];
   const lines = ['# Conversation history (JSONL)'];
   for (const h of history) lines.push(JSON.stringify(h));
   lines.push('# Current message');
-  lines.push(JSON.stringify({ role: 'user', content: last?.text || '' }));
-  return { text: lines.join('\n'), feature: { thinking_enabled: true } };
+  lines.push(JSON.stringify({ role: 'user', content }));
+  return { text: lines.join('\n'), images: imageUrls, feature: { thinking_enabled: true } };
 }
 
 async function ensureToken(account) {
@@ -123,7 +124,10 @@ module.exports = {
   async *chat({ account, upstreamModel, messages, params, signal, onUsage }) {
     const token = await ensureToken(account);
     const chatId = crypto.randomUUID().replace(/-/g, '');
-    const folded = foldHistory(messages, upstreamModel);
+    // collect images from the last user message (vision models only)
+    const lastUser = [...messages].reverse().find(m => m.role === 'user');
+    const imageUrls = (lastUser?.parts || []).filter(p => p.type === 'image_url').map(p => p.url);
+    const folded = foldHistory(messages, upstreamModel, imageUrls);
     // upstream requires a pre-created chat id via /api/v2/chats/new; many deployments accept a fresh id — create properly:
     try {
       await httpJson(`${BASE}/api/v2/chats/new?chat_id=${chatId}`, {
@@ -149,7 +153,7 @@ module.exports = {
         role: 'user',
         content: folded.text,
         user_action: 'chat',
-        files: [],
+        files: (imageUrls || []).map(url => ({ type: 'image', url })),
         models: [upstreamModel],
         chat_type: 't2t',
         feature_config: {

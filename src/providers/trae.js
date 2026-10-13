@@ -157,6 +157,7 @@ module.exports = {
   },
 
   async checkAccount(account) {
+    const c = account.credentials;
     await ensureToken(account);
     const r = await httpJson(`${hosts(account).ug}/trae/api/v2/ug/checkin_credits/status`, {
       method: 'POST', headers: ideHeaders(account, { Accept: 'application/json' }), body: {}, timeoutMs: 15000,
@@ -164,19 +165,45 @@ module.exports = {
     if (r.status === 401 || r.status === 403) return { ok: false, status: 'invalid', message: `auth ${r.status}` };
     if (r.status !== 200) return { ok: false, status: 'cooling', message: `upstream ${r.status}` };
     const d = r.json?.data || r.json || {};
+    // identity: user info endpoint (uid/username) — non-fatal if unavailable
+    let uid = c.uid || null, uname = null;
+    try {
+      const u = await httpJson(`${hosts(account).oauth}/cloudide/api/v3/trae/GetUserInfo`, {
+        method: 'POST', headers: ideHeaders(account, { Accept: 'application/json', 'X-Cloudide-Token': c.token }), body: {}, timeoutMs: 12000,
+      });
+      if (u.status === 200 && u.json) {
+        const info = u.json.Result || u.json.data || u.json;
+        uid = info.UserID != null ? String(info.UserID) : (uid || info.userID || null);
+        uname = info.UserName || info.userName || info.NickName || null;
+      }
+    } catch { /* identity is best-effort */ }
     return {
-      ok: true, message: d.credits != null ? `剩余积分 ${d.credits}` : '有效',
-      extra: { credits: d.credits, checkedIn: d.checked_in },
+      ok: true,
+      message: `${d.credits != null ? `剩余积分 ${d.credits}` : '有效'}${uname ? ` · ${uname}` : ''}${uid ? ` (uid ${uid})` : ''}`,
+      extra: { credits: d.credits, checkedIn: d.checked_in, uid, username: uname },
     };
   },
 
   async *chat({ account, upstreamModel, messages, params, signal }) {
     const token = await ensureToken(account);
     // canonical -> trae payload: content as [{type:text}]
-    const conv = messages.map(m => ({
-      role: m.role,
-      content: Array.isArray(m.parts) ? m.parts : [{ type: 'text', text: m.text || '' }],
-    }));
+    const conv = messages.map(m => {
+      let content;
+      if (Array.isArray(m.parts)) {
+        // canonical parts -> trae [{type:'text'|'image_url',...}]
+        content = m.parts.map(p => p.type === 'text'
+          ? { type: 'text', text: p.text }
+          : { type: 'image_url', image_url: { url: p.url } });
+      } else {
+        content = [{ type: 'text', text: m.text || '' }];
+      }
+      const out = { role: m.role, content };
+      if (m.tool_calls) {
+        // trae expects function_call naming
+        out.function_call = m.tool_calls.map(tc => ({ name: tc.function?.name, arguments: tc.function?.arguments }));
+      }
+      return out;
+    });
     const body = {
       messages: conv,
       function: 'solo_work_lite',

@@ -11,6 +11,7 @@
 const registry = require('./registry');
 const accounts = require('./accounts');
 const models = require('./models');
+const { parseModelSuffix, reasoningParamsFor } = require('./messages');
 const logger = require('../logger');
 const config = require('../config');
 const { db } = require('../store');
@@ -47,8 +48,21 @@ async function runChat(opts, onEvent, onUsage) {
     }
     throw lastErr || new UpstreamError(502, 'all virtual targets failed');
   }
-  const model = db.prepare('SELECT * FROM models WHERE public_name=? AND enabled=1').get(opts.publicModel);
-  if (!model) throw new UpstreamError(404, `model '${opts.publicModel}' not found`);
+  // exact name first; if not found, try the base name after stripping a reasoning suffix
+  // (-think / -think-high / -xhigh / -nothink) so suffix conventions work on any model
+  let publicName = opts.publicModel;
+  let model = db.prepare('SELECT * FROM models WHERE public_name=? AND enabled=1').get(publicName);
+  if (!model) {
+    const { baseModel, reasoning } = parseModelSuffix(publicName);
+    if (reasoning !== undefined && baseModel) {
+      model = db.prepare('SELECT * FROM models WHERE public_name=? AND enabled=1').get(baseModel);
+      if (model) publicName = baseModel;
+    }
+  }
+  if (!model) {
+    const v = models.getVirtualModel(opts.publicModel); // convenience: tolerate virtual lookup mismatch
+    if (!v) throw new UpstreamError(404, `model '${opts.publicModel}' not found`);
+  }
   return runSingle(opts, model, onEvent, onUsage, started, opts.publicModel);
 }
 
@@ -61,15 +75,26 @@ async function runSingle(opts, model, onEvent, onUsage, started, usagePublicMode
   const plugin = registry.get(model.provider_id);
   if (!plugin) throw new UpstreamError(500, `provider plugin '${model.provider_id}' missing`);
 
+  // model-name suffix conventions (-think / -think-high / -xhigh / -nothink) + provider mapping.
+  // When the requested public name had a suffix, strip it for the upstream call if the
+  // stored upstream_model equals the suffixed public name (i.e. suffix was the only diff),
+  // or if the upstream model doesn't exist but the base does.
+  const { baseModel, reasoning } = parseModelSuffix(usagePublicModel || opts.publicModel);
+  let upstreamModel = model.upstream_model;
+  if (reasoning !== undefined && baseModel && baseModel !== (usagePublicModel || opts.publicModel)) {
+    if (upstreamModel === (usagePublicModel || opts.publicModel)) upstreamModel = baseModel;
+  }
+  const extraParams = reasoningParamsFor(model.provider_id, reasoning);
+
   accounts.acquire(account.id);
   let usage = null;
   try {
     for await (const data of plugin.chat({
       account,
-      upstreamModel: model.upstream_model,
+      upstreamModel,
       messages: opts.messages,
       tools: opts.tools,
-      params: opts.params || {},
+      params: { ...(opts.params || {}), ...extraParams },
       signal: opts.signal,
       onUsage: (u) => { usage = usage || {}; Object.assign(usage, u); },
     })) {
@@ -81,7 +106,7 @@ async function runSingle(opts, model, onEvent, onUsage, started, usagePublicMode
     const latency = Date.now() - started;
     models.recordUsage({
       apikeyId: opts.apikeyId, providerId: model.provider_id, accountId: account.id,
-      publicModel: usagePublicModel, upstreamModel: model.upstream_model,
+      publicModel: usagePublicModel, upstreamModel,
       inputTokens: usage?.input_tokens || 0, outputTokens: usage?.output_tokens || 0,
       credits: usage?.credits || 0, multiplier: model.multiplier || 1,
       latencyMs: latency, status: 200, source: opts.source,
@@ -93,12 +118,12 @@ async function runSingle(opts, model, onEvent, onUsage, started, usagePublicMode
     accounts.reportFailure(account.id, err);
     models.recordUsage({
       apikeyId: opts.apikeyId, providerId: model.provider_id, accountId: account.id,
-      publicModel: usagePublicModel, upstreamModel: model.upstream_model,
+      publicModel: usagePublicModel, upstreamModel,
       inputTokens: usage?.input_tokens || 0, outputTokens: usage?.output_tokens || 0,
       credits: usage?.credits || 0, multiplier: model.multiplier || 1,
       latencyMs: latency, status, error: err.message, source: opts.source,
     });
-    logger.error(`chat failed [${model.provider_id}/${model.upstream_model}] via account#${account.id}: ${err.message}`);
+    logger.error(`chat failed [${model.provider_id}/${upstreamModel}] via account#${account.id}: ${err.message}`);
     throw new UpstreamError(status >= 400 && status < 600 ? status : 502, err.message, err.upstream);
   } finally {
     accounts.release(account.id);
