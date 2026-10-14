@@ -72,12 +72,12 @@ async function render(page) {
 async function renderPlatforms(m) {
   const providers = await api('/providers');
   const groups = groupProviders(providers);
-  const supportsOnline = p => ['workbuddy', 'trae', 'qwen'].includes(p.id);
+  const supportsOnline = p => p.supports_online;
   m.innerHTML = `
   <h2>平台 <span class="muted">(${providers.length})</span></h2>
   <p class="muted" style="margin-bottom:12px">
     <b>获取全部模型</b>：把上游报给该账号的模型同步进来（增量补充，最全）。　
-    <b>恢复在线模型</b>：只保留上游<b>当前实际可用</b>的目录（与官方客户端一致，会替换现有列表；trae/workbuddy/qwen 支持）。
+    <b>恢复在线模型</b>：只保留上游<b>当前实际可用</b>的目录（与官方客户端一致，会替换现有列表；支持在线目录的平台显示该按钮）。
   </p>
   ${groups.map(g => `
   <div class="card"><h2 style="font-size:14px">${esc(g.name)} <span class="muted">(${g.providers.length})</span></h2>
@@ -98,7 +98,7 @@ async function renderPlatforms(m) {
 
 // ---------- dashboard ----------
 const VENDOR_GROUPS = [
-  { name: '逆向平台（账号池）', ids: ['trae', 'workbuddy', 'qoder', 'qodercn', 'qwen'] },
+  { name: '逆向平台（账号池）', ids: ['trae', 'workbuddy', 'qoder', 'qodercn', 'qwen', 'qwenwork'] },
   { name: '国际官方 API', ids: ['openai', 'anthropic', 'gemini', 'xai', 'openrouter', 'mistral', 'groq', 'together', 'perplexity', 'cerebras', 'github-copilot'] },
   { name: '国内官方 API', ids: ['dashscope', 'zhipu', 'moonshot', 'minimax', 'doubao', 'hunyuan', 'baichuan', 'stepfun', 'siliconflow', 'internvl', 'modelscope'] },
   { name: '本地 / 自定义', ids: ['ollama', 'openai-compat'] },
@@ -223,8 +223,10 @@ async function renderAccounts(m) {
     <th title="数字越小越优先被轮询使用。同平台多账号时，先用优先级小的，失败/冷却自动换下一个">优先级 ⓘ</th>
     <th title="该账号同时处理的最大请求数。达到上限后请求会分流到其他账号，避免单账号被上游限流">并发 ⓘ</th>
     <th>最近使用</th><th>启用</th><th>操作</th></tr>
-  ${accounts.map(a => {
-    const online = ['trae', 'workbuddy', 'qwen'].includes(a.provider_id);
+  ${(() => {
+    const onlineIds = new Set(providers.filter(p => p.supports_online).map(p => p.id));
+    return accounts.map(a => {
+    const online = onlineIds.has(a.provider_id);
     return `<tr>
     <td>${esc(a.provider_id)}</td>
     <td><b>${esc(a.name)}</b>${a.extra?.username ? `<div class="muted" style="font-size:12px">${esc(a.extra.username)}${a.extra.email ? ' · ' + esc(a.extra.email) : ''}</div>` : ''}</td>
@@ -240,7 +242,8 @@ async function renderAccounts(m) {
       <button class="small ghost" onclick="openAccountForm(${a.id})">编辑</button>
       <button class="small danger" onclick="delAccount(${a.id})">删</button>
     </td></tr>`;
-  }).join('')}
+    }).join('');
+  })()}
   ${!accounts.length ? '<tr><td colspan="10" class="muted" style="text-align:center;padding:24px">暂无账号，点右上角添加，或用「导入本机登录」自动发现</td></tr>' : ''}
   </table></div>`;
   $('#fProvider').onchange = e => { acctFilter.provider_id = e.target.value; renderAccounts(m); };
@@ -359,7 +362,7 @@ async function openAccountForm(id) {
   mFormAccount(acct, providers, p);
 }
 function mFormAccount(acct, providers, p) {
-  const supportsOAuth = !acct && ['workbuddy'].includes(p?.id); // platforms with device-flow login
+  const supportsOAuth = !acct && ['workbuddy', 'qwenwork'].includes(p?.id); // platforms with device-flow login
   openModal(acct ? '编辑账号' : '添加账号', `
     <div class="field"><label>平台</label>
       <select id="afProvider" ${acct ? 'disabled' : ''}>${providers.map(x => `<option value="${x.id}" ${p?.id === x.id ? 'selected' : ''}>${esc(x.label)} (${x.id})</option>`).join('')}</select></div>
@@ -383,7 +386,7 @@ function mFormAccount(acct, providers, p) {
   $('#afProvider')?.addEventListener('change', e => {
     const np = providers.find(x => x.id === e.target.value);
     // re-render the whole form for oauth-capable platforms
-    if (!acct && ['workbuddy'].includes(np?.id)) { mFormAccount(null, providers, np); return; }
+    if (!acct && ['workbuddy', 'qwenwork'].includes(np?.id)) { mFormAccount(null, providers, np); return; }
     $('#afCreds').innerHTML = credFieldsHtml(np, null);
     const d = $('#afDocs'); if (d) d.textContent = np?.docs || '';
   });
@@ -447,7 +450,6 @@ async function renderModels(m) {
   const providerOpts = providers.map(p => `<option value="${p.id}" ${modelFilter.provider_id === p.id ? 'selected' : ''}>${esc(p.label)}</option>`).join('');
   m.innerHTML = `
   <h2>模型管理 <span class="muted">(${models.length})</span></h2>
-  <div class="hint">📖 <b>「同步模型」是什么：</b>登录各平台账号后，从这里把<b>该账号在平台上能用的真实模型</b>拉取进网关（按平台逐个拉，新增不覆盖；想要和官方客户端完全一致的列表用账号页的「恢复在线」）。<b>它只影响这里能看到的模型</b>，与「统一模型」的聚合规则无关。设置页可开启定时自动同步。</div>
   <div class="toolbar">
     <select id="mfProvider" style="width:150px"><option value="">全部平台</option>${providerOpts}</select>
     <input id="mfSearch" class="searchbox" placeholder="搜索模型名/标签…" value="${esc(modelFilter.search)}">
@@ -1181,7 +1183,7 @@ claude`;
     <div class="doccard">
       <h4>① 概念：这套网关是什么</h4>
       <ul>
-        <li>把多个 AI 平台（Trae / CodeBuddy / Qoder / 千问 + 各官方 API）的账号<b>聚合成一套标准 API</b></li>
+        <li>把多个 AI 平台（Trae / CodeBuddy / Qoder / 千问 / 千问办公 + 各官方 API）的账号<b>聚合成一套标准 API</b></li>
         <li>三种协议都支持：<code>OpenAI Chat</code>、<code>OpenAI Responses</code>（Codex）、<code>Anthropic Messages</code>（Claude Code）</li>
         <li><b>统一模型</b> = 同名模型多平台聚合，一个平台挂了自动切下一个</li>
         <li>模型名后缀控制思考：<code>-think</code> / <code>-think-high</code> / <code>-nothink</code></li>
@@ -1238,6 +1240,7 @@ claude`;
       <tr><td><b>503 no healthy account</b></td><td class="muted">该平台所有账号失效/冷却中；「平台账号」页一键检测，或重新扫码。</td></tr>
       <tr><td><b>模型列表里没有想要的</b></td><td class="muted">「模型管理」→ 选平台「开始同步」；或账号行「获取全部模型」；官方客户端有的用「恢复在线」。</td></tr>
       <tr><td><b>Qoder 账号提示缺 PAT</b></td><td class="muted">Qoder 聊天通道必须用 PAT：客户端 → 设置 → 集成/Integrations 创建（pt- 开头），在账号里编辑填入。本机扫描到的登录态只能查积分，不能对话，已不再自动导入。</td></tr>
+      <tr><td><b>千问办公账号失效</b></td><td class="muted">access token 约 7 天过期；配置了 Refresh Token 会自动续期。彻底失效时重开千问办公客户端登录一次，再点「扫描本机登录」重新导入；或在添加账号弹窗里用「网页授权登录」（设备码流程，无需客户端）。聊天需本机装有千问办公客户端（签名用官方 wasm）。</td></tr>
     </table>
   </div>`;
 }

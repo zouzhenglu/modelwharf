@@ -49,6 +49,7 @@ router.get('/providers', (req, res) => {
   res.json(rows.map(r => {
     const p = registry.get(r.id);
     return { ...r, config: JSON.parse(r.config || '{}'), label: p?.label || r.id, homepage: p?.homepage, credFields: p?.credFields || [], docs: p?.docs,
+      supports_online: typeof p?.listOnlineModels === 'function',
       account_count: db.prepare('SELECT COUNT(*) c FROM accounts WHERE provider_id=?').get(r.id).c,
       model_count: db.prepare('SELECT COUNT(*) c FROM models WHERE provider_id=? AND enabled=1').get(r.id).c };
   }));

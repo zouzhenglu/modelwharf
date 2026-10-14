@@ -212,10 +212,19 @@ module.exports = {
     'Kimi-K2.8-Preview': 'kmodel', 'MiniMax-M2.7': 'mmodel', Auto: 'auto',
   },
 
+  _publicNameFor(display) {
+    return 'qoder-' + display.toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-|-$/g, '');
+  },
+
   async listModels(account) {
-    // COSY-signed /model/list needs full crypto; expose the known static catalog (safe),
-    // marking free/offpeak info via tags on the model rows.
-    return Object.entries(this._modelMap).map(([display, key]) => ({ upstream: key, publicName: 'qoder-' + display.toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-|-$/g, '') }));
+    // Prefer the live COSY-signed catalog; fall back to the known static catalog
+    // (marked static so refresh-models never pollutes a live-synced list).
+    try {
+      return (await this.listOnlineModels(account)).models;
+    } catch (e) {
+      logger.warn(`qoder listModels: ${e.message} — falling back to static list`);
+    }
+    return Object.entries(this._modelMap).map(([display, key]) => ({ upstream: key, publicName: this._publicNameFor(display), static: true }));
   },
 
   /**
@@ -233,6 +242,7 @@ module.exports = {
     if (r.status !== 200) throw new Error(`model/list ${r.status}: ${String(r.text || '').slice(0, 150)}`);
     const j = r.json?.data || r.json || {};
     const list = j.chat || j.models || (Array.isArray(j) ? j : []);
+    const displayByKey = Object.fromEntries(Object.entries(this._modelMap).map(([display, key]) => [key, display]));
     const models = [];
     const seen = new Set();
     for (const m of list) {
@@ -247,7 +257,7 @@ module.exports = {
       if (m.max_input_tokens) tags.push(`${Math.round(m.max_input_tokens / 1000)}k`);
       models.push({
         upstream: key,
-        publicName: key.toLowerCase(),
+        publicName: displayByKey[key] ? this._publicNameFor(displayByKey[key]) : key.toLowerCase(),
         free: rate === 0,
         multiplier: rate ?? 1,
         ctx: m.max_input_tokens || null,

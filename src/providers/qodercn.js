@@ -25,6 +25,10 @@ module.exports = {
     account.credentials = { ...account.credentials, region: 'cn' };
     return base.listModels(account);
   },
+  async listOnlineModels(account) {
+    account.credentials = { ...account.credentials, region: 'cn' };
+    return base.listOnlineModels(account);
+  },
   async checkAccount(account) {
     account.credentials = { ...account.credentials, region: 'cn' };
     return base.checkAccount(account);

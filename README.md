@@ -1,6 +1,6 @@
 # dsh-free-api
 
-多平台 AI 代理网关：把 **workbuddy(腾讯 CodeBuddy)、Trae(字节)、通义千问(chat.qwen.ai)、Qoder(阿里，国内/国际)、以及任意 OpenAI 兼容 API / 本地模型(Ollama)** 统一代理成标准 API，供各类 harness 工具（Claude Code、Cline、OpenClaw、Cursor 等）接入。自带网页管理面板。
+多平台 AI 代理网关：把 **workbuddy(腾讯 CodeBuddy)、Trae(字节)、通义千问(chat.qwen.ai)、千问办公(QwenWork)、Qoder(阿里，国内/国际)、以及任意 OpenAI 兼容 API / 本地模型(Ollama)** 统一代理成标准 API，供各类 harness 工具（Claude Code、Cline、OpenClaw、Cursor 等）接入。自带网页管理面板。
 
 ```
 harness 工具 ──►  本网关 (OpenAI /v1  +  Anthropic /v1/messages  +  MCP /mcp)
@@ -9,6 +9,7 @@ harness 工具 ──►  本网关 (OpenAI /v1  +  Anthropic /v1/messages  +  M
                         │   ├─ workbuddy / CodeBuddy (腾讯) → copilot.tencent.com
                         │   ├─ trae (字节)                  → trae-api-cn.mchost.guru
                         │   ├─ qwen (chat.qwen.ai)          → 千问网页版
+                        │   ├─ qwenwork (千问办公)          → gateway.qwenwork.cn
                         │   ├─ qoder (阿里国际)             → api1.qoder.sh
                         │   └─ qodercn (阿里国内)           → gateway.qoder.com.cn
                         ├─ 国际官方 API（key 即用）
@@ -42,12 +43,13 @@ npm start                 # 默认 http://localhost:8317
 ## 使用流程
 
 1. **添加账号**（面板 → 平台账号 → 添加 / 或点「扫描本机登录」按钮导入本机已有登录态）
-   - **手动扫描导入**：面板 → 平台账号 → 「扫描本机登录」，会扫描本机 Trae / TRAE SOLO / CodeBuddy(WorkBuddy) / Qoder CLI 的已登录凭证并导入（按凭证指纹去重，可重复点击）。加密格式的凭证（新版 Trae / CodeBuddy `$wbEncrypted`）无法直接读出，面板会提示改为手动粘贴 token。
+   - **手动扫描导入**：面板 → 平台账号 → 「扫描本机登录」，会扫描本机 Trae / TRAE SOLO / CodeBuddy(WorkBuddy) / Qoder CLI / 千问办公客户端 的已登录凭证并导入（按凭证指纹去重，可重复点击）。加密格式的凭证（新版 Trae / CodeBuddy `$wbEncrypted`）无法直接读出，面板会提示改为手动粘贴 token。
    - **手动添加**：面板 → 平台账号 → 「+ 添加账号」，选平台后按表单填凭证。各平台凭证来源：
      - Trae：本机 `%APPDATA%\Trae CN\User\globalStorage\storage.json` 的 `iCubeAuthInfo://icube.cloudide` 值（或抓 IDE 请求头 `Authorization` 里的 JWT）
      - WorkBuddy/CodeBuddy：`%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\*.info`，或抓包 `copilot.tencent.com` 请求头 `Authorization`
      - Qoder：客户端 设置 → Integrations 创建 PAT（`pt-` 开头，最稳）
      - 千问：chat.qwen.ai 登录后 Cookie 里的 `token`；也可直接填邮箱+密码由网关自动登录续期
+     - 千问办公(QwenWork)：推荐「扫描本机登录」自动读取客户端登录态（`%APPDATA%\QwenWorkCN\auth-v2.dat`）；或添加账号弹窗点「网页授权登录」（设备码流程，无需客户端）；聊天需本机装有千问办公客户端（wasm 签名）
 2. **同步模型**（仪表盘 → 平台「同步模型」；之后可逐个模型 启用/停用/改名/设倍率/打标签）
 3. **生成 API Key**（可限定该 key 能用的模型、限速）
 4. 在 harness 工具里配上面三个端点即可
@@ -60,17 +62,18 @@ npm start                 # 默认 http://localhost:8317
 | 多账号登录与切换 | accounts 表按平台任意多账号；优先级+轮询+并发上限；401/403 自动标记失效，5xx 指数退避冷却 |
 | 网页后端管理 | `/admin` 单页面板：账号/模型/Key/用量/MCP/测试台/设置 |
 | 网页测试 | 测试台：选模型 → 流式/非流式 → 实时输出+token+积分耗时 |
-| 剩余积分 | 账号「检查」按钮调用各平台积分接口（trae 签到状态、qoder 官方 quota、codebuddy billing、qwen 档案） |
+| 剩余积分 | 账号「检查」按钮调用各平台积分接口（trae 签到状态、qoder 官方 quota、codebuddy billing、qwen 档案、qwenwork 三池积分：每日免费/订阅/长期） |
 | 用量/禁用启用/搜索筛选 | usage 全量日志（时间/平台/账号/模型/token/积分/耗时/状态），各列表页均带搜索+筛选 |
 | 扩展接口 | provider 插件协议（见 `src/core/registry.js` 注释）；新增平台=一个文件；已内置 24 个官方厂商 + openai-compat/ollama 通用插件 |
 | 账号-模型绑定管理 | 模型层面启停 + API key 级 `allowed_models` 白名单 |
-| 本地集成 | 「导入本机登录」扫描 Trae/CodeBuddy/Qoder CLI 的本地凭证文件 |
+| 本地集成 | 「导入本机登录」扫描 Trae/CodeBuddy/Qoder CLI/千问办公客户端 的本地凭证文件 |
 | 主流协议 | OpenAI `/v1/chat/completions`、`/v1/completions`、`/v1/models`；Anthropic `/v1/messages`（含 thinking/tool_use）；MCP 网关 |
 
 ## 已知限制（如实说明）
 
 - **逆向平台随时可能变化**：端点/加密/风控来自开源社区逆向成果（见下），上游改版后需要跟着更新对应插件。Trae 本地存储若为加密格式，需手动粘贴 token；WorkBuddy 新版客户端的 `$wbEncrypted` 信封同理。
 - **Qoder COSY 签名**未完整实现（签名+AES+RSA 链路复杂），当前用 PAT 模式（官方支持创建，最稳）。
+- **千问办公（qwenwork）**聊天请求体必须由官方客户端自带的 `qoder_auth_wasm_bg.wasm` 签名（本机需安装千问办公客户端；运行时从安装目录读取，不随本仓库分发）。积分与账号检查无需客户端。上游 1.2.x 已验证，客户端大版本更新后可能需要适配。
 - MCP 网关目前支持 tools 的 list/call（stdio + http 传输），resources/prompts 未实现。
 - 单机 SQLite，无分布式；面向个人/小团队本地使用。
 
@@ -80,6 +83,7 @@ npm start                 # 默认 http://localhost:8317
 - Trae: `JeffHu0912/trae2api`、`Trae2api-cn`、`A-23187/trae-api`
 - WorkBuddy/CodeBuddy: `linguo2625469/workbuddy2api-panel`、`xiaofan6ya/workbuddy2api`
 - Qoder: `shuishuipingan/qoder2api-hub`、`fengyinxia/qoder2api`、`Zhengyuuuui/qoder2api`
+- QwenWork (千问办公): `wearetheone777/dumate2api`、`wpy030414/xrl-router-plugin-qwenwork`；wasm 签名封装基于 `wicm84266964/Buddy2api`（MIT，`src/providers/_qwenwork_wasm_helper.mjs`）
 - Qwen: `LLM-Red-Team/qwen-free-api` 系
 
 ⚠️ 使用逆向接口请自行评估各平台服务条款与账号风险。
