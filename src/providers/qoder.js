@@ -132,8 +132,24 @@ async function exchangePAT(account) {
   const r = await httpJson(`${gw(account)}/algo/api/v3/user/jobToken?Encode=1`, {
     method: 'POST', headers: { ...signatureHeaders(), Authorization: `Bearer ${pat}` }, body: qoderEncode(Buffer.from(outer)), timeoutMs: 20000,
   });
-  if (r.status !== 200) throw Object.assign(new Error(`jobToken 交换失败 ${r.status}: ${String(r.text || '').slice(0, 120)}`), { status: 502 });
-  const d = r.json?.data || r.json || {};
+  if (r.status !== 200) {
+    // 区域隔离：intl PAT 在 CN 网关上会 401，反之亦然——自动尝试另一区域的网关
+    const alt = c.region === 'intl' ? 'https://gateway.qoder.com.cn' : (c.region === 'cn' ? 'https://api1.qoder.sh' : null);
+    if (!alt) throw Object.assign(new Error(`jobToken 交换失败 ${r.status}: ${String(r.text || '').slice(0, 120)}`), { status: 502 });
+    const r2 = await httpJson(`${alt}/algo/api/v3/user/jobToken?Encode=1`, {
+      method: 'POST', headers: { ...signatureHeaders(), Authorization: `Bearer ${pat}` }, body: qoderEncode(Buffer.from(outer)), timeoutMs: 20000,
+    });
+    if (r2.status !== 200) throw Object.assign(new Error(`jobToken 交换失败（双网关） ${r.status}/${r2.status}`), { status: 502 });
+    return finishExchange(account, r2.json);
+  }
+  return finishExchange(account, r.json);
+}
+
+/** consume a successful jobToken response: persist identity + tokens, build COSY session */
+function finishExchange(account, json, gatewayHost) {
+  const { db } = require('../store');
+  const c = account.credentials;
+  const d = json?.data || json || {};
   // persist identity + tokens into credentials so COSY session uses them
   const fresh = {
     ...c,
@@ -144,6 +160,7 @@ async function exchangePAT(account) {
     username: d.name || null,
     plan: d.plan || null,
     jobExpiresAt: d.expireTime ? Number(d.expireTime) : null,
+    ...(gatewayHost ? { jobGateway: gatewayHost } : {}),
   };
   db.prepare('UPDATE accounts SET credentials=?, extra=? WHERE id=?')
     .run(JSON.stringify(fresh), JSON.stringify({ uid: fresh.userId, email: fresh.email, username: fresh.username, plan: fresh.plan, credits: account.extra?.credits, quota: account.extra?.quota }), account.id);
@@ -206,8 +223,9 @@ module.exports = {
    */
   async listOnlineModels(account) {
     await ensureSession(account);
+    const c = account.credentials;
     const { headers, body } = cosyBearer(account, { path: '/api/v2/model/list', bodyObj: {}, accept: 'application/json' });
-    const r = await httpJson(`${gw(account)}/algo/api/v2/model/list?Encode=1`, {
+    const r = await httpJson(`${c.jobGateway || gw(account)}/algo/api/v2/model/list?Encode=1`, {
       method: 'GET', headers, body, timeoutMs: 20000,
     });
     if (r.status !== 200) throw new Error(`model/list ${r.status}: ${String(r.text || '').slice(0, 150)}`);
@@ -242,7 +260,29 @@ module.exports = {
   async checkAccount(account) {
     // official quota endpoint needs securityOauthToken; PAT fallback -> /user/status
     const c = account.credentials;
-    if (c.securityOauthToken || c.pat) {
+    if (c.pat) {
+      // PAT 账号：先 jobToken 交换（拿身份+jt- token），再用 jt- 查 quota
+      await exchangePAT(account);
+      const jtToken = c.jobToken;
+      if (jtToken) {
+        const q = await httpJson(`${openapiHost(account)}/api/v2/quota/usage`, {
+          headers: { Authorization: `Bearer ${jtToken}`, 'User-Agent': 'Qoder', Accept: 'application/json' }, timeoutMs: 15000,
+        }).catch(() => ({ status: 0, json: null }));
+        if (q.status === 200) {
+          const qq = q.json?.userQuota || {};
+          const addOn = q.json?.addOnQuota || null;
+          const remain = (qq.remaining ?? 0) + (addOn?.remaining ?? 0);
+          const total = (qq.total ?? 0) + (addOn?.total ?? 0);
+          return {
+            ok: true,
+            message: `积分 ${remain} / ${total}${addOn ? '（附加 ' + addOn.remaining + '/' + addOn.total + '）' : ''} · ${account.credentials.username || ''}`,
+            extra: { credits: remain, quota: total, baseQuota: qq.remaining != null ? `${qq.remaining}/${qq.total}` : null, addOnQuota: addOn ? `${addOn.remaining}/${addOn.total}` : null, username: account.credentials.username, email: account.credentials.email, plan: account.credentials.plan, uid: account.credentials.userId },
+          };
+        }
+      }
+      return { ok: true, message: `PAT 有效 · ${account.credentials.username || ''} · plan ${account.credentials.plan || '?'}`, extra: { username: account.credentials.username, email: account.credentials.email, plan: account.credentials.plan, uid: account.credentials.userId } };
+    }
+    if (c.securityOauthToken) {
       const r = await httpJson(`${openapiHost(account)}/api/v2/quota/usage`, {
         headers: { Authorization: authHeader(account), 'User-Agent': 'Qoder', Accept: 'application/json' }, timeoutMs: 15000,
       });
@@ -338,7 +378,7 @@ module.exports = {
       path: '/api/v2/service/pro/sse/agent_chat_generation',
       bodyObj, accept: 'text/event-stream', modelKey: upstreamModel,
     });
-    const resp = await httpRequest(`${gw(account)}/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1`, {
+    const resp = await httpRequest(`${c.jobGateway || gw(account)}/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1`, {
       method: 'POST', headers, body, signal, timeoutMs: config.requestTimeoutMs,
     });
     if (resp.statusCode >= 400) {
