@@ -15,3 +15,6 @@ Thumbs.db
 
 # Test artifacts
 /tmp/
+diag.cjs
+diag2.cjs
+inspect.cjs
