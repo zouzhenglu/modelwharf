@@ -186,6 +186,8 @@ function ensureSession(account) {
   const expired = c.jobExpiresAt && Date.now() > c.jobExpiresAt - 10 * 60 * 1000;
   if (cached && !expired) return cached;
   if (c.pat) return exchangePAT(account);
+  const { db } = require('../store');
+  db.prepare("UPDATE accounts SET status='invalid', status_message=? WHERE id=?").run('缺少 PAT：聊天通道需要 pt- 令牌（客户端 → 设置 → 集成 创建后填入）', account.id);
   throw Object.assign(new Error('Qoder 聊天/在线目录需要 PAT（pt-）：客户端 → 设置 → 集成/Integrations 创建后填入账号'), { status: 401 });
 }
 
@@ -335,6 +337,12 @@ module.exports = {
     // chat requires PAT→jobToken→COSY. dt- tokens cannot use the chat channel.
     try { ensureSession(account); } catch (e) { if (e.status) throw e; }
     const c = account.credentials;
+    if (!c.pat && !c.jobToken) {
+      // dt- token account without PAT: mark and fail fast with a clear message
+      const { db } = require('../store');
+      db.prepare("UPDATE accounts SET status='invalid', status_message=? WHERE id=?").run('缺少 PAT：聊天通道需要 pt- 令牌（客户端 → 设置 → 集成 创建后填入）', account.id);
+      throw Object.assign(new Error('该账号缺少 PAT（聊天通道必须 pt- 令牌）：Qoder 客户端 → 设置 → 集成/Integrations 创建后，编辑账号填入'), { status: 401 });
+    }
     const rid = crypto.randomUUID();
     // hub-style body: OpenAI-shaped messages at the top level (verified against the live gateway)
     const userMsg = [...messages].reverse().find(m => m.role === 'user');
@@ -401,7 +409,13 @@ module.exports = {
       }
       let inner = env.body;
       if (typeof inner === 'string') { try { inner = JSON.parse(inner); } catch { inner = null; } }
-      if (!inner || typeof inner !== 'object' || !inner.choices) continue;
+      if (!inner || typeof inner !== 'object' || !inner.choices) {
+        // error/finish frames carry a code/message instead of choices — surface them
+        if (inner?.code && inner.code !== 'OK' && inner.code !== 0) {
+          throw Object.assign(new Error(`qoder: ${inner.message || inner.code}${inner.details ? ' · ' + String(inner.details).slice(0, 120) : ''}`), { status: 502 });
+        }
+        continue;
+      }
       if (inner.usage) onUsage?.({ input_tokens: inner.usage.prompt_tokens, output_tokens: inner.usage.completion_tokens, credits: inner.credits ?? inner.original_credits });
       // inner is OpenAI-shaped choices[].delta
       yield JSON.stringify(inner);
