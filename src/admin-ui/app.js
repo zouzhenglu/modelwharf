@@ -64,6 +64,7 @@ async function render(page) {
   if (page === 'usage') return renderUsage(m);
   if (page === 'mcp') return renderMcp(m);
   if (page === 'playground') return renderPlayground(m);
+  if (page === 'docs') return renderDocs(m);
   if (page === 'settings') return renderSettings(m);
 }
 
@@ -446,14 +447,15 @@ async function renderModels(m) {
   const providerOpts = providers.map(p => `<option value="${p.id}" ${modelFilter.provider_id === p.id ? 'selected' : ''}>${esc(p.label)}</option>`).join('');
   m.innerHTML = `
   <h2>模型管理 <span class="muted">(${models.length})</span></h2>
+  <div class="hint">📖 <b>「同步模型」是什么：</b>登录各平台账号后，从这里把<b>该账号在平台上能用的真实模型</b>拉取进网关（按平台逐个拉，新增不覆盖；想要和官方客户端完全一致的列表用账号页的「恢复在线」）。<b>它只影响这里能看到的模型</b>，与「统一模型」的聚合规则无关。设置页可开启定时自动同步。</div>
   <div class="toolbar">
     <select id="mfProvider" style="width:150px"><option value="">全部平台</option>${providerOpts}</select>
     <input id="mfSearch" class="searchbox" placeholder="搜索模型名/标签…" value="${esc(modelFilter.search)}">
     <select id="mfEnabled" style="width:100px"><option value="">全部</option><option value="1" ${modelFilter.enabled === '1' ? 'selected' : ''}>仅启用</option><option value="0" ${modelFilter.enabled === '0' ? 'selected' : ''}>仅停用</option></select>
     <input id="mfTag" style="width:110px" placeholder="标签筛选" value="${esc(modelFilter.tag)}">
     <span class="spacer"></span>
-    <select id="mfSyncSel" style="width:170px"><option value="">同步模型：选择平台…</option><option value="__all">全部平台</option>${providerOpts}</select>
-    <button class="ghost" id="mfSyncBtn">开始同步</button>
+    <select id="mfSyncSel" style="width:180px" title="把所选平台上该账号可用的模型拉取进网关（增量）"><option value="">同步模型：选择平台…</option><option value="__all">全部平台（逐个拉取）</option>${providerOpts}</select>
+    <button class="ghost" id="mfSyncBtn" title="把所选平台账号在上游可用的模型同步进网关（增量，不删除已有）">开始同步</button>
     <button onclick="openModelForm()">+ 手动添加</button>
   </div>
   <div class="toolbar" style="background:var(--panel2);border-radius:8px;padding:8px 12px">
@@ -573,6 +575,7 @@ async function renderVirtual(m) {
       ${presets.filter(p => p.multiProvider).map(p => `<option value="${esc(p.base)}">${esc(p.base)}（${p.targets.length} 平台: ${esc(p.providers.join(','))}）</option>`).join('')}
     </select>
     <button class="ghost" id="vpCreate" title="按预设聚合：每个平台一个目标；具体用哪个账号由该平台的账号池按优先级/轮询决定，无需逐账号配置">一键创建</button>
+    <button class="ghost" id="vpCreateAll" title="把下方列表里所有「同名且 ≥2 平台」的预设一次性全部创建为统一模型（已存在的跳过）">⚡ 一键创建全部（${presets.filter(p => p.multiProvider).length}）</button>
     <span class="spacer"></span>
     <button onclick="openVirtualForm()">+ 自定义</button>
   </div>
@@ -599,6 +602,17 @@ async function renderVirtual(m) {
     try {
       await api('/virtual-models', { method: 'POST', body: { public_name: base, targets: p.targets.map((t, i) => ({ ...t, priority: (i + 1) * 10 })), note: `聚合 ${p.targets.length} 个平台，失败自动切换` } });
       toast(`✓ 已创建统一模型 ${base}（${p.targets.length} 平台）`); go('virtual');
+    } catch (e) { toast(e.message, true); }
+  };
+  $('#vpCreateAll').onclick = async () => {
+    if (!confirm('把所有同名多平台预设一次性创建为统一模型？已存在的同名统一模型会跳过。')) return;
+    try {
+      const r = await api('/virtual-models/create-all', { method: 'POST' });
+      toast(`✓ 已创建 ${r.created.length} 个统一模型${r.skipped.length ? `（${r.skipped.length} 个已存在跳过）` : ''}`);
+      if (r.created.length) openModal('✓ 一键创建完成', `
+        <div class="field" style="font-size:13px;line-height:2">${r.created.map(n => `✓ <span class="mono">${esc(n)}</span>`).join('<br>') || '<span class="muted">没有新的可创建（都已存在）</span>'}</div>
+        <div class="row"><span class="spacer"></span><button onclick="closeModal();go('virtual')">好的</button></div>`, {});
+      go('virtual');
     } catch (e) { toast(e.message, true); }
   };
 }
@@ -1116,6 +1130,123 @@ async function pgSend() {
     pgRenderOut();
   }
   pgBusy = false; sendBtn.disabled = false;
+}
+
+// ---------- docs (文档教程：教人 + 教 AI 对接) ----------
+async function renderDocs(m) {
+  const d = await api('/docs');
+  const keyHint = d.openGateway ? '（当前未创建任何 Key，网关为开放模式；下面的示例中 Authorization 一行可省略）'
+    : `（用你自己的 key 替换，当前可用的 Key：${d.keyNames.map(esc).join('、')} — 完整 key 只在创建时显示过）`;
+  const curlEx = `curl ${d.base}/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer sk-dsh-你的key" \\
+  -d '{
+    "model": "${esc(d.sampleModel)}",
+    "messages": [{"role": "user", "content": "你好"}],
+    "stream": true
+  }'`;
+  const pyEx = `from openai import OpenAI
+
+client = OpenAI(base_url="${d.base}/v1", api_key="sk-dsh-你的key")
+
+resp = client.chat.completions.create(
+    model="${esc(d.sampleModel)}",          # 模型列表见 GET /v1/models
+    messages=[{"role": "user", "content": "你好"}],
+    stream=True,
+)
+for chunk in resp:
+    delta = chunk.choices[0].delta
+    if delta and delta.content:
+        print(delta.content, end="", flush=True)`;
+  const ccEx = `# Claude Code（Anthropic 协议，网关自动转换）
+set ANTHROPIC_BASE_URL=${d.base}
+set ANTHROPIC_AUTH_TOKEN=sk-dsh-你的key
+set ANTHROPIC_MODEL=${esc(d.sampleModel)}
+claude`;
+  const aiPrompt = `请把下面的 AI 网关接入到当前项目的开发工具里，并验证可用：
+
+网关地址：${d.base}（OpenAI 兼容 + Anthropic 兼容）
+- OpenAI 协议：\`${d.base}/v1/chat/completions\`（也有 \`/v1/responses\`、\`/v1/models\`）
+- Anthropic 协议：\`${d.base}/v1/messages\`（Claude Code 等工具用 \`ANTHROPIC_BASE_URL=${d.base}\`）
+- API Key：sk-dsh-***（用户会提供完整值；放入 \`Authorization: Bearer\` 头；Anthropic 工具放 \`ANTHROPIC_AUTH_TOKEN\`）
+- 模型：先请求 \`GET ${d.base}/v1/models\` 拿到可用列表（当前共 ${d.modelCount} 个，统一模型 ${d.virtualCount} 个），示例 model 名：\`${esc(d.sampleModel)}\`
+- 流式：请求体传 \`"stream": true\`，响应为 SSE（\`data: {...}\\n\\n\`，以 \`data: [DONE]\` 结束）
+- 验证：发一条最小对话请求确认能返回内容，失败时把上游错误原样上报给用户
+
+要求：不要硬编码密钥到代码仓库，从环境变量读取（如 \`OPENAI_BASE_URL\`/\`OPENAI_API_KEY\`）。`;
+
+  m.innerHTML = `
+  <h2>文档教程 <span class="muted" style="font-size:12px">— 给人看的接入指南 + 给 AI 看的对接说明</span></h2>
+  <div class="docgrid">
+    <div class="doccard">
+      <h4>① 概念：这套网关是什么</h4>
+      <ul>
+        <li>把多个 AI 平台（Trae / CodeBuddy / Qoder / 千问 + 各官方 API）的账号<b>聚合成一套标准 API</b></li>
+        <li>三种协议都支持：<code>OpenAI Chat</code>、<code>OpenAI Responses</code>（Codex）、<code>Anthropic Messages</code>（Claude Code）</li>
+        <li><b>统一模型</b> = 同名模型多平台聚合，一个平台挂了自动切下一个</li>
+        <li>模型名后缀控制思考：<code>-think</code> / <code>-think-high</code> / <code>-nothink</code></li>
+      </ul>
+    </div>
+    <div class="doccard">
+      <h4>② 人用：三步接入任意工具</h4>
+      <ol>
+        <li>「平台账号」页 → 添加账号 / 扫描本机登录</li>
+        <li>「模型管理」页 → 选平台点「开始同步」拉取模型；「统一模型」页可一键聚合</li>
+        <li>「API Keys」页 → 生成一个 key，然后在工具里填：</li>
+      </ol>
+      <div class="kv" style="margin-top:8px">
+        <span class="muted">OpenAI 工具</span><span class="mono">${d.base}/v1</span>
+        <span class="muted">Claude Code</span><span class="mono">ANTHROPIC_BASE_URL=${d.base}</span>
+        <span class="muted">MCP 客户端</span><span class="mono">${d.base}/mcp</span>
+      </div>
+      <p class="muted" style="margin-top:6px;font-size:12px">${keyHint}</p>
+    </div>
+    <div class="doccard">
+      <h4>③ 快速验证（curl）</h4>
+      <div class="copypre"><pre class="mono" id="docCurl">${esc(curlEx)}</pre>
+      <button class="small ghost copybtn" onclick="copyDoc('docCurl')">复制</button></div>
+    </div>
+  </div>
+  <div class="docgrid">
+    <div class="doccard">
+      <h4>Python（openai SDK）</h4>
+      <div class="copypre"><pre class="mono" id="docPy">${esc(pyEx)}</pre>
+      <button class="small ghost copybtn" onclick="copyDoc('docPy')">复制</button></div>
+    </div>
+    <div class="doccard">
+      <h4>Claude Code（Windows CMD）</h4>
+      <div class="copypre"><pre class="mono" id="docCC">${esc(ccEx)}</pre>
+      <button class="small ghost copybtn" onclick="copyDoc('docCC')">复制</button></div>
+      <p class="muted" style="margin-top:6px;font-size:12px">其他工具同理：凡支持自定义 OpenAI base_url 的（Cline / Cursor / LobeChat / Dify…），base 填 <span class="mono">${d.base}/v1</span>，key 填网关 key。</p>
+    </div>
+  </div>
+  <div class="card">
+    <h4 style="font-size:13.5px;margin-bottom:6px">④ 教 AI 怎么对接（把下面这段发给任何 AI 助手，它就知道怎么接）</h4>
+    <div class="copypre"><pre class="mono" id="docAI" style="white-space:pre-wrap;max-height:340px">${esc(aiPrompt)}</pre>
+    <button class="small ghost copybtn" onclick="copyDoc('docAI')">复制</button></div>
+    <div class="aiex" style="margin-top:12px">
+      <b>更省事的用法：</b>本页信息已做成 AI 可读端点 —— 让 AI 自己请求
+      <span class="mono">${d.base}/docs/api.md</span>（无需登录），它会拿到完整对接说明和实时模型列表。
+      例如对本 AI 说：「打开 ${d.base}/docs/api.md 按里面的说明把网关接入你正在写的工具」。
+    </div>
+  </div>
+  <div class="card">
+    <h4 style="font-size:13.5px;margin-bottom:8px">⑤ 常见问题</h4>
+    <table>
+      <tr><td style="width:220px"><b>401 Invalid API key</b></td><td class="muted">key 没填对或被停用；「API Keys」页检查。一个 key 都没有时网关是开放模式（无需 key）。</td></tr>
+      <tr><td><b>403 model not allowed</b></td><td class="muted">该 key 的「允许模型」白名单没包含这个模型；编辑 key 改成「全部模型」或加上它。</td></tr>
+      <tr><td><b>503 no healthy account</b></td><td class="muted">该平台所有账号失效/冷却中；「平台账号」页一键检测，或重新扫码。</td></tr>
+      <tr><td><b>模型列表里没有想要的</b></td><td class="muted">「模型管理」→ 选平台「开始同步」；或账号行「获取全部模型」；官方客户端有的用「恢复在线」。</td></tr>
+      <tr><td><b>Qoder 账号提示缺 PAT</b></td><td class="muted">Qoder 聊天通道必须用 PAT：客户端 → 设置 → 集成/Integrations 创建（pt- 开头），在账号里编辑填入。本机扫描到的登录态只能查积分，不能对话，已不再自动导入。</td></tr>
+    </table>
+  </div>`;
+}
+function copyDoc(id) {
+  const text = document.getElementById(id)?.textContent || '';
+  navigator.clipboard.writeText(text).then(() => toast('已复制到剪贴板')).catch(() => {
+    const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta);
+    ta.select(); document.execCommand('copy'); ta.remove(); toast('已复制到剪贴板');
+  });
 }
 
 // ---------- settings ----------

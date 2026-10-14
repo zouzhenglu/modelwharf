@@ -497,6 +497,32 @@ router.get('/virtual-models/presets', (req, res) => {
   res.json(presets);
 });
 
+// one-click create ALL multi-provider presets as virtual models (skip existing names)
+router.post('/virtual-models/create-all', (req, res) => {
+  const rows = modelsCore.listEnabledModelNames();
+  const norm = (n) => n.toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-|-$/g, '');
+  const groups = new Map();
+  for (const r of rows) {
+    const key = norm(r.public_name);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({ provider_id: r.provider_id, public_name: r.public_name });
+  }
+  const existing = new Set(modelsCore.listVirtualModels().map(v => v.public_name));
+  const created = [], skipped = [];
+  for (const [base, targets] of groups) {
+    if (targets.length < 2) continue;         // only aggregate same name across 2+ providers
+    if (existing.has(base)) { skipped.push(base); continue; }
+    modelsCore.upsertVirtualModel({
+      public_name: base,
+      targets: targets.map((t, i) => ({ ...t, priority: (i + 1) * 10 })),
+      enabled: 1,
+      note: `聚合 ${targets.length} 个平台（${targets.map(t => t.provider_id).join('/')}），失败自动切换`,
+    });
+    created.push(base);
+  }
+  res.json({ created, skipped });
+});
+
 // auto-refresh: run model sync on an interval (admin-configurable, minutes; 0 = off)
 let autoRefreshTimer = null;
 function setupAutoRefresh() {
@@ -560,6 +586,46 @@ router.post('/mcp/:id/tools', async (req, res) => {
   if (!s) return res.status(404).json({ error: 'not found' });
   try { await mcp.initialize(s); res.json({ tools: await mcp.listTools(s) }); }
   catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// ---------- local import exclusions (扫描排除名单) ----------
+const localcred = require('../core/localcred');
+router.get('/import-exclusions', (req, res) => {
+  res.json({ exclusions: localcred.getExclusions() });
+});
+router.post('/import-exclusions', (req, res) => {
+  const { label } = req.body || {};
+  if (!label) return res.status(400).json({ error: 'label required' });
+  localcred.addExclusion(label);
+  res.json({ ok: true, exclusions: localcred.getExclusions() });
+});
+router.delete('/import-exclusions', (req, res) => {
+  const { label } = req.body || {};
+  const cur = localcred.getExclusions();
+  const next = label ? cur.filter(x => x !== label) : [];
+  setSetting('localImportExclusions', next);
+  res.json({ ok: true, exclusions: next });
+});
+
+// ---------- docs (文档教程页) ----------
+router.get('/docs', (req, res) => {
+  const port = config.port;
+  const base = `http://localhost:${port}`;
+  const keys = db.prepare('SELECT name FROM apikeys WHERE enabled=1 LIMIT 3').all().map(k => k.name || '(未命名)');
+  const enabledModels = modelsCore.listEnabledModelNames();
+  const virtuals = modelsCore.listVirtualModels().filter(v => v.enabled);
+  const sampleModel = virtuals[0]?.public_name || enabledModels[0]?.public_name || 'glm-5.3';
+  const byProvider = {};
+  for (const r of enabledModels) (byProvider[r.provider_id] = byProvider[r.provider_id] || []).push(r.public_name);
+  res.json({
+    base,
+    keyNames: keys,
+    openGateway: config.apiKeys.length === 0 && db.prepare('SELECT COUNT(*) c FROM apikeys').get().c === 0,
+    sampleModel,
+    virtualCount: virtuals.length,
+    modelCount: enabledModels.length,
+    providersByModel: byProvider,
+  });
 });
 
 // ---------- settings ----------

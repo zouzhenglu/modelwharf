@@ -34,6 +34,8 @@ npm start                 # 默认 http://localhost:8317
   - OpenAI 协议：`base_url = http://localhost:8317/v1`，`model` 见 `/v1/models`
   - Anthropic 协议（Claude Code）：`ANTHROPIC_BASE_URL=http://localhost:8317`，`ANTHROPIC_AUTH_TOKEN=<你的key>`
   - MCP 客户端：端点 `http://localhost:8317/mcp`（JSON-RPC over HTTP）
+- 接入 ZCode：`node scripts/zcode-integrate.js` 一键把网关写成 ZCode 自定义提供商（OpenAI 兼容，模型优先取统一模型；写入前自动备份 `~/.zcode/v2/` 两个配置文件，重启 ZCode 后选择提供商「dsh-free-api」）
+- 文档教程：面板「文档教程」页（给人看的接入指南 + 给 AI 看的对接说明，可一键复制）；AI 也可直接读 `http://localhost:8317/docs/api.md`（无需登录，实时生成）
 
 环境变量：`DSH_PORT`(8317)、`DSH_ADMIN_PASSWORD`、`DSH_API_KEYS`(逗号分隔，和面板生成的 key 二选一或共存)、`DSH_DATA_DIR`。
 

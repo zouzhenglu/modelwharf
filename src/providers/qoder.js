@@ -423,12 +423,15 @@ module.exports = {
     }
   },
 
-  // scan local Qoder credentials: desktop app (DPAPI+GCM encrypted auth.v1.dat) and CLI auth files
+  // scan local Qoder credentials: desktop app (DPAPI+GCM encrypted auth.v1.dat) and CLI auth files.
+  // Chat strictly requires a PAT (pt-); desktop/CLI tokens (dt-/oauth) can only check quota,
+  // so they are reported as NOT importable — otherwise every scan adds a "useless" intl account.
   discoverLocal(regionFilter = null) {
     const fs = require('fs'), os = require('os'), path = require('path');
     const found = [];
     const home = os.homedir();
     const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+    const usable = (c) => c.pat || String(c.securityOauthToken || '').startsWith('pt-');
     // 1) desktop apps (CN + intl)
     for (const [dir, region] of [['com.qodercn.app.stable', 'cn'], ['com.qoder.app.stable', 'intl']]) {
       if (regionFilter && region !== regionFilter) continue;
@@ -438,15 +441,21 @@ module.exports = {
         const j = decryptDesktopAuth(appdir);
         const token = j.token || j.securityOauthToken || j.security_oauth_token;
         if (!token) { found.push({ label: `${dir}（解密成功但无 token）`, suggestName: null, credentials: null }); continue; }
+        const creds = {
+          securityOauthToken: token,
+          refreshToken: j.refreshToken || null,
+          expiresAt: j.expiresAt ? Date.parse(j.expiresAt) || null : null,
+          region,
+        };
+        if (!usable(creds)) {
+          // token can't chat (no PAT) — surface as manual-paste hint, never auto-import
+          found.push({ label: (region === 'cn' ? '国内版' : '国际版') + '（本机登录态无 PAT，聊天不可用；在面板粘贴 pt- PAT 后手动添加）', suggestName: null, credentials: null });
+          continue;
+        }
         found.push({
           label: region === 'cn' ? '国内版' : '国际版',
           suggestName: region === 'cn' ? 'qoder-国内版' : 'qoder-国际版',
-          credentials: {
-            securityOauthToken: token,
-            refreshToken: j.refreshToken || null,
-            expiresAt: j.expiresAt ? Date.parse(j.expiresAt) || null : null,
-            region,
-          },
+          credentials: creds,
         });
       } catch (e) {
         found.push({ label: `${dir}（解密失败：${e.message}；可在面板粘贴 PAT）`, suggestName: null, credentials: null });
@@ -463,11 +472,14 @@ module.exports = {
         let j = null;
         try { j = JSON.parse(raw); } catch { j = null; }
         const token = j?.accessToken || j?.security_oauth_token || j?.securityOauthToken;
-        if (token) {
+        const pat = j?.personalAccessToken || j?.pat;
+        if (pat && String(pat).startsWith('pt-')) {
           found.push({
             label: region === 'cn' ? '国内版' : '国际版', suggestName: region === 'cn' ? 'qoder-国内版' : 'qoder-国际版',
-            credentials: { securityOauthToken: token, refreshToken: j?.refresh_token || null, region },
+            credentials: { pat, region },
           });
+        } else if (token) {
+          found.push({ label: (d === '.qoder.cn' ? '国内版' : '国际版') + '（本机登录态无 PAT，聊天不可用；在面板粘贴 pt- PAT 后手动添加）', suggestName: null, credentials: null });
         } else {
           found.push({ label: (d === '.qoder.cn' ? '国内版' : '国际版') + '（加密，请在面板粘贴 PAT）', suggestName: null, credentials: null });
         }

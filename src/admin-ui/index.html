@@ -69,6 +69,19 @@ pre{background:var(--panel2);border:1px solid var(--border);border-radius:8px;pa
 .tabs{display:flex;gap:4px;margin-bottom:14px;border-bottom:1px solid var(--border)}
 .tabs a{padding:8px 14px;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent}
 .tabs a.active{color:var(--text);border-bottom-color:var(--accent)}
+.hint{background:rgba(79,140,255,.08);border:1px solid rgba(79,140,255,.25);border-radius:8px;padding:8px 14px;margin-bottom:12px;font-size:13px;color:var(--muted)}
+.hint b{color:var(--text)}
+.docgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin-bottom:16px}
+.doccard{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 18px}
+.doccard h4{font-size:13.5px;margin-bottom:8px}
+.doccard ol,.doccard ul{padding-left:18px;font-size:13px;color:var(--muted)}
+.doccard li{margin-bottom:4px}
+.doccard code{background:var(--panel2);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-size:12px;font-family:ui-monospace,Consolas,monospace}
+.copypre{position:relative}
+.copypre pre{max-height:260px;padding-right:70px}
+.copypre .copybtn{position:absolute;top:10px;right:10px}
+.aiex{background:var(--panel2);border:1px dashed var(--border);border-radius:8px;padding:12px;margin-top:8px;font-size:13px;color:var(--muted);line-height:1.8}
+.aiex b{color:var(--text)}
 </style>
 </head>
 <body>
@@ -89,6 +102,7 @@ pre{background:var(--panel2);border:1px solid var(--border);border-radius:8px;pa
     <a data-page="usage">用量日志</a>
     <a data-page="mcp">MCP 服务</a>
     <a data-page="playground">测试台</a>
+    <a data-page="docs">文档教程</a>
     <a data-page="settings">设置</a>
   </nav>
   <main id="main"></main>

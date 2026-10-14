@@ -25,6 +25,53 @@ app.use((req, res, next) => {
 
 app.get('/health', (req, res) => res.json({ ok: true, version: config.version, providers: registry.list().map(p => p.id) }));
 
+// AI-readable integration doc (no auth): ask any AI assistant to fetch this and wire the gateway in
+app.get('/docs/api.md', (req, res) => {
+  const { db } = require('./store');
+  const modelsCore = require('./core/models');
+  const base = `http://localhost:${config.port}`;
+  const models = modelsCore.listPublicModels();
+  const open = config.apiKeys.length === 0 && db.prepare('SELECT COUNT(*) c FROM apikeys').get().c === 0;
+  const sample = models[0]?.public_name || 'glm-5.3';
+  const md = `# dsh-free-api 接入说明（AI 可读）
+
+一个把多个 AI 平台聚合成标准 API 的本地网关。本文档供 AI 助手阅读后直接完成接入。
+
+## 端点
+- OpenAI 协议: \`POST ${base}/v1/chat/completions\`（兼容 \`/v1/completions\`、\`/v1/responses\`、\`GET /v1/models\`）
+- Anthropic 协议: \`POST ${base}/v1/messages\`（Claude Code: \`ANTHROPIC_BASE_URL=${base}\`）
+- MCP: \`POST ${base}/mcp\`（JSON-RPC over HTTP）
+- 健康检查: \`GET ${base}/health\`
+
+## 认证
+${open ? '当前网关为开放模式（未配置任何 API Key），可不带认证头。' : `请求头 \`Authorization: Bearer <key>\`。key 由网关主人提供（管理面板 ${base}/admin 生成），形如 \`sk-dsh-...\`。Anthropic 工具用 \`x-api-key\` 或 \`ANTHROPIC_AUTH_TOKEN\`。`}
+当前生效 key 的名字（非完整值）: ${db.prepare('SELECT name FROM apikeys WHERE enabled=1').all().map(k => k.name || '(未命名)').join(', ') || '（无，开放模式）'}
+
+## 模型
+先 \`GET ${base}/v1/models\` 获取实时列表（当前 ${models.length} 个）。示例:
+
+${models.slice(0, 40).map(m => `- \`${m.public_name}\`（${m.provider_id}${m.is_free ? ' · 免费' : ` · x${m.multiplier}`}）`).join('\n')}${models.length > 40 ? `\n- … 其余 ${models.length - 40} 个见 /v1/models` : ''}
+
+模型名可加后缀控制思考: \`-think\`（开）/ \`-think-high\`（高）/ \`-xhigh\`（最高）/ \`-nothink\`（关）。
+
+## 请求示例
+\`\`\`bash
+curl ${base}/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  ${open ? '' : '-H "Authorization: Bearer sk-dsh-..." \\\n  '}-d '{"model": "${sample}", "messages": [{"role":"user","content":"你好"}], "stream": true}'
+\`\`\`
+
+流式响应为标准 SSE（\`data: {JSON}\\n\\n\`，以 \`data: [DONE]\` 结束）；非流式返回标准 OpenAI chat.completion JSON。
+
+## 接入要求
+1. base_url 配到 \`${base}/v1\`（OpenAI 协议）或 \`ANTHROPIC_BASE_URL=${base}\`（Anthropic 协议）
+2. 密钥从环境变量读取，不要硬编码进代码仓库
+3. 接完发一条最小请求验证能返回内容；失败时把响应里的 error 原样报告给用户
+4. 管理面板（配额/账号/模型/日志）在 ${base}/admin
+`;
+  res.type('text/markdown; charset=utf-8').send(md);
+});
+
 // API gateways
 app.use('/v1', openaiRoutes);
 app.use('/v1', responsesRoutes);        // /v1/responses (Codex / Responses API clients)

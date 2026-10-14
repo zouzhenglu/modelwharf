@@ -69,6 +69,8 @@ function list() { return [...plugins.values()]; }
 /**
  * Startup auto-import: ask every provider that supports discoverLocal()
  * to scan the machine for existing logins and import them (idempotent).
+ * Entries that can't be imported (encrypted credentials without a usable
+ * token) are permanently excluded so they stop showing up in every scan.
  */
 function autoImportLocal() {
   const { importFound } = require('./localcred');
@@ -78,7 +80,7 @@ function autoImportLocal() {
     try {
       const found = plugin.discoverLocal() || [];
       if (!found.length) continue;
-      const r = importFound(plugin.id, found);
+      const r = importFound(plugin.id, found, [], { exclude: true });
       if (r.imported) logger.info(`auto-imported ${r.imported} local account(s) for ${plugin.id}`);
       summary.push({ provider: plugin.id, ...r });
     } catch (e) {
