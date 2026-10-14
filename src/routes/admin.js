@@ -578,14 +578,14 @@ router.put('/settings', (req, res) => {
 
 // ---------- playground (admin test bench) ----------
 router.post('/test/chat', async (req, res) => {
-  const { model, messages, stream = false, apikey_id = null } = req.body || {};
+  const { model, messages, stream = false, apikey_id = null, forceAccountId = null } = req.body || {};
   if (!model || !messages?.length) return res.status(400).json({ error: 'model and messages required' });
   const started = Date.now();
   const usageAcc = { input_tokens: 0, output_tokens: 0, credits: 0 };
   if (!stream) {
     let text = '';
     try {
-      await engine.runChat({ publicModel: model, messages, source: 'test', apikeyId: apikey_id },
+      await engine.runChat({ publicModel: model, messages, source: 'test', apikeyId: apikey_id, forceAccountId },
         (data) => {
           try {
             const j = JSON.parse(data);
@@ -602,7 +602,7 @@ router.post('/test/chat', async (req, res) => {
   // stream mode: NDJSON of raw events
   res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-cache' });
   try {
-    await engine.runChat({ publicModel: model, messages, source: 'test', apikeyId: apikey_id },
+    await engine.runChat({ publicModel: model, messages, source: 'test', apikeyId: apikey_id, forceAccountId },
       (data) => { if (!res.writableEnded) { res.write(JSON.stringify({ raw: data }) + '\n'); } return true; },
       (u) => Object.assign(usageAcc, u));
     res.write(JSON.stringify({ done: true, usage: usageAcc, latency_ms: Date.now() - started }) + '\n');

@@ -28,6 +28,21 @@ class UpstreamError extends Error {
  */
 async function runChat(opts, onEvent, onUsage) {
   const started = Date.now();
+  // normalize once here so every entry point (openai/anthropic/responses/admin-test)
+  // gets canonical messages with .text set
+  if (opts.messages?.length && opts.messages[0].text === undefined && opts.messages[0].content !== undefined) {
+    opts = { ...opts, messages: require('./messages').normalizeMessages(opts.messages) };
+  }
+  // forceAccountId (playground per-account testing) -> concrete account object
+  if (opts.forceAccountId && !opts.forceAccount) {
+    opts.forceAccount = accounts.getAccount(opts.forceAccountId) || undefined;
+    if (opts.forceAccount && opts.publicModel) {
+      // the model row must belong to the forced account's provider for routing to match;
+      // resolve by (provider, model name) when the public name exists on other providers too
+      const row = db.prepare('SELECT * FROM models WHERE provider_id=? AND public_name=? AND enabled=1').get(opts.forceAccount.provider_id, opts.publicModel);
+      if (row) opts.forceModel = row;
+    }
+  }
   const virtual = models.getVirtualModel(opts.publicModel);
   if (virtual) {
     if (!virtual.enabled) throw new UpstreamError(404, `virtual model '${opts.publicModel}' is disabled`);
@@ -37,6 +52,7 @@ async function runChat(opts, onEvent, onUsage) {
     if (!targets.length) throw new UpstreamError(503, `virtual model '${opts.publicModel}' has no enabled targets`);
     let lastErr = null;
     for (const t of targets) {
+      if (opts.forceAccount && t.provider_id !== opts.forceAccount.provider_id) continue; // per-account test: restrict to that provider
       const row = db.prepare('SELECT * FROM models WHERE provider_id=? AND public_name=? AND enabled=1').get(t.provider_id, t.public_name);
       if (!row) { lastErr = new UpstreamError(404, `target ${t.provider_id}/${t.public_name} missing or disabled`); continue; }
       try {
@@ -51,13 +67,17 @@ async function runChat(opts, onEvent, onUsage) {
   // exact name first; if not found, try the base name after stripping a reasoning suffix
   // (-think / -think-high / -xhigh / -nothink) so suffix conventions work on any model
   let publicName = opts.publicModel;
-  let model = db.prepare('SELECT * FROM models WHERE public_name=? AND enabled=1').get(publicName);
+  let model = opts.forceModel || db.prepare('SELECT * FROM models WHERE public_name=? AND enabled=1').get(publicName);
   if (!model) {
     const { baseModel, reasoning } = parseModelSuffix(publicName);
     if (reasoning !== undefined && baseModel) {
       model = db.prepare('SELECT * FROM models WHERE public_name=? AND enabled=1').get(baseModel);
       if (model) publicName = baseModel;
     }
+  }
+  if (!model && opts.forceAccount) {
+    // forced account but model name unknown on it: fall back to its cheapest enabled model
+    model = db.prepare('SELECT * FROM models WHERE provider_id=? AND enabled=1 ORDER BY multiplier ASC LIMIT 1').get(opts.forceAccount.provider_id);
   }
   if (!model) {
     const v = models.getVirtualModel(opts.publicModel); // convenience: tolerate virtual lookup mismatch

@@ -57,7 +57,6 @@ function go(page) {
 async function render(page) {
   const m = $('#main');
   if (page === 'dashboard') return renderDashboard(m);
-  if (page === 'platforms') return renderPlatforms(m);
   if (page === 'accounts') return renderAccounts(m);
   if (page === 'models') return renderModels(m);
   if (page === 'virtual') return renderVirtual(m);
@@ -219,23 +218,29 @@ async function renderAccounts(m) {
     <button onclick="openAccountForm()">+ 添加账号</button>
   </div>
   <div class="card" style="padding:6px 12px">
-  <table><tr><th>平台</th><th>名称</th><th>状态</th><th>积分/信息</th><th>优先级</th><th>并发</th><th>最近使用</th><th>启用</th><th>操作</th></tr>
-  ${accounts.map(a => `<tr>
+  <table><tr><th>平台</th><th>名称 / 身份</th><th>状态</th><th>积分与信息</th>
+    <th title="数字越小越优先被轮询使用。同平台多账号时，先用优先级小的，失败/冷却自动换下一个">优先级 ⓘ</th>
+    <th title="该账号同时处理的最大请求数。达到上限后请求会分流到其他账号，避免单账号被上游限流">并发 ⓘ</th>
+    <th>最近使用</th><th>启用</th><th>操作</th></tr>
+  ${accounts.map(a => {
+    const online = ['trae', 'workbuddy', 'qwen'].includes(a.provider_id);
+    return `<tr>
     <td>${esc(a.provider_id)}</td>
-    <td><b>${esc(a.name)}</b></td>
-    <td>${statusBadge(a.status)}${a.status_message ? `<div class="muted" style="max-width:200px">${esc(a.status_message)}</div>` : ''}</td>
-    <td class="muted">${esc(summarizeExtra(a.extra))}</td>
+    <td><b>${esc(a.name)}</b>${a.extra?.username ? `<div class="muted" style="font-size:12px">${esc(a.extra.username)}${a.extra.email ? ' · ' + esc(a.extra.email) : ''}</div>` : ''}</td>
+    <td>${statusBadge(a.status)}${a.status_message ? `<div class="muted" style="max-width:180px;font-size:12px">${esc(a.status_message)}</div>` : ''}</td>
+    <td>${creditCellHtml(a.extra)}</td>
     <td>${a.priority}</td><td>${a.max_concurrency}</td>
-    <td class="muted">${fmtTime(a.last_used_at)}</td>
+    <td class="muted" style="font-size:12px">${fmtTime(a.last_used_at)}</td>
     <td>${switchHtml(a.enabled, `toggleAccount(${a.id}, ${a.enabled ? 0 : 1})`)}</td>
     <td style="white-space:nowrap">
       <button class="small ghost" onclick="checkAccount(${a.id})">检测</button>
       <button class="small ghost" title="上游报给该账号的全部模型，增量补充" onclick="syncAccountModels(${a.id})">获取全部模型</button>
-      <button class="small ghost" title="只保留上游当前实际可用的模型（trae/workbuddy/qwen）" onclick="resetOnlineAccount(${a.id})">恢复在线</button>
+      ${online ? `<button class="small ghost" title="只保留上游当前实际可用的模型（自定义条目会被移除）" onclick="resetOnlineAccount(${a.id})">恢复在线</button>` : ''}
       <button class="small ghost" onclick="openAccountForm(${a.id})">编辑</button>
       <button class="small danger" onclick="delAccount(${a.id})">删</button>
-    </td></tr>`).join('')}
-  ${!accounts.length ? '<tr><td colspan="9" class="muted" style="text-align:center;padding:24px">暂无账号，点右上角添加，或用「导入本机登录」自动发现</td></tr>' : ''}
+    </td></tr>`;
+  }).join('')}
+  ${!accounts.length ? '<tr><td colspan="10" class="muted" style="text-align:center;padding:24px">暂无账号，点右上角添加，或用「导入本机登录」自动发现</td></tr>' : ''}
   </table></div>`;
   $('#fProvider').onchange = e => { acctFilter.provider_id = e.target.value; renderAccounts(m); };
   $('#fStatus').onchange = e => { acctFilter.status = e.target.value; renderAccounts(m); };
@@ -249,12 +254,30 @@ function summarizeExtra(extra) {
   if (extra.email) bits.push(extra.email);
   if (extra.uid) bits.push(`uid ${String(extra.uid).slice(0, 10)}`);
   if (extra.credits != null) bits.push(`积分 ${extra.credits}/${extra.quota ?? '?'}`);
-  if (extra.baseQuota) bits.push(`基础 ${extra.baseQuota}`);
-  if (extra.addOnQuota) bits.push(`附加 ${extra.addOnQuota}`);
   if (extra.plan) bits.push(extra.plan);
-  if (extra.checkin?.claimable) bits.push('签到可领');
-  if (extra.userType) bits.push(extra.userType);
   return bits.join(' · ');
+}
+/** 积分/信息列：结构化展示（进度条 + 明细） */
+function creditCellHtml(extra) {
+  if (!extra || typeof extra !== 'object') return '<span class="muted">同步后显示</span>';
+  const parts = [];
+  if (extra.credits != null && extra.quota != null && extra.quota > 0) {
+    const pct = Math.min(100, Math.round(extra.credits / extra.quota * 100));
+    const color = pct > 40 ? 'var(--green)' : pct > 10 ? 'var(--yellow)' : 'var(--red)';
+    parts.push(`<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">
+      <b style="font-size:13px">${extra.credits}</b><span class="muted" style="font-size:11px">/ ${extra.quota}</span>
+      <div style="flex:1;max-width:90px;height:6px;background:var(--border);border-radius:3px;overflow:hidden"><div style="width:${pct}%;height:100%;background:${color}"></div></div>
+      <span class="muted" style="font-size:11px">${pct}%</span></div>`);
+    if (extra.baseQuota || extra.addOnQuota) {
+      parts.push(`<div class="muted" style="font-size:11px">${extra.baseQuota ? '基础 ' + extra.baseQuota : ''}${extra.baseQuota && extra.addOnQuota ? ' · ' : ''}${extra.addOnQuota ? '附加 ' + extra.addOnQuota : ''}</div>`);
+    }
+  } else if (extra.credits != null) {
+    parts.push(`<b style="font-size:13px">积分 ${extra.credits}</b>`);
+  }
+  if (extra.username) parts.push(`<div class="muted" style="font-size:11px">${esc(extra.username)}${extra.userType ? ' · ' + esc(extra.userType) : ''}</div>`);
+  if (extra.checkin?.claimable) parts.push(`<div style="font-size:11px"><span class="badge yellow">签到可领</span></div>`);
+  if (!parts.length) return `<span class="muted">${esc(summarizeExtra(extra)) || '同步后显示'}</span>`;
+  return parts.join('');
 }
 async function toggleAccount(id, enabled) { await api('/accounts/' + id, { method: 'PUT', body: { enabled } }); renderAccounts($('#main')); }
 async function delAccount(id) { if (!confirm('确定删除该账号？')) return; await api('/accounts/' + id, { method: 'DELETE' }); renderAccounts($('#main')); }
@@ -431,7 +454,6 @@ async function renderModels(m) {
     <span class="spacer"></span>
     <select id="mfSyncSel" style="width:170px"><option value="">同步模型：选择平台…</option><option value="__all">全部平台</option>${providerOpts}</select>
     <button class="ghost" id="mfSyncBtn">开始同步</button>
-    <button class="ghost" id="mfResetBtn" title="只拉取上游实际可用的模型目录，替换现有列表">恢复在线模型</button>
     <button onclick="openModelForm()">+ 手动添加</button>
   </div>
   <div class="toolbar" style="background:var(--panel2);border-radius:8px;padding:8px 12px">
@@ -471,11 +493,6 @@ async function renderModels(m) {
     if (!v) return toast('请先选择要同步的平台', true);
     if (v === '__all') return refreshModelsAll();
     refreshModels(v);
-  };
-  $('#mfResetBtn').onclick = () => {
-    const v = $('#mfSyncSel').value;
-    if (!v || v === '__all') return toast('请先在左侧下拉选择一个平台（恢复在线目录按平台执行）', true);
-    resetOnlineModels(v);
   };
   $('#mfCheckAll').onchange = e => { document.querySelectorAll('.mfCheck').forEach(c => c.checked = e.target.checked); };
 }
@@ -883,38 +900,111 @@ async function saveMcp(id) {
 }
 
 // ---------- playground ----------
+// ---------- playground (测试台) ----------
+// 后端 /admin/api/test/chat 支持 forceAccountId —— 直接指定账号测试，绕过轮询
 async function renderPlayground(m) {
-  const models = await api('/models');
+  const [providers, accounts, models, virtuals] = await Promise.all([
+    api('/providers'), api('/accounts'), api('/models?size=2000'), api('/virtual-models'),
+  ]);
+  const enabledModels = models.filter(md => md.enabled);
+  const byProvider = {};
+  for (const md of enabledModels) (byProvider[md.provider_id] = byProvider[md.provider_id] || []).push(md);
+  window._pg = { accounts, models: byProvider, virtuals };
   m.innerHTML = `
-  <h2>测试台</h2>
+  <h2>测试台 <span class="muted" style="font-size:12px">— 模拟 harness 工具接入；每次请求的完整内容在「请求详情」可见</span></h2>
   <div class="card">
-    <div class="row" style="margin-bottom:10px">
-      <select id="pgModel" style="width:260px">${models.filter(md => md.enabled).map(md => `<option value="${esc(md.public_name)}">${esc(md.public_name)} (${md.provider_id}${md.is_free ? ' · 免费' : ''})</option>`).join('')}</select>
-      <label class="row" style="gap:4px;font-size:13px"><input type="checkbox" id="pgStream" style="width:auto"> 流式</label>
-      <span class="spacer"></span><button id="pgSend" onclick="pgSend()">发送</button>
+    <div class="row" style="margin-bottom:8px;flex-wrap:wrap">
+      <select id="pgProvider" style="width:170px" onchange="pgProviderChange()">
+        <option value="">选择平台…</option>
+        ${groupProviders(providers).map(g => `<optgroup label="${esc(g.name)}">${g.providers.filter(p => (window._pg.models[p.id]?.length || 0) > 0).map(p => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join('')}</optgroup>`).join('')}
+      </select>
+      <select id="pgAccount" style="width:170px" onchange="pgAccountChange()"><option value="">自动轮询</option></select>
+      <select id="pgModel" style="width:230px"><option value="">先选平台…</option></select>
+      <span class="spacer"></span>
+      <button id="pgSend" onclick="pgSend()" style="flex-shrink:0">发送</button>
     </div>
-    <textarea id="pgPrompt" rows="4" placeholder="输入测试消息…">你好，请用一句话介绍你自己。</textarea>
-    <div id="pgOut" style="margin-top:12px"></div>
-  </div>`;
+    <div class="row" style="margin-bottom:8px;gap:12px;flex-wrap:wrap;font-size:13px">
+      <label class="row" style="gap:4px"><input type="checkbox" id="pgStream" style="width:auto" checked> 流式</label>
+      <label class="row" style="gap:4px"><input type="checkbox" id="pgShowRaw" style="width:auto" onchange="pgRenderOut()"> 显示原始事件</label>
+      <label class="row" style="gap:4px"><input type="checkbox" id="pgDetails" style="width:auto" checked onchange="pgRenderOut()"> 请求详情</label>
+      <span class="spacer"></span>
+      <span id="pgEndpoint" class="muted mono" style="font-size:12px"></span>
+    </div>
+    <textarea id="pgPrompt" rows="4" style="resize:vertical" placeholder="输入测试消息…">你好，请用一句话介绍你自己。</textarea>
+  </div>
+  <div class="card" id="pgOut" style="min-height:120px"><p class="muted">配置上方并点「发送」— 结果与请求详情显示在这里（布局固定，不会跳动）</p></div>`;
+  pgProviderChange();
+}
+function pgProviderChange() {
+  const pid = $('#pgProvider').value;
+  const acctSel = $('#pgAccount'), modelSel = $('#pgModel');
+  // accounts of this provider
+  const accts = (window._pg.accounts || []).filter(a => a.provider_id === pid && a.enabled);
+  acctSel.innerHTML = `<option value="">自动轮询（该平台 ${accts.length} 个账号）</option>` +
+    accts.map(a => `<option value="${a.id}">${esc(a.name)}${a.extra?.username ? ' · ' + esc(a.extra.username) : ''}</option>`).join('');
+  // models of this provider + virtual models (platform = virtual)
+  const list = pid === '__virtual' ? (window._pg.virtuals || []).map(v => ({ public_name: v.public_name, provider_id: 'virtual' }))
+    : (window._pg.models[pid] || []);
+  modelSel.innerHTML = `<option value="">选模型…</option>` + list.map(md =>
+    `<option value="${esc(md.public_name)}">${esc(md.public_name)}${md.is_free ? ' · 免费' : ''}${md.multiplier && md.multiplier !== 1 ? ' · x' + md.multiplier : ''}</option>`).join('');
+  pgUpdateEndpoint();
+}
+function pgAccountChange() { pgUpdateEndpoint(); }
+function pgUpdateEndpoint() {
+  const model = $('#pgModel').value;
+  const acct = $('#pgAccount').value;
+  $('#pgEndpoint').textContent = model ? `POST /v1/chat/completions  model=${model}${acct ? '  账号#' + acct : '  自动'}` : '';
+}
+function pgRenderOut() {
+  // rerender from cached state after detail toggles (no layout jump: output card is fixed)
+  const st = window._pgState;
+  if (!st) return;
+  const out = $('#pgOut');
+  let html = '';
+  if ($('#pgDetails').checked) {
+    html += `<details open style="margin-bottom:12px"><summary style="cursor:pointer;color:var(--muted);font-size:13px">请求详情（模拟 harness 发送的完整请求）</summary>
+    <pre class="mono" style="margin-top:8px;max-height:260px">${esc(st.requestPreview)}</pre></details>`;
+  }
+  html += st.statusHtml;
+  if ($('#pgShowRaw').checked && st.rawEvents?.length) {
+    html += `<details style="margin-top:12px"><summary style="cursor:pointer;color:var(--muted);font-size:13px">原始流事件 (${st.rawEvents.length} 条)</summary>
+    <pre class="mono" style="margin-top:8px;max-height:300px">${esc(st.rawEvents.join('\n').slice(0, 20000))}</pre></details>`;
+  }
+  out.innerHTML = html;
+  const pre = out.querySelector('#pgLive');
+  if (pre && st.liveText != null) pre.textContent = st.liveText;
 }
 let pgBusy = false;
 async function pgSend() {
   if (pgBusy) return;
   const model = $('#pgModel').value;
   const prompt = $('#pgPrompt').value.trim();
-  if (!model || !prompt) return toast('请选择模型并输入内容', true);
-  const out = $('#pgOut'); const sendBtn = $('#pgSend');
+  const accountId = $('#pgAccount').value || null;
+  if (!model || !prompt) return toast('请选择平台和模型并输入内容', true);
+  const sendBtn = $('#pgSend');
   pgBusy = true; sendBtn.disabled = true;
   const t0 = performance.now();
+  const stream = $('#pgStream').checked;
+  const bodyObj = {
+    model, stream,
+    messages: [{ role: 'user', content: prompt }],
+    temperature: 0.7,
+    ...(accountId ? { forceAccountId: Number(accountId) } : {}),
+  };
+  const requestPreview = `POST /v1/chat/completions\nAuthorization: Bearer ${'sk-dsh-****'}\nContent-Type: application/json\n\n` +
+    JSON.stringify({ model, stream, temperature: 0.7, messages: [{ role: 'user', content: prompt }] }, null, 2);
+  window._pgState = { requestPreview, rawEvents: [], liveText: '', statusHtml: '<p class="muted">请求中…</p>' };
+  pgRenderOut();
   try {
-    if ($('#pgStream').checked) {
-      out.innerHTML = '<pre class="mono" id="pgPre"></pre>';
-      const pre = $('#pgPre');
+    if (stream) {
       const resp = await fetch('/admin/api/test/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + TOKEN },
-        body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], stream: true }) });
+        body: JSON.stringify(bodyObj) });
       const reader = resp.body.getReader();
       const dec = new TextDecoder();
-      let buf = '';
+      let buf = '', usageLine = '';
+      const st = window._pgState;
+      st.statusHtml = `<pre class="mono" id="pgLive" style="white-space:pre-wrap;max-height:420px;overflow:auto;min-height:60px"></pre><p class="muted" id="pgMeta" style="margin-top:8px">接收中…</p>`;
+      pgRenderOut();
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -923,21 +1013,42 @@ async function pgSend() {
         while ((idx = buf.indexOf('\n')) >= 0) {
           const line = buf.slice(0, idx).trim(); buf = buf.slice(idx + 1);
           if (!line) continue;
+          st.rawEvents.push(line.length > 500 ? line.slice(0, 500) + '…' : line);
           try {
             const j = JSON.parse(line);
-            if (j.raw) { try { const ev = JSON.parse(j.raw); const d = ev.choices?.[0]?.delta; if (d?.content) pre.textContent += d.content; } catch {} }
-            if (j.done) pre.textContent += `\n\n[完成 ${(performance.now() - t0).toFixed(0)}ms · in ${j.usage?.input_tokens || 0} / out ${j.usage?.output_tokens || 0} tok · 积分 ${(j.usage?.credits || 0).toFixed(3)}]`;
-            if (j.error) pre.textContent += '\n[错误] ' + j.error;
+            if (j.raw) {
+              try {
+                const ev = JSON.parse(j.raw);
+                const d = ev.choices?.[0]?.delta || {};
+                if (d.content) st.liveText += d.content;
+                if (d.reasoning_content) st.liveText += d.reasoning_content;
+              } catch {}
+            }
+            if (j.error) st.liveText += '\n[错误] ' + j.error;
+            if (j.done) usageLine = `完成 ${(performance.now() - t0).toFixed(0)}ms · 输入 ${j.usage?.input_tokens || 0} tok / 输出 ${j.usage?.output_tokens || 0} tok · 积分 ${(j.usage?.credits || 0).toFixed(3)}`;
           } catch {}
         }
+        // live update
+        const pre = $('#pgLive');
+        if (pre) pre.textContent = st.liveText || '(等待响应…)';
       }
+      st.statusHtml = `<pre class="mono" style="white-space:pre-wrap;max-height:420px;overflow:auto">${esc(st.liveText) || '<span class="muted">(空响应)</span>'}</pre><p class="muted" style="margin-top:8px">${esc(usageLine || '流结束')}</p>`;
+      pgRenderOut();
     } else {
-      out.innerHTML = '<p class="muted">请求中…</p>';
-      const r = await api('/test/chat', { method: 'POST', body: { model, messages: [{ role: 'user', content: prompt }] } });
-      if (r.ok) out.innerHTML = `<pre class="mono">${esc(r.text)}</pre><p class="muted" style="margin-top:6px">${r.latency_ms}ms · in ${r.usage.input_tokens} / out ${r.usage.output_tokens} tok · 积分 ${(r.usage.credits || 0).toFixed(3)}</p>`;
-      else out.innerHTML = `<pre style="color:var(--red)">${esc(r.error)}${r.status ? ' (HTTP ' + r.status + ')' : ''}</pre>`;
+      const r = await api('/test/chat', { method: 'POST', body: bodyObj });
+      const st = window._pgState;
+      if (r.ok) {
+        st.liveText = r.text;
+        st.statusHtml = `<pre class="mono" style="white-space:pre-wrap;max-height:420px;overflow:auto">${esc(r.text)}</pre><p class="muted" style="margin-top:8px">${r.latency_ms}ms · 输入 ${r.usage.input_tokens} tok / 输出 ${r.usage.output_tokens} tok · 积分 ${(r.usage.credits || 0).toFixed(3)}</p>`;
+      } else {
+        st.statusHtml = `<pre style="color:var(--red);white-space:pre-wrap">${esc(r.error)}${r.status ? ' (HTTP ' + r.status + ')' : ''}</pre>`;
+      }
+      pgRenderOut();
     }
-  } catch (e) { out.innerHTML = `<pre style="color:var(--red)">${esc(e.message)}</pre>`; }
+  } catch (e) {
+    window._pgState.statusHtml = `<pre style="color:var(--red)">${esc(e.message)}</pre>`;
+    pgRenderOut();
+  }
   pgBusy = false; sendBtn.disabled = false;
 }
 
