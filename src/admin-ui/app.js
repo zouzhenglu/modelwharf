@@ -921,9 +921,10 @@ async function renderPlayground(m) {
       </select>
       <select id="pgAccount" style="width:170px" onchange="pgAccountChange()"><option value="">自动轮询</option></select>
       <select id="pgModel" style="width:230px"><option value="">先选平台…</option></select>
-      <select id="pgProtocol" style="width:190px" onchange="pgUpdateEndpoint()" title="ChatGPT 官方新格式，Codex 使用">
+      <select id="pgProtocol" style="width:190px" onchange="pgUpdateEndpoint()" title="三种主流 harness 协议，网关全支持并自动转换到各平台">
         <option value="chat">协议: OpenAI Chat</option>
         <option value="responses">协议: OpenAI Responses</option>
+        <option value="anthropic">协议: Anthropic Messages</option>
       </select>
       <span class="spacer"></span>
       <button id="pgSend" onclick="pgSend()" style="flex-shrink:0">发送</button>
@@ -973,8 +974,9 @@ function pgUpdateEndpoint() {
   const acct = $('#pgAccount').value;
   const proto = $('#pgProtocol')?.value || 'chat';
   if (!model) { $('#pgEndpoint').textContent = ''; return; }
-  const ep = proto === 'responses' ? 'POST /v1/responses' : 'POST /v1/chat/completions';
-  $('#pgEndpoint').textContent = `${ep}  model=${model}${acct ? '  账号#' + acct : '  自动'}`;
+  const ep = { chat: 'POST /v1/chat/completions', responses: 'POST /v1/responses', anthropic: 'POST /v1/messages' }[proto];
+  const auth = proto === 'anthropic' ? 'x-api-key' : 'Authorization: Bearer';
+  $('#pgEndpoint').textContent = `${ep}  model=${model}${acct ? '  账号#' + acct : '  自动'}  (${auth})`;
 }
 function pgRenderOut() {
   // rerender from cached state after detail toggles (no layout jump: output card is fixed)
@@ -1027,7 +1029,9 @@ async function pgSend() {
   const messages = [{ role: 'user', content: prompt }];
   const wireBody = protocol === 'responses'
     ? { model, stream, input: messages, instructions: system || undefined, reasoning: params.reasoning_effort ? { effort: params.reasoning_effort === 'none' ? 'low' : params.reasoning_effort } : undefined, max_output_tokens: params.max_tokens || undefined, temperature: params.temperature, top_p: params.top_p }
-    : { model, stream, messages: system ? [{ role: 'system', content: system }, ...messages] : messages, ...params };
+    : protocol === 'anthropic'
+      ? { model, stream, max_tokens: params.max_tokens || 1024, system: system || undefined, messages, temperature: params.temperature, top_p: params.top_p }
+      : { model, stream, messages: system ? [{ role: 'system', content: system }, ...messages] : messages, ...params };
   Object.keys(wireBody).forEach(k => wireBody[k] === undefined && delete wireBody[k]);
   const requestPreview = `POST ${protocol === 'responses' ? '/v1/responses' : '/v1/chat/completions'}\nAuthorization: Bearer sk-dsh-****\nContent-Type: application/json\n\n` +
     JSON.stringify(wireBody, null, 2);
@@ -1054,7 +1058,14 @@ async function pgSend() {
           st.rawEvents.push(line.length > 500 ? line.slice(0, 500) + '…' : line);
           try {
             const j = JSON.parse(line);
-            if (j.responsesEvent) {
+            if (j.anthropicEvent) {
+              const ev = j.anthropicEvent;
+              if (ev.type === 'content_block_delta') {
+                if (ev.delta?.type === 'text_delta') st.liveText += ev.delta.text;
+                if (ev.delta?.type === 'thinking_delta') st.liveText += ev.delta.thinking;
+              }
+              if (ev.type === 'message_delta') usageLine = `Anthropic 流完成 · stop=${ev.delta?.stop_reason}`;
+            } else if (j.responsesEvent) {
               const ev = j.responsesEvent;
               if (ev.type === 'response.output_text.delta') st.liveText += ev.delta;
               if (ev.type === 'response.reasoning_summary_text.delta') st.liveText += ev.delta;
@@ -1074,7 +1085,7 @@ async function pgSend() {
         const pre = $('#pgLive');
         if (pre) pre.textContent = st.liveText || '(等待响应…)';
       }
-      st.statusHtml = `<pre class="mono" style="white-space:pre-wrap;max-height:420px;overflow:auto">${esc(st.liveText) || '<span class="muted">(空响应)</span>'}</pre><p class="muted" style="margin-top:8px">${esc(usageLine || '流结束')} · ${protocol === 'responses' ? 'Responses 事件流' : 'chat SSE/NDJSON'}</p>`;
+      st.statusHtml = `<pre class="mono" style="white-space:pre-wrap;max-height:420px;overflow:auto">${esc(st.liveText) || '<span class="muted">(空响应)</span>'}</pre><p class="muted" style="margin-top:8px">${esc(usageLine || '流结束')} · ${{ chat: 'chat SSE/NDJSON', responses: 'Responses 事件流', anthropic: 'Anthropic content blocks' }[protocol]}</p>`;
       pgRenderOut();
     } else {
       const r = await api('/test/chat', { method: 'POST', body: { model, messages, forceAccountId: accountId ? Number(accountId) : null, params, protocol, system } });
@@ -1085,6 +1096,13 @@ async function pgSend() {
           <p class="muted" style="margin-top:8px">${r.latency_ms}ms · status=${r.response?.status} · 输入 ${r.response?.usage?.input_tokens} tok / 输出 ${r.response?.usage?.output_tokens} tok</p>
           <details style="margin-top:8px"><summary style="cursor:pointer;color:var(--muted);font-size:13px">完整 response 对象（ChatGPT Responses 格式）</summary>
           <pre class="mono" style="margin-top:8px;max-height:300px">${esc(JSON.stringify(r.response, null, 2))}</pre></details>`;
+      } else if (protocol === 'anthropic' && r.ok) {
+        const m = r.message || {};
+        st.liveText = (m.content || []).map(b => b.type === 'thinking' ? '[思考] ' + b.thinking : b.text).join('\n\n');
+        st.statusHtml = `<pre class="mono" style="white-space:pre-wrap;max-height:420px;overflow:auto">${esc((m.content || []).map(b => b.type === 'thinking' ? '〔思考〕' + b.thinking : b.text).join('\n\n──\n\n'))}</pre>
+          <p class="muted" style="margin-top:8px">${r.latency_ms}ms · stop=${m.stop_reason} · 输入 ${m.usage?.input_tokens} tok / 输出 ${m.usage?.output_tokens} tok · content 块: ${(m.content || []).map(b => b.type).join(', ') || '-'}</p>
+          <details style="margin-top:8px"><summary style="cursor:pointer;color:var(--muted);font-size:13px">完整 message 对象（Anthropic Messages 格式）</summary>
+          <pre class="mono" style="margin-top:8px;max-height:300px">${esc(JSON.stringify(m, null, 2))}</pre></details>`;
       } else if (r.ok) {
         st.liveText = r.text;
         st.statusHtml = `<pre class="mono" style="white-space:pre-wrap;max-height:420px;overflow:auto">${esc(r.text)}</pre><p class="muted" style="margin-top:8px">${r.latency_ms}ms · 输入 ${r.usage.input_tokens} tok / 输出 ${r.usage.output_tokens} tok · 积分 ${(r.usage.credits || 0).toFixed(3)}</p>`;

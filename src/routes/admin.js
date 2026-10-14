@@ -585,6 +585,79 @@ router.post('/test/chat', async (req, res) => {
   // system prompt support (test bench)
   const allMessages = system ? [{ role: 'system', content: system }, ...messages] : messages;
 
+  // ---- Anthropic Messages protocol (/v1/messages shape) ----
+  if (protocol === 'anthropic') {
+    const buildMsg = (text, thinking) => ({
+      id: 'msg_' + Math.random().toString(36).slice(2, 10), type: 'message', role: 'assistant', model,
+      content: [
+        ...(thinking ? [{ type: 'thinking', thinking }] : []),
+        { type: 'text', text: text || '' },
+      ],
+      stop_reason: 'end_turn',
+      stop_sequence: null,
+      usage: { input_tokens: usageAcc.input_tokens, output_tokens: usageAcc.output_tokens },
+    });
+    if (!stream) {
+      try {
+        let text = '', thinking = '';
+        await engine.runChat({ publicModel: model, messages: allMessages, source: 'test-anthropic', apikeyId: apikey_id, forceAccountId, params },
+          (data) => {
+            try {
+              const j = JSON.parse(data);
+              if (j.choices?.[0]) {
+                const d = j.choices[0].delta || j.choices[0].message || {};
+                if (d.content) text += d.content;
+                if (d.reasoning_content || d.reasoning) thinking += d.reasoning_content || d.reasoning;
+                if (j.usage) { usageAcc.input_tokens = j.usage.prompt_tokens || usageAcc.input_tokens; usageAcc.output_tokens = j.usage.completion_tokens || usageAcc.output_tokens; }
+              }
+            } catch {}
+            return true;
+          }, (u) => Object.assign(usageAcc, u));
+        return res.json({ ok: true, protocol: 'anthropic', message: buildMsg(text, thinking), latency_ms: Date.now() - started });
+      } catch (e) { return res.json({ ok: false, error: e.message, status: e.status, latency_ms: Date.now() - started }); }
+    }
+    res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-cache' });
+    try {
+      let text = '', thinking = '', opened = null, blockIdx = 0;
+      await engine.runChat({ publicModel: model, messages: allMessages, source: 'test-anthropic', apikeyId: apikey_id, forceAccountId, params },
+        (data) => {
+          try {
+            const j = JSON.parse(data);
+            const d = j.choices?.[0]?.delta || {};
+            if ((d.reasoning_content || d.reasoning) && !res.writableEnded) {
+              if (opened !== 'thinking') {
+                if (opened) { res.write(JSON.stringify({ anthropicEvent: { type: 'content_block_stop', index: blockIdx } }) + '\n'); blockIdx++; }
+                res.write(JSON.stringify({ anthropicEvent: { type: 'content_block_start', index: blockIdx, content_block: { type: 'thinking', thinking: '' } } }) + '\n');
+                opened = 'thinking';
+              }
+              thinking += d.reasoning_content || d.reasoning;
+              res.write(JSON.stringify({ anthropicEvent: { type: 'content_block_delta', index: blockIdx, delta: { type: 'thinking_delta', thinking: d.reasoning_content || d.reasoning } } }) + '\n');
+            }
+            if (d.content && !res.writableEnded) {
+              if (opened !== 'text') {
+                if (opened) { res.write(JSON.stringify({ anthropicEvent: { type: 'content_block_stop', index: blockIdx } }) + '\n'); blockIdx++; }
+                res.write(JSON.stringify({ anthropicEvent: { type: 'content_block_start', index: blockIdx, content_block: { type: 'text', text: '' } } }) + '\n');
+                opened = 'text';
+              }
+              text += d.content;
+              res.write(JSON.stringify({ anthropicEvent: { type: 'content_block_delta', index: blockIdx, delta: { type: 'text_delta', text: d.content } } }) + '\n');
+            }
+            if (j.usage) { usageAcc.input_tokens = j.usage.prompt_tokens || usageAcc.input_tokens; usageAcc.output_tokens = j.usage.completion_tokens || usageAcc.output_tokens; }
+          } catch {}
+          return true;
+        }, (u) => Object.assign(usageAcc, u));
+      if (opened && !res.writableEnded) res.write(JSON.stringify({ anthropicEvent: { type: 'content_block_stop', index: blockIdx } }) + '\n');
+      if (!res.writableEnded) {
+        res.write(JSON.stringify({ anthropicEvent: { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: usageAcc.output_tokens } } }) + '\n');
+        res.write(JSON.stringify({ done: true, usage: usageAcc, latency_ms: Date.now() - started }) + '\n');
+        res.end();
+      }
+    } catch (e) {
+      if (!res.writableEnded) { res.write(JSON.stringify({ error: e.message }) + '\n'); res.end(); }
+    }
+    return;
+  }
+
   // ---- Responses protocol (/v1/responses shape) ----
   if (protocol === 'responses') {
     const buildResp = (text, reasoning, status = 'completed') => ({
