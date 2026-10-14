@@ -362,6 +362,7 @@ module.exports = {
       request_set_id: crypto.randomUUID(), session_id: crypto.randomUUID(),
       user_id: c.userId || c.uid || '',
       uid: c.userId || c.uid || '',
+      agent_id: 'agent_common',
       business: { id: crypto.randomUUID(), begin_at: Date.now() },
       model_config: { key: upstreamModel, source: 'system' },
       chat_context: {
@@ -438,8 +439,8 @@ module.exports = {
         const token = j.token || j.securityOauthToken || j.security_oauth_token;
         if (!token) { found.push({ label: `${dir}（解密成功但无 token）`, suggestName: null, credentials: null }); continue; }
         found.push({
-          label: `${dir.replace('.app.stable', '')} 桌面版`,
-          suggestName: 'qoder-desktop-' + region,
+          label: region === 'cn' ? '国内版' : '国际版',
+          suggestName: region === 'cn' ? 'qoder-国内版' : 'qoder-国际版',
           credentials: {
             securityOauthToken: token,
             refreshToken: j.refreshToken || null,
@@ -464,11 +465,11 @@ module.exports = {
         const token = j?.accessToken || j?.security_oauth_token || j?.securityOauthToken;
         if (token) {
           found.push({
-            label: `${d} CLI`, suggestName: 'qoder-' + d.replace('.', ''),
+            label: region === 'cn' ? '国内版' : '国际版', suggestName: region === 'cn' ? 'qoder-国内版' : 'qoder-国际版',
             credentials: { securityOauthToken: token, refreshToken: j?.refresh_token || null, region },
           });
         } else {
-          found.push({ label: `${d} CLI（加密，请在面板粘贴 PAT）`, suggestName: null, credentials: null });
+          found.push({ label: (d === '.qoder.cn' ? '国内版' : '国际版') + '（加密，请在面板粘贴 PAT）', suggestName: null, credentials: null });
         }
       } catch { /* skip */ }
     }
