@@ -916,15 +916,33 @@ async function renderPlayground(m) {
     <div class="row" style="margin-bottom:8px;flex-wrap:wrap">
       <select id="pgProvider" style="width:170px" onchange="pgProviderChange()">
         <option value="">选择平台…</option>
+        <option value="__virtual">统一模型</option>
         ${groupProviders(providers).map(g => `<optgroup label="${esc(g.name)}">${g.providers.filter(p => (window._pg.models[p.id]?.length || 0) > 0).map(p => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join('')}</optgroup>`).join('')}
       </select>
       <select id="pgAccount" style="width:170px" onchange="pgAccountChange()"><option value="">自动轮询</option></select>
       <select id="pgModel" style="width:230px"><option value="">先选平台…</option></select>
+      <select id="pgProtocol" style="width:190px" onchange="pgUpdateEndpoint()" title="ChatGPT 官方新格式，Codex 使用">
+        <option value="chat">协议: OpenAI Chat</option>
+        <option value="responses">协议: OpenAI Responses</option>
+      </select>
       <span class="spacer"></span>
       <button id="pgSend" onclick="pgSend()" style="flex-shrink:0">发送</button>
     </div>
+    <details style="margin-bottom:8px">
+      <summary style="cursor:pointer;color:var(--muted);font-size:13px">请求参数（可修改，随请求发送）</summary>
+      <div class="row" style="gap:10px;flex-wrap:wrap;margin-top:8px">
+        <div class="field" style="width:130px;margin:0"><label>temperature</label><input id="pgTemp" type="number" step="0.1" min="0" max="2" value="0.7"></div>
+        <div class="field" style="width:130px;margin:0"><label>top_p</label><input id="pgTopP" type="number" step="0.1" min="0" max="1" value="1"></div>
+        <div class="field" style="width:150px;margin:0"><label>max_tokens（空=默认）</label><input id="pgMaxTok" type="number" min="1" placeholder="默认"></div>
+        <div class="field" style="width:170px;margin:0"><label>思考深度 reasoning</label>
+          <select id="pgReasoning"><option value="">默认（不发）</option><option value="think">开 (-think)</option><option value="think-high">高 (-think-high)</option><option value="xhigh">最高 (-xhigh)</option><option value="nothink">关 (-nothink)</option></select></div>
+        <div style="flex:1;min-width:220px"><label style="font-size:12px;color:var(--muted)">system 提示词（可选）</label>
+        <input id="pgSystem" placeholder="如：你是一个简洁的助手" style="margin-top:2px"></div>
+      </div>
+    </details>
     <div class="row" style="margin-bottom:8px;gap:12px;flex-wrap:wrap;font-size:13px">
-      <label class="row" style="gap:4px"><input type="checkbox" id="pgStream" style="width:auto" checked> 流式</label>
+      <label class="row" style="gap:4px" title="流式：服务器边生成边推（SSE/NDJSON），harness 工具大多用这个；非流式：等全部生成完一次性返回 JSON">
+        <input type="checkbox" id="pgStream" style="width:auto" checked> 流式</label>
       <label class="row" style="gap:4px"><input type="checkbox" id="pgShowRaw" style="width:auto" onchange="pgRenderOut()"> 显示原始事件</label>
       <label class="row" style="gap:4px"><input type="checkbox" id="pgDetails" style="width:auto" checked onchange="pgRenderOut()"> 请求详情</label>
       <span class="spacer"></span>
@@ -953,7 +971,10 @@ function pgAccountChange() { pgUpdateEndpoint(); }
 function pgUpdateEndpoint() {
   const model = $('#pgModel').value;
   const acct = $('#pgAccount').value;
-  $('#pgEndpoint').textContent = model ? `POST /v1/chat/completions  model=${model}${acct ? '  账号#' + acct : '  自动'}` : '';
+  const proto = $('#pgProtocol')?.value || 'chat';
+  if (!model) { $('#pgEndpoint').textContent = ''; return; }
+  const ep = proto === 'responses' ? 'POST /v1/responses' : 'POST /v1/chat/completions';
+  $('#pgEndpoint').textContent = `${ep}  model=${model}${acct ? '  账号#' + acct : '  自动'}`;
 }
 function pgRenderOut() {
   // rerender from cached state after detail toggles (no layout jump: output card is fixed)
@@ -975,30 +996,47 @@ function pgRenderOut() {
   if (pre && st.liveText != null) pre.textContent = st.liveText;
 }
 let pgBusy = false;
+function pgBuildParams() {
+  const p = {};
+  const temp = parseFloat($('#pgTemp')?.value);
+  const topP = parseFloat($('#pgTopP')?.value);
+  const maxTok = parseInt($('#pgMaxTok')?.value);
+  if (!isNaN(temp)) p.temperature = temp;
+  if (!isNaN(topP)) p.top_p = topP;
+  if (maxTok > 0) p.max_tokens = maxTok;
+  const reason = $('#pgReasoning')?.value;
+  if (reason === 'think') p.reasoning_effort = 'medium';
+  else if (reason === 'think-high') p.reasoning_effort = 'high';
+  else if (reason === 'xhigh') p.reasoning_effort = 'xhigh';
+  else if (reason === 'nothink') p.reasoning_effort = 'none';
+  return p;
+}
 async function pgSend() {
   if (pgBusy) return;
   const model = $('#pgModel').value;
   const prompt = $('#pgPrompt').value.trim();
   const accountId = $('#pgAccount').value || null;
+  const protocol = $('#pgProtocol')?.value || 'chat';
+  const system = $('#pgSystem')?.value?.trim() || '';
   if (!model || !prompt) return toast('请选择平台和模型并输入内容', true);
   const sendBtn = $('#pgSend');
   pgBusy = true; sendBtn.disabled = true;
   const t0 = performance.now();
   const stream = $('#pgStream').checked;
-  const bodyObj = {
-    model, stream,
-    messages: [{ role: 'user', content: prompt }],
-    temperature: 0.7,
-    ...(accountId ? { forceAccountId: Number(accountId) } : {}),
-  };
-  const requestPreview = `POST /v1/chat/completions\nAuthorization: Bearer ${'sk-dsh-****'}\nContent-Type: application/json\n\n` +
-    JSON.stringify({ model, stream, temperature: 0.7, messages: [{ role: 'user', content: prompt }] }, null, 2);
-  window._pgState = { requestPreview, rawEvents: [], liveText: '', statusHtml: '<p class="muted">请求中…</p>' };
+  const params = pgBuildParams();
+  const messages = [{ role: 'user', content: prompt }];
+  const wireBody = protocol === 'responses'
+    ? { model, stream, input: messages, instructions: system || undefined, reasoning: params.reasoning_effort ? { effort: params.reasoning_effort === 'none' ? 'low' : params.reasoning_effort } : undefined, max_output_tokens: params.max_tokens || undefined, temperature: params.temperature, top_p: params.top_p }
+    : { model, stream, messages: system ? [{ role: 'system', content: system }, ...messages] : messages, ...params };
+  Object.keys(wireBody).forEach(k => wireBody[k] === undefined && delete wireBody[k]);
+  const requestPreview = `POST ${protocol === 'responses' ? '/v1/responses' : '/v1/chat/completions'}\nAuthorization: Bearer sk-dsh-****\nContent-Type: application/json\n\n` +
+    JSON.stringify(wireBody, null, 2);
+  window._pgState = { requestPreview, rawEvents: [], liveText: '', statusHtml: '<p class="muted">请求中…</p>', protocol };
   pgRenderOut();
   try {
     if (stream) {
       const resp = await fetch('/admin/api/test/chat', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + TOKEN },
-        body: JSON.stringify(bodyObj) });
+        body: JSON.stringify({ model, messages, stream: true, forceAccountId: accountId ? Number(accountId) : null, params, protocol, system }) });
       const reader = resp.body.getReader();
       const dec = new TextDecoder();
       let buf = '', usageLine = '';
@@ -1016,7 +1054,12 @@ async function pgSend() {
           st.rawEvents.push(line.length > 500 ? line.slice(0, 500) + '…' : line);
           try {
             const j = JSON.parse(line);
-            if (j.raw) {
+            if (j.responsesEvent) {
+              const ev = j.responsesEvent;
+              if (ev.type === 'response.output_text.delta') st.liveText += ev.delta;
+              if (ev.type === 'response.reasoning_summary_text.delta') st.liveText += ev.delta;
+              if (ev.type === 'response.completed') usageLine = `Responses 流完成 · 输出 ${ev.response?.output_text?.length || 0} 字`;
+            } else if (j.raw) {
               try {
                 const ev = JSON.parse(j.raw);
                 const d = ev.choices?.[0]?.delta || {};
@@ -1028,16 +1071,21 @@ async function pgSend() {
             if (j.done) usageLine = `完成 ${(performance.now() - t0).toFixed(0)}ms · 输入 ${j.usage?.input_tokens || 0} tok / 输出 ${j.usage?.output_tokens || 0} tok · 积分 ${(j.usage?.credits || 0).toFixed(3)}`;
           } catch {}
         }
-        // live update
         const pre = $('#pgLive');
         if (pre) pre.textContent = st.liveText || '(等待响应…)';
       }
-      st.statusHtml = `<pre class="mono" style="white-space:pre-wrap;max-height:420px;overflow:auto">${esc(st.liveText) || '<span class="muted">(空响应)</span>'}</pre><p class="muted" style="margin-top:8px">${esc(usageLine || '流结束')}</p>`;
+      st.statusHtml = `<pre class="mono" style="white-space:pre-wrap;max-height:420px;overflow:auto">${esc(st.liveText) || '<span class="muted">(空响应)</span>'}</pre><p class="muted" style="margin-top:8px">${esc(usageLine || '流结束')} · ${protocol === 'responses' ? 'Responses 事件流' : 'chat SSE/NDJSON'}</p>`;
       pgRenderOut();
     } else {
-      const r = await api('/test/chat', { method: 'POST', body: bodyObj });
+      const r = await api('/test/chat', { method: 'POST', body: { model, messages, forceAccountId: accountId ? Number(accountId) : null, params, protocol, system } });
       const st = window._pgState;
-      if (r.ok) {
+      if (protocol === 'responses' && r.ok) {
+        st.liveText = r.response?.output_text || '';
+        st.statusHtml = `<pre class="mono" style="white-space:pre-wrap;max-height:420px;overflow:auto">${esc(st.liveText)}</pre>
+          <p class="muted" style="margin-top:8px">${r.latency_ms}ms · status=${r.response?.status} · 输入 ${r.response?.usage?.input_tokens} tok / 输出 ${r.response?.usage?.output_tokens} tok</p>
+          <details style="margin-top:8px"><summary style="cursor:pointer;color:var(--muted);font-size:13px">完整 response 对象（ChatGPT Responses 格式）</summary>
+          <pre class="mono" style="margin-top:8px;max-height:300px">${esc(JSON.stringify(r.response, null, 2))}</pre></details>`;
+      } else if (r.ok) {
         st.liveText = r.text;
         st.statusHtml = `<pre class="mono" style="white-space:pre-wrap;max-height:420px;overflow:auto">${esc(r.text)}</pre><p class="muted" style="margin-top:8px">${r.latency_ms}ms · 输入 ${r.usage.input_tokens} tok / 输出 ${r.usage.output_tokens} tok · 积分 ${(r.usage.credits || 0).toFixed(3)}</p>`;
       } else {

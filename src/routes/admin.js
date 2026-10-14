@@ -578,14 +578,81 @@ router.put('/settings', (req, res) => {
 
 // ---------- playground (admin test bench) ----------
 router.post('/test/chat', async (req, res) => {
-  const { model, messages, stream = false, apikey_id = null, forceAccountId = null } = req.body || {};
+  const { model, messages, stream = false, apikey_id = null, forceAccountId = null, params = {}, protocol = 'chat', system = '' } = req.body || {};
   if (!model || !messages?.length) return res.status(400).json({ error: 'model and messages required' });
   const started = Date.now();
   const usageAcc = { input_tokens: 0, output_tokens: 0, credits: 0 };
+  // system prompt support (test bench)
+  const allMessages = system ? [{ role: 'system', content: system }, ...messages] : messages;
+
+  // ---- Responses protocol (/v1/responses shape) ----
+  if (protocol === 'responses') {
+    const buildResp = (text, reasoning, status = 'completed') => ({
+      id: 'resp_' + Math.random().toString(36).slice(2, 10), object: 'response', created_at: Math.floor(Date.now() / 1000),
+      status, model,
+      output: [
+        ...(reasoning ? [{ type: 'reasoning', id: 'rs_test', summary: [{ type: 'summary_text', text: reasoning }] }] : []),
+        { type: 'message', id: 'msg_test', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text, annotations: [] }] },
+      ],
+      output_text: text,
+      usage: { input_tokens: usageAcc.input_tokens, output_tokens: usageAcc.output_tokens, total_tokens: usageAcc.input_tokens + usageAcc.output_tokens },
+      error: null,
+    });
+    if (!stream) {
+      try {
+        let text = '', reasoning = '';
+        await engine.runChat({ publicModel: model, messages: allMessages, source: 'test-responses', apikeyId: apikey_id, forceAccountId, params },
+          (data) => {
+            try {
+              const j = JSON.parse(data);
+              if (j.choices?.[0]) {
+                const d = j.choices[0].delta || j.choices[0].message || {};
+                if (d.content) text += d.content;
+                if (d.reasoning_content || d.reasoning) reasoning += d.reasoning_content || d.reasoning;
+                if (j.usage) { usageAcc.input_tokens = j.usage.prompt_tokens || usageAcc.input_tokens; usageAcc.output_tokens = j.usage.completion_tokens || usageAcc.output_tokens; }
+              }
+            } catch {}
+            return true;
+          }, (u) => Object.assign(usageAcc, u));
+        return res.json({ ok: true, protocol: 'responses', response: buildResp(text, reasoning), latency_ms: Date.now() - started });
+      } catch (e) { return res.json({ ok: false, error: e.message, status: e.status, latency_ms: Date.now() - started }); }
+    }
+    res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-cache' });
+    try {
+      let text = '', reasoning = '';
+      await engine.runChat({ publicModel: model, messages: allMessages, source: 'test-responses', apikeyId: apikey_id, forceAccountId, params },
+        (data) => {
+          try {
+            const j = JSON.parse(data);
+            const d = j.choices?.[0]?.delta || {};
+            if (d.reasoning_content || d.reasoning) {
+              reasoning += d.reasoning_content || d.reasoning;
+              if (!res.writableEnded) res.write(JSON.stringify({ responsesEvent: { type: 'response.reasoning_summary_text.delta', delta: d.reasoning_content || d.reasoning } }) + '\n');
+            }
+            if (d.content) {
+              text += d.content;
+              if (!res.writableEnded) res.write(JSON.stringify({ responsesEvent: { type: 'response.output_text.delta', delta: d.content } }) + '\n');
+            }
+            if (j.usage) { usageAcc.input_tokens = j.usage.prompt_tokens || usageAcc.input_tokens; usageAcc.output_tokens = j.usage.completion_tokens || usageAcc.output_tokens; }
+          } catch {}
+          return true;
+        }, (u) => Object.assign(usageAcc, u));
+      if (!res.writableEnded) {
+        res.write(JSON.stringify({ responsesEvent: { type: 'response.completed', response: buildResp(text, reasoning) } }) + '\n');
+        res.write(JSON.stringify({ done: true, usage: usageAcc, latency_ms: Date.now() - started }) + '\n');
+        res.end();
+      }
+    } catch (e) {
+      if (!res.writableEnded) { res.write(JSON.stringify({ error: e.message }) + '\n'); res.end(); }
+    }
+    return;
+  }
+
+  // ---- chat protocol (default) ----
   if (!stream) {
     let text = '';
     try {
-      await engine.runChat({ publicModel: model, messages, source: 'test', apikeyId: apikey_id, forceAccountId },
+      await engine.runChat({ publicModel: model, messages: allMessages, source: 'test', apikeyId: apikey_id, forceAccountId, params },
         (data) => {
           try {
             const j = JSON.parse(data);
@@ -602,7 +669,7 @@ router.post('/test/chat', async (req, res) => {
   // stream mode: NDJSON of raw events
   res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-cache' });
   try {
-    await engine.runChat({ publicModel: model, messages, source: 'test', apikeyId: apikey_id, forceAccountId },
+    await engine.runChat({ publicModel: model, messages: allMessages, source: 'test', apikeyId: apikey_id, forceAccountId, params },
       (data) => { if (!res.writableEnded) { res.write(JSON.stringify({ raw: data }) + '\n'); } return true; },
       (u) => Object.assign(usageAcc, u));
     res.write(JSON.stringify({ done: true, usage: usageAcc, latency_ms: Date.now() - started }) + '\n');
