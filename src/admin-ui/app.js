@@ -572,7 +572,7 @@ async function renderVirtual(m) {
     <select id="vpSel" style="width:260px"><option value="">选择预设…</option>
       ${presets.filter(p => p.multiProvider).map(p => `<option value="${esc(p.base)}">${esc(p.base)}（${p.targets.length} 平台: ${esc(p.providers.join(','))}）</option>`).join('')}
     </select>
-    <button class="ghost" id="vpCreate">一键创建</button>
+    <button class="ghost" id="vpCreate" title="按预设聚合：每个平台一个目标；具体用哪个账号由该平台的账号池按优先级/轮询决定，无需逐账号配置">一键创建</button>
     <span class="spacer"></span>
     <button onclick="openVirtualForm()">+ 自定义</button>
   </div>

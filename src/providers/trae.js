@@ -143,9 +143,26 @@ module.exports = {
       const models = new Map();
       for (const cfg of list) {
         const name = cfg.config_name;
-        if (name && !models.has(name)) models.set(name, { upstream: name, free: cfg.is_free || cfg.free });
+        const dc = cfg.display_config || {};
+        // fee_model_level: 0/1 免费（含限时免费），2 标准计费，3+ 高档计费
+        const feeLevel = dc.fee_model_level;
+        const free = feeLevel === 0 || feeLevel === 1 || dc.is_free === true;
+        const tags = [];
+        if (dc.model_capability === 'reasoning_model') tags.push('thinking');
+        if (feeLevel === 1) tags.push('limited-free');
+        if (feeLevel === 0) tags.push('free');
+        if (cfg.context_window_tokens?.dev) tags.push(`${Math.round(cfg.context_window_tokens.dev / 1000)}k`);
+        const enriched = {
+          upstream: name,
+          free,
+          multiplier: free ? 0 : (feeLevel >= 3 ? 2 : 1), // trae 不给具体倍率数字，只给等级
+          tags,
+          ctx: cfg.context_window_tokens?.dev || null,
+          online: true,
+        };
+        if (name && !models.has(name)) models.set(name, enriched);
         for (const md of cfg.model_detail_list || []) {
-          if (md.model_name && !models.has(md.model_name)) models.set(md.model_name, { upstream: md.model_name });
+          if (md.model_name && !models.has(md.model_name)) models.set(md.model_name, { ...enriched, upstream: md.model_name });
         }
       }
       return [...models.values()];
@@ -164,7 +181,15 @@ module.exports = {
     const models = (await this.listModels(account)).filter(m => !m.static);
     if (!models.length) throw new Error('上游未返回可用模型（账号可能失效）');
     return {
-      models: models.map(m => ({ upstream: m.upstream, publicName: m.upstream.toLowerCase(), free: !!m.free, online: true })),
+      models: models.map(m => ({
+        upstream: m.upstream,
+        publicName: m.upstream.toLowerCase(),
+        free: !!m.free,
+        multiplier: m.multiplier,
+        tags: m.tags,
+        ctx: m.ctx,
+        online: true,
+      })),
       replace: true,
       source: 'get_detail_param',
     };

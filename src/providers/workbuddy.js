@@ -123,6 +123,7 @@ module.exports = {
       const free = rate == null || rate === 0; // hy3 / image models have no rate = free
       if (free) tags.push('free');
       if (raw?.reasoning?.effort) tags.push(`effort:${raw.reasoning.effort}`);
+      if (raw?.vendor) tags.push('vendor:' + raw.vendor);
       models.push({
         upstream: id,
         publicName: id.toLowerCase(),
@@ -133,6 +134,7 @@ module.exports = {
         images: raw?.supportsImages === true,
         reasoning: !!(raw?.supportsReasoning || raw?.onlyReasoning),
         tags,
+        note: raw?.descriptionZh || raw?.descriptionEn || null,
         online: true,
       });
     }

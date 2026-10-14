@@ -93,19 +93,19 @@ function cosyHeaders(account, extra = {}) {
 // COSY session cache per account id (identity encrypted once; payload re-signed per request)
 const cosySessions = new Map(); // accountId -> session
 function getCosySession(account) {
-  let s = cosySessions.get(account.id);
-  if (!s) {
-    const c = account.credentials;
-    const { createSession } = require('../utils/cosy');
-    s = createSession({
-      uid: c.userId || c.uid || '',
-      user_type: c.userType || 'personal_standard',
-      securityOauthToken: c.securityOauthToken || c.jobToken || c.pat || '',
-      refreshToken: c.refreshToken || '',
-    });
-    cosySessions.set(account.id, s);
-  }
-  return s;
+  const s = cosySessions.get(account.id);
+  if (s) return s;
+  const c = account.credentials;
+  const { createSession } = require('../utils/cosy');
+  const created = createSession({
+    uid: c.userId || c.uid || '',
+    user_type: c.userType || c.plan || 'personal_standard',
+    securityOauthToken: c.jobToken || c.securityOauthToken || c.pat || '',
+    refreshToken: c.refreshToken || '',
+    name: c.email || '',
+  });
+  cosySessions.set(account.id, created);
+  return created;
 }
 
 /** signed data-plane request (chat / model list) — returns headers + encoded body string */
@@ -115,35 +115,61 @@ function cosyBearer(account, { path, bodyObj, accept, modelKey } = {}) {
 }
 
 /**
- * PAT → jobToken exchange (signature plane). The gateway REQUIRES a PAT (pt-…) here:
- * a dt- OAuth token cannot be exchanged (source: fengyinxia/qoder2api qoder_auth.py —
- * "The gateway always requires personalToken (a PAT) on this endpoint").
- * Response provides jobToken + full identity (uid/userType/org) used for the COSY session.
+ * PAT → jobToken exchange (signature plane). Response carries the full identity
+ * (uid/name/email/plan) + a 24h jt- jobToken + jrt- refresh token — these feed
+ * the COSY session. The outer body MUST be custom-base64-encoded (qoderEncode),
+ * not plain JSON — plain JSON gets a 500.
  */
 async function exchangePAT(account) {
   const c = account.credentials;
   const pat = c.pat || '';
-  if (!pat) throw Object.assign(new Error('Qoder 聊天通道需要 PAT：客户端 → 设置 → Integrations 创建（pt- 开头）后填入账号'), { status: 401 });
+  if (!pat) throw Object.assign(new Error('Qoder 聊天/在线目录需要 PAT：客户端 → 设置 → 集成/Integrations 创建（pt- 开头）'), { status: 401 });
   const { httpJson } = require('../utils/http');
+  const { db } = require('../store');
   const { signatureHeaders, qoderEncode } = require('../utils/cosy');
-  const inner = JSON.stringify({ userId: c.userId || '', personalToken: pat, securityOauthToken: '', refreshToken: '', needRefresh: false, authInfo: {} });
-  const body = JSON.stringify({ payload: inner, encodeVersion: '1' });
+  const inner = JSON.stringify({ userId: '', personalToken: pat, securityOauthToken: '', refreshToken: '', needRefresh: false, authInfo: {} });
+  const outer = JSON.stringify({ payload: inner, encodeVersion: '1' });
   const r = await httpJson(`${gw(account)}/algo/api/v3/user/jobToken?Encode=1`, {
-    method: 'POST', headers: { ...signatureHeaders(), Authorization: `Bearer ${pat}` }, body, timeoutMs: 20000,
+    method: 'POST', headers: { ...signatureHeaders(), Authorization: `Bearer ${pat}` }, body: qoderEncode(Buffer.from(outer)), timeoutMs: 20000,
   });
   if (r.status !== 200) throw Object.assign(new Error(`jobToken 交换失败 ${r.status}: ${String(r.text || '').slice(0, 120)}`), { status: 502 });
   const d = r.json?.data || r.json || {};
-  return { jobToken: d.jobToken || d.job_token, identity: d.identity || d, raw: d };
+  // persist identity + tokens into credentials so COSY session uses them
+  const fresh = {
+    ...c,
+    jobToken: d.securityOauthToken || d.jobToken || null,
+    refreshToken: d.refreshToken || c.refreshToken || null,
+    userId: d.id || d.uid || c.userId || null,
+    email: d.email || d.name || null,
+    username: d.name || null,
+    plan: d.plan || null,
+    jobExpiresAt: d.expireTime ? Number(d.expireTime) : null,
+  };
+  db.prepare('UPDATE accounts SET credentials=?, extra=? WHERE id=?')
+    .run(JSON.stringify(fresh), JSON.stringify({ uid: fresh.userId, email: fresh.email, username: fresh.username, plan: fresh.plan, credits: account.extra?.credits, quota: account.extra?.quota }), account.id);
+  account.credentials = fresh;
+  account.extra = { ...account.extra, username: fresh.username, email: fresh.email, plan: fresh.plan };
+  // build COSY session from the exchanged identity
+  const { createSession } = require('../utils/cosy');
+  const session = createSession({
+    uid: fresh.userId || '',
+    user_type: fresh.plan || 'personal_standard',
+    securityOauthToken: fresh.jobToken || '',
+    refreshToken: fresh.refreshToken || '',
+    name: fresh.email || '',
+  });
+  cosySessions.set(account.id, session);
+  return session;
 }
 
-/** ensure a COSY session built from a PAT exchange (cached) */
-function ensurePATSession(account) {
+/** ensure a valid COSY session: PAT exchange on first use or when the 24h jobToken expired */
+function ensureSession(account) {
+  const cached = cosySessions.get(account.id);
   const c = account.credentials;
-  if (c.pat && !cosySessions.get(account.id)) {
-    // session identity fields will be refreshed from jobToken on first exchange
-    return null;
-  }
-  return cosySessions.get(account.id);
+  const expired = c.jobExpiresAt && Date.now() > c.jobExpiresAt - 10 * 60 * 1000;
+  if (cached && !expired) return cached;
+  if (c.pat) return exchangePAT(account);
+  throw Object.assign(new Error('Qoder 聊天/在线目录需要 PAT（pt-）：客户端 → 设置 → 集成/Integrations 创建后填入账号'), { status: 401 });
 }
 
 module.exports = {
@@ -174,29 +200,38 @@ module.exports = {
   },
 
   /**
-   * 恢复在线目录：COSY 签名的 /algo/api/v2/model/list?Encode=1（GET，需带 "$kwm" body）。
-   * 返回服务器当前真实可用模型（含内部 key 与显示名）。
+   * 恢复在线目录：COSY 签名的 /algo/api/v2/model/list?Encode=1。
+   * GET 的 body 必须是 qoderEncode({}) == "$kwm"，且签名 body 字段也用 "$kwm"（hub 行为）。
+   * price_factor 即倍率（0 = 免费），带 vision/reasoning 标签与上下文窗口。
    */
   async listOnlineModels(account) {
-    const { httpJson } = require('../utils/http');
+    await ensureSession(account);
     const { headers, body } = cosyBearer(account, { path: '/api/v2/model/list', bodyObj: {}, accept: 'application/json' });
     const r = await httpJson(`${gw(account)}/algo/api/v2/model/list?Encode=1`, {
       method: 'GET', headers, body, timeoutMs: 20000,
     });
     if (r.status !== 200) throw new Error(`model/list ${r.status}: ${String(r.text || '').slice(0, 150)}`);
-    const data = r.json?.data || r.json || {};
-    const list = data.models || data.model_list || (Array.isArray(data) ? data : []);
+    const j = r.json?.data || r.json || {};
+    const list = j.chat || j.models || (Array.isArray(j) ? j : []);
     const models = [];
     const seen = new Set();
     for (const m of list) {
-      const key = m.key || m.model_key || m.id || m.name;
-      if (!key || seen.has(key)) continue;
+      const key = m.key || m.model_key || m.id;
+      if (!key || seen.has(key) || m.enable === false) continue;
       seen.add(key);
+      const rate = m.price_factor != null ? Number(m.price_factor) : null;
+      const tags = [];
+      if (m.is_vl) tags.push('vision');
+      if (m.is_reasoning) tags.push('thinking');
+      if (rate === 0) tags.push('free');
+      if (m.max_input_tokens) tags.push(`${Math.round(m.max_input_tokens / 1000)}k`);
       models.push({
         upstream: key,
         publicName: key.toLowerCase(),
-        free: m.free === true || m.is_free === true,
-        ctx: m.maxInputTokens || m.max_input_tokens || null,
+        free: rate === 0,
+        multiplier: rate ?? 1,
+        ctx: m.max_input_tokens || null,
+        tags,
         online: true,
       });
     }
@@ -258,22 +293,29 @@ module.exports = {
 
   async *chat({ account, upstreamModel, messages, tools, params, signal, onUsage }) {
     // chat requires PAT→jobToken→COSY. dt- tokens cannot use the chat channel.
-    if (account.credentials.pat) {
-      try { await exchangePAT(account); } catch (e) { if (e.status === 401) throw e; /* fall through with cached session */ }
-    } else if (!account.credentials.jobToken) {
-      throw Object.assign(new Error('Qoder 聊天通道需要 PAT（dt- 登录 token 不被聊天网关接受）：客户端 → 设置 → Integrations 创建 pt- PAT，编辑账号填入'), { status: 401 });
-    }
+    try { ensureSession(account); } catch (e) { if (e.status) throw e; }
+    const c = account.credentials;
     const rid = crypto.randomUUID();
+    // hub-style body: OpenAI-shaped messages at the top level (verified against the live gateway)
     const userMsg = [...messages].reverse().find(m => m.role === 'user');
     const lastUserParts = userMsg?.parts;
+    const wireMessages = messages.map(m => {
+      const out = { role: m.role, content: m.text ?? '' };
+      if (m.parts?.some(p => p.type === 'image_url')) {
+        out.content = m.parts.map(p => p.type === 'text' ? { type: 'text', text: p.text } : { type: 'image_url', image_url: { url: p.url } });
+      }
+      return out;
+    });
     const bodyObj = {
-      request_id: rid,
-      chat_record_id: rid,
-      request_set_id: crypto.randomUUID(),
-      session_id: crypto.randomUUID(),
-      business: { id: crypto.randomUUID(), begin_at: Date.now() },
+      model: upstreamModel,
+      messages: wireMessages,
       stream: true,
-      model_config: { key: upstreamModel },
+      request_id: rid, chat_record_id: rid,
+      request_set_id: crypto.randomUUID(), session_id: crypto.randomUUID(),
+      user_id: c.userId || c.uid || '',
+      uid: c.userId || c.uid || '',
+      business: { id: crypto.randomUUID(), begin_at: Date.now() },
+      model_config: { key: upstreamModel, source: 'system' },
       chat_context: {
         text: {
           // vision: image parts carried as image_url entries alongside text
@@ -285,7 +327,7 @@ module.exports = {
           } : {}),
           text: userMsg?.text || '',
         },
-        extra: { modelConfig: { key: upstreamModel, ...(params.reasoning_effort ? { reasoningEffort: params.reasoning_effort } : {}) }, originalContent: { text: userMsg?.text || '' } },
+        extra: { modelConfig: { key: upstreamModel, source: 'system', ...(params.reasoning_effort && params.reasoning_effort !== 'none' ? { is_reasoning: true, reasoningEffort: params.reasoning_effort === 'xhigh' ? 'xhigh' : params.reasoning_effort === 'high' ? 'high' : 'medium' } : {}) }, originalContent: { text: userMsg?.text || '' } },
         // send short history (upstream expects its own context format; flat messages usually tolerated via text)
         history: messages.slice(0, -1).map(m => ({ role: m.role, text: m.text || '' })),
       },
@@ -306,17 +348,20 @@ module.exports = {
     for await (const { data } of sseParse(resp.body)) {
       if (data === '[DONE]') break;
       let env; try { env = JSON.parse(data); } catch { continue; }
+      if (!env || typeof env !== 'object') continue;
       // envelope: {headers, body:"<json str>", statusCodeValue}
       const code = env.statusCodeValue;
       if (code === 401 || code === 403 || env.code === 105) {
-        throw Object.assign(new Error(`qoder session expired (${code})`), { status: 401 });
+        let msg = env.message || '';
+        try { const b = typeof env.body === 'string' ? JSON.parse(env.body) : env.body; msg = msg || b?.message || ''; } catch {}
+        throw Object.assign(new Error(`qoder session expired (${code})${msg ? ': ' + msg : ''}`), { status: 401 });
       }
       if (code === 418 || env.code === 10605) {
         throw Object.assign(new Error('qoder rate limited / concurrency'), { status: 429 });
       }
       let inner = env.body;
       if (typeof inner === 'string') { try { inner = JSON.parse(inner); } catch { inner = null; } }
-      if (!inner) continue;
+      if (!inner || typeof inner !== 'object' || !inner.choices) continue;
       if (inner.usage) onUsage?.({ input_tokens: inner.usage.prompt_tokens, output_tokens: inner.usage.completion_tokens, credits: inner.credits ?? inner.original_credits });
       // inner is OpenAI-shaped choices[].delta
       yield JSON.stringify(inner);

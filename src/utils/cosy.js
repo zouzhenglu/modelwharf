@@ -95,7 +95,8 @@ function createSession(identity) {
 /** per-request Bearer headers for the data plane */
 function bearerRequest(session, { method = 'POST', path, bodyObj, accept = 'application/json', modelKey } = {}) {
   const date = String(Math.floor(Date.now() / 1000));
-  const body = bodyObj == null ? '' : qoderEncode(JSON.stringify(bodyObj));
+  // empty-object body (model-list GET) sends & signs "$kwm" (hub-verified); null body sends & signs ""
+  const body = bodyObj === undefined ? '' : qoderEncode(JSON.stringify(bodyObj === null ? {} : bodyObj));
   const payload = Buffer.from(JSON.stringify({
     cosyVersion: COSY_VERSION,
     ideVersion: '',

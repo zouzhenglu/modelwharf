@@ -21,8 +21,10 @@ function resetProviderModelsToOnline(plugin, onlineModels) {
   let added = 0;
   for (const m of onlineModels) {
     const upstream = m.upstream || m;
+    const tagList = Array.isArray(m.tags) ? m.tags : (m.tags ? [m.tags] : []);
+    if (m.vision || m.images) tagList.push('vision');
     insert.run(plugin.id, upstream, m.publicName || upstream, 1, m.free ? 1 : 0, m.multiplier ?? 1, m.ctx || null, m.maxOutput || null,
-      (m.tags || []).join(',') || (m.online ? 'online' : ''), m.vision ? 'vision' : (m.images ? 'vision' : null));
+      tagList.join(',') || (m.online ? 'online' : ''), m.note || null);
     added++;
   }
   return { deleted: del.changes, added };
