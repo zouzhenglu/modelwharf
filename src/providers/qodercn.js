@@ -5,37 +5,40 @@
  */
 const base = require('./qoder');
 const { importFound } = require('../core/localcred');
+const { REGIONS } = require('./_qoder_names');
+
+/**
+ * 用 CN 区域跑一次 base 的方法，且不污染账号。
+ *
+ * 只挂 regionOverride（不进 credentials，因此不会被 finishExchange 落库）：
+ * 否则一个 intl 账号被中国版通道的方法碰过一次，region 就永久变成 cn，
+ * 之后所有请求都打到中国网关而失败（表现为「拉不到模型 / Login expired」）。
+ */
+function asCn(account, fn) {
+  return fn({ ...account, regionOverride: 'cn' });
+}
 
 module.exports = {
   ...base,
   id: 'qodercn',
-  label: 'Qoder 中国版',
-  homepage: 'https://qoder.com.cn',
+  label: REGIONS.cn.display,
+  homepage: REGIONS.cn.homepage,
+  region: 'cn',
   credFields: [
-    { name: 'pat', label: 'PAT（qoder.com.cn/account/integrations）', secret: true, placeholder: 'pt-...' },
+    { name: 'pat', label: 'PAT（客户端 设置 → 集成/Integrations 创建）', secret: true, placeholder: 'pt-...' },
     { name: 'securityOauthToken', label: 'securityOauthToken', secret: true },
     { name: 'deviceToken', label: 'Cosy-MachineToken（可选）', secret: true },
   ],
-  docs: '中国区网关 gateway.qoder.com.cn。账号与 qoder(intl) 相互独立管理。',
+  docs: `中国区网关 ${REGIONS.cn.gateway}。账号与 ${REGIONS.intl.display}（qoder）相互独立管理。`,
 
-  // only CN CLI credentials
-  discoverLocal() { return base.discoverLocal('cn'); },
+  // 只扫国内版（复用 qoder 的扫描实现，只扫自己那一个区域）
+  discoverLocal(regionFilter) { return base.scanLocal(regionFilter || 'cn'); },
 
-  async listModels(account) {
-    account.credentials = { ...account.credentials, region: 'cn' };
-    return base.listModels(account);
-  },
-  async listOnlineModels(account) {
-    account.credentials = { ...account.credentials, region: 'cn' };
-    return base.listOnlineModels(account);
-  },
-  async checkAccount(account) {
-    account.credentials = { ...account.credentials, region: 'cn' };
-    return base.checkAccount(account);
-  },
+  async listModels(account) { return asCn(account, (a) => base.listModels(a)); },
+  async listOnlineModels(account) { return asCn(account, (a) => base.listOnlineModels(a)); },
+  async checkAccount(account) { return asCn(account, (a) => base.checkAccount(a)); },
   async *chat(opts) {
-    opts.account.credentials = { ...opts.account.credentials, region: 'cn' };
-    yield* base.chat(opts);
+    yield* base.chat({ ...opts, account: { ...opts.account, regionOverride: 'cn' } });
   },
   async importLocal(opts = {}) {
     const found = this.discoverLocal();

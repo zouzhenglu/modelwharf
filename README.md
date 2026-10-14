@@ -10,8 +10,8 @@ harness 工具 ──►  本网关 (OpenAI /v1  +  Anthropic /v1/messages  +  M
                         │   ├─ trae (字节)                  → trae-api-cn.mchost.guru
                         │   ├─ qwen (chat.qwen.ai)          → 千问网页版
                         │   ├─ qwenwork (千问办公)          → gateway.qwenwork.cn
-                        │   ├─ qoder (阿里国际)             → api1.qoder.sh
-                        │   └─ qodercn (阿里国内)           → gateway.qoder.com.cn
+                        │   ├─ qoder · Qoder 国际版          → api1.qoder.sh
+                        │   └─ qodercn · Qoder 中国版        → gateway.qoder.com.cn
                         ├─ 国际官方 API（key 即用）
                         │   ├─ OpenAI · Anthropic · Google Gemini · xAI(Grok) · Mistral
                         │   ├─ OpenRouter · Groq · Together · Perplexity · Cerebras · GitHub Models
@@ -47,7 +47,7 @@ npm start                 # 默认 http://localhost:8317
    - **手动添加**：面板 → 平台账号 → 「+ 添加账号」，选平台后按表单填凭证。各平台凭证来源：
      - Trae：本机 `%APPDATA%\Trae CN\User\globalStorage\storage.json` 的 `iCubeAuthInfo://icube.cloudide` 值（或抓 IDE 请求头 `Authorization` 里的 JWT）
      - WorkBuddy/CodeBuddy：`%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\*.info`，或抓包 `copilot.tencent.com` 请求头 `Authorization`
-     - Qoder：客户端 设置 → Integrations 创建 PAT（`pt-` 开头，最稳）
+     - Qoder（国内版 / 国际版同一步骤）：客户端 设置 → Integrations 创建 PAT（`pt-` 开头，最稳）。两个版本是两套独立账号体系，账号分别挂在「Qoder 国际版」「Qoder 中国版」两个平台下；「扫描本机登录」会各扫各的。
      - 千问：chat.qwen.ai 登录后 Cookie 里的 `token`；也可直接填邮箱+密码由网关自动登录续期
      - 千问办公(QwenWork)：推荐「扫描本机登录」自动读取客户端登录态（`%APPDATA%\QwenWorkCN\auth-v2.dat`）；或添加账号弹窗点「网页授权登录」（设备码流程，无需客户端）；聊天需本机装有千问办公客户端（wasm 签名）
 2. **同步模型**（仪表盘 → 平台「同步模型」；之后可逐个模型 启用/停用/改名/设倍率/打标签）
@@ -66,7 +66,7 @@ npm start                 # 默认 http://localhost:8317
 | 用量/禁用启用/搜索筛选 | usage 全量日志（时间/平台/账号/模型/token/积分/耗时/状态），各列表页均带搜索+筛选 |
 | 扩展接口 | provider 插件协议（见 `src/core/registry.js` 注释）；新增平台=一个文件；已内置 24 个官方厂商 + openai-compat/ollama 通用插件 |
 | 账号-模型绑定管理 | 模型层面启停 + API key 级 `allowed_models` 白名单 |
-| 本地集成 | 「导入本机登录」扫描 Trae/CodeBuddy/Qoder CLI/千问办公客户端 的本地凭证文件 |
+| 本地集成 | 「导入本机登录」扫描 Trae/CodeBuddy/Qoder（国内版+国际版分别扫）/千问办公客户端 的本地凭证文件 |
 | 主流协议 | OpenAI `/v1/chat/completions`、`/v1/completions`、`/v1/models`；Anthropic `/v1/messages`（含 thinking/tool_use）；MCP 网关 |
 
 ## 已知限制（如实说明）

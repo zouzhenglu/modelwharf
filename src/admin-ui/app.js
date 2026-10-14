@@ -98,6 +98,7 @@ async function renderPlatforms(m) {
 
 // ---------- dashboard ----------
 const VENDOR_GROUPS = [
+  // qodercn 紧跟 qoder：同一个客户端的两个版本，放一起才好对照
   { name: '逆向平台（账号池）', ids: ['trae', 'workbuddy', 'qoder', 'qodercn', 'qwen', 'qwenwork'] },
   { name: '国际官方 API', ids: ['openai', 'anthropic', 'gemini', 'xai', 'openrouter', 'mistral', 'groq', 'together', 'perplexity', 'cerebras', 'github-copilot'] },
   { name: '国内官方 API', ids: ['dashscope', 'zhipu', 'moonshot', 'minimax', 'doubao', 'hunyuan', 'baichuan', 'stepfun', 'siliconflow', 'internvl', 'modelscope'] },
@@ -109,6 +110,12 @@ function groupProviders(providers) {
   const rest = providers.filter(p => !VENDOR_GROUPS.some(g => g.ids.includes(p.id)));
   if (rest.length) grouped.push({ name: '其他', providers: rest });
   return grouped.filter(g => g.providers.length);
+}
+/** 平台下拉的分组 <optgroup>；skipOther 时不含未分组平台（与平台账号页筛选一致） */
+function providerOptgroups(providers, selectedId, skipOther) {
+  return groupProviders(providers).filter(g => !skipOther || g.name !== '其他').map(g =>
+    `<optgroup label="${esc(g.name)}">${g.providers.map(p =>
+      `<option value="${p.id}" ${selectedId === p.id ? 'selected' : ''}>${esc(p.label)}</option>`).join('')}</optgroup>`).join('');
 }
 async function renderDashboard(m) {
   const [stats, chart] = await Promise.all([api('/stats'), api('/usage/chart?hours=24')]);
@@ -206,7 +213,7 @@ async function renderAccounts(m) {
   <h2>平台账号 <span class="muted">(${accounts.length})</span></h2>
   <div class="toolbar">
     <select id="fProvider" style="width:170px"><option value="">全部平台</option>
-      ${groupProviders(providers).filter(g => g.name !== '其他').map(g => `<optgroup label="${esc(g.name)}">${g.providers.map(p => `<option value="${p.id}" ${acctFilter.provider_id === p.id ? 'selected' : ''}>${esc(p.label)}</option>`).join('')}</optgroup>`).join('')}
+      ${providerOptgroups(providers, acctFilter.provider_id, true)}
     </select>
     <input id="fSearch" class="searchbox" placeholder="搜索名称/信息…" value="${esc(acctFilter.search)}">
     <select id="fStatus" style="width:110px"><option value="">全部状态</option>
@@ -237,8 +244,7 @@ async function renderAccounts(m) {
     <td>${switchHtml(a.enabled, `toggleAccount(${a.id}, ${a.enabled ? 0 : 1})`)}</td>
     <td style="white-space:nowrap">
       <button class="small ghost" onclick="checkAccount(${a.id})">检测</button>
-      <button class="small ghost" title="上游报给该账号的全部模型，增量补充" onclick="syncAccountModels(${a.id})">获取全部模型</button>
-      ${online ? `<button class="small ghost" title="只保留上游当前实际可用的模型（自定义条目会被移除）" onclick="resetOnlineAccount(${a.id})">恢复在线</button>` : ''}
+      <button class="small ghost" title="${online ? '只取上游当前实际可用的模型目录（与官方客户端显示一致，会替换现有列表，自定义条目会被移除）' : '从上游 /v1/models 在线目录同步该账号模型（增量补充）'}" onclick="restoreAccountModels(${a.id}, ${online})">恢复在线目录</button>
       <button class="small ghost" onclick="openAccountForm(${a.id})">编辑</button>
       <button class="small danger" onclick="delAccount(${a.id})">删</button>
     </td></tr>`;
@@ -343,8 +349,15 @@ async function syncAccountModels(id) {
     renderAccounts($('#main'));
   } catch (e) { toast('同步失败: ' + e.message, true); }
 }
+// 恢复在线目录（参照 dsh-llm-workbuddy 插件语义）：不追求上游报给账号的全部模型，
+// 只取官方客户端实际显示的目录。支持在线目录的平台按账号取目录并替换列表；
+// 官方 API / 本地渠道没有客户端目录，退化为 /v1/models 在线目录的增量同步。
+async function restoreAccountModels(id, online) {
+  if (online && !confirm('恢复在线目录？\n该平台现有模型列表会被替换为官方客户端当前显示的模型（自定义条目会被移除）。')) return;
+  if (online) return resetOnlineAccount(id);
+  return syncAccountModels(id);
+}
 async function resetOnlineAccount(id) {
-  if (!confirm('恢复在线模型？\n该平台现有模型列表会被替换为上游当前实际可用的模型（自定义条目会被移除）。')) return;
   toast('获取在线目录中…');
   try {
     const r = await api(`/accounts/${id}/reset-online-models`, { method: 'POST' });
@@ -447,16 +460,17 @@ async function renderModels(m) {
     api('/providers'),
     api('/models?' + new URLSearchParams(Object.fromEntries(Object.entries(modelFilter).filter(([, v]) => v !== '')))),
   ]);
-  const providerOpts = providers.map(p => `<option value="${p.id}" ${modelFilter.provider_id === p.id ? 'selected' : ''}>${esc(p.label)}</option>`).join('');
+  const providerOpts = providerOptgroups(providers, modelFilter.provider_id, true);
+  const providerOptsAll = providerOptgroups(providers, modelFilter.provider_id, false);
   m.innerHTML = `
   <h2>模型管理 <span class="muted">(${models.length})</span></h2>
   <div class="toolbar">
-    <select id="mfProvider" style="width:150px"><option value="">全部平台</option>${providerOpts}</select>
+    <select id="mfProvider" style="width:170px"><option value="">全部平台</option>${providerOpts}</select>
     <input id="mfSearch" class="searchbox" placeholder="搜索模型名/标签…" value="${esc(modelFilter.search)}">
     <select id="mfEnabled" style="width:100px"><option value="">全部</option><option value="1" ${modelFilter.enabled === '1' ? 'selected' : ''}>仅启用</option><option value="0" ${modelFilter.enabled === '0' ? 'selected' : ''}>仅停用</option></select>
     <input id="mfTag" style="width:110px" placeholder="标签筛选" value="${esc(modelFilter.tag)}">
     <span class="spacer"></span>
-    <select id="mfSyncSel" style="width:180px" title="把所选平台上该账号可用的模型拉取进网关（增量）"><option value="">同步模型：选择平台…</option><option value="__all">全部平台（逐个拉取）</option>${providerOpts}</select>
+    <select id="mfSyncSel" style="width:180px" title="把所选平台上该账号可用的模型拉取进网关（增量）"><option value="">同步模型：选择平台…</option><option value="__all">全部平台（逐个拉取）</option>${providerOptsAll}</select>
     <button class="ghost" id="mfSyncBtn" title="把所选平台账号在上游可用的模型同步进网关（增量，不删除已有）">开始同步</button>
     <button onclick="openModelForm()">+ 手动添加</button>
   </div>
@@ -538,7 +552,7 @@ async function openModelForm(id) {
   const [providers, models] = [await api('/providers'), await api('/models?size=1000')];
   const md = id ? models.find(x => x.id === id) : null;
   openModal(md ? '编辑模型' : '添加模型', `
-    <div class="field"><label>平台</label><select id="mfProviderSel" ${md ? 'disabled' : ''}>${providers.map(p => `<option value="${p.id}" ${md?.provider_id === p.id ? 'selected' : ''}>${esc(p.label)}</option>`).join('')}</select></div>
+    <div class="field"><label>平台</label><select id="mfProviderSel" ${md ? 'disabled' : ''}>${providerOptgroups(providers, md?.provider_id, false)}</select></div>
     <div class="field"><label>上游模型名（平台真实模型 id）</label><input id="mfUpstream" value="${esc(md?.upstream_model || '')}" placeholder="如 glm-5.2"></div>
     <div class="field"><label>对外名称（客户端填的 model）</label><input id="mfPublic" value="${esc(md?.public_name || '')}" placeholder="如 glm-5.2 或别名 my-model"></div>
     <div class="row">
@@ -602,7 +616,7 @@ async function renderVirtual(m) {
     if (!base) return toast('先选一个预设', true);
     const p = presets.find(x => x.base === base);
     try {
-      await api('/virtual-models', { method: 'POST', body: { public_name: base, targets: p.targets.map((t, i) => ({ ...t, priority: (i + 1) * 10 })), note: `聚合 ${p.targets.length} 个平台，失败自动切换` } });
+      await api('/virtual-models', { method: 'POST', body: { public_name: base, targets: p.targets.map((t, i) => ({ ...t, priority: (i + 1) * 10 })) } });
       toast(`✓ 已创建统一模型 ${base}（${p.targets.length} 平台）`); go('virtual');
     } catch (e) { toast(e.message, true); }
   };
@@ -1238,7 +1252,7 @@ claude`;
       <tr><td style="width:220px"><b>401 Invalid API key</b></td><td class="muted">key 没填对或被停用；「API Keys」页检查。一个 key 都没有时网关是开放模式（无需 key）。</td></tr>
       <tr><td><b>403 model not allowed</b></td><td class="muted">该 key 的「允许模型」白名单没包含这个模型；编辑 key 改成「全部模型」或加上它。</td></tr>
       <tr><td><b>503 no healthy account</b></td><td class="muted">该平台所有账号失效/冷却中；「平台账号」页一键检测，或重新扫码。</td></tr>
-      <tr><td><b>模型列表里没有想要的</b></td><td class="muted">「模型管理」→ 选平台「开始同步」；或账号行「获取全部模型」；官方客户端有的用「恢复在线」。</td></tr>
+      <tr><td><b>模型列表里没有想要的</b></td><td class="muted">「模型管理」→ 选平台「开始同步」；或账号行「恢复在线目录」（与官方客户端显示的目录一致；逆向平台会替换现有列表，官方 API 为增量补充）。</td></tr>
       <tr><td><b>Qoder 账号提示缺 PAT</b></td><td class="muted">Qoder 聊天通道必须用 PAT：客户端 → 设置 → 集成/Integrations 创建（pt- 开头），在账号里编辑填入。本机扫描到的登录态只能查积分，不能对话，已不再自动导入。</td></tr>
       <tr><td><b>千问办公账号失效</b></td><td class="muted">access token 约 7 天过期；配置了 Refresh Token 会自动续期。彻底失效时重开千问办公客户端登录一次，再点「扫描本机登录」重新导入；或在添加账号弹窗里用「网页授权登录」（设备码流程，无需客户端）。聊天需本机装有千问办公客户端（签名用官方 wasm）。</td></tr>
     </table>

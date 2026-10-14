@@ -22,6 +22,27 @@
 const { httpJson, httpRequest, config, logger } = require('../utils/http');
 const { sseParse } = require('../utils/sse');
 const crypto = require('crypto');
+const { REGIONS, normalizeRegion } = require('./_qoder_names');
+
+// Qoder 桌面端在本机的存放目录（%APPDATA%），国内版与国际版各自独立安装、独立登录
+const DESKTOP_DIRS = [
+  { dir: 'com.qodercn.app.stable', region: 'cn' },
+  { dir: 'com.qoder.app.stable', region: 'intl' },
+];
+// Qoder CLI 的认证文件（~/.qoder-cn、~/.qoder）
+const CLI_DIRS = [
+  { dir: '.qoder-cn', region: 'cn' },
+  { dir: '.qoder.cn', region: 'cn' },
+  { dir: '.qoder', region: 'intl' },
+];
+
+// 目录里的「Qoder 自有档位」：没有对应的公开模型族，名字太泛（auto/performance…），
+// 保留 qoder- 前缀，避免与其他平台的同名档位混淆。
+const GENERIC_NAMES = new Set(['auto', 'performance', 'efficient', 'ultimate', 'smodel', 'cmodel']);
+
+// qoder.js 是国际版通道；qodercn.js 通过 account.regionOverride 锁定中国区。
+// 凭据里没写 region 的历史账号按国际版处理。
+const DEFAULT_REGION = 'intl';
 
 // ---- desktop auth.v1.dat decryption (Chromium v10: DPAPI-wrapped AES-256-GCM key) ----
 // DPAPI is invoked through the OS built-in PowerShell (ProtectedData), no native deps.
@@ -57,13 +78,25 @@ function decryptDesktopAuth(appDataDir) {
   return JSON.parse(pt.toString('utf8'));
 }
 
+/**
+ * 账号实际使用的区域。
+ *
+ * regionOverride 是 qodercn 这类「区域锁定通道」用的开关：它挂在 account 对象上而
+ * 不在 credentials 里，所以永远不会被 finishExchange 落库——否则中国版通道碰过的
+ * 国际版账号，region 会被永久改写成 cn，之后所有请求都打到中国网关而失败。
+ */
+function regionOf(account) {
+  const c = account.credentials || {};
+  return normalizeRegion(account.regionOverride || c.region, DEFAULT_REGION);
+}
+
 function gw(account) {
-  const c = account.credentials;
+  const c = account.credentials || {};
   if (c.gateway) return c.gateway;
-  return c.region === 'intl' ? 'https://api1.qoder.sh' : 'https://gateway.qoder.com.cn';
+  return REGIONS[regionOf(account)].gateway;
 }
 function openapiHost(account) {
-  return account.credentials.region === 'intl' ? 'https://openapi.qoder.sh' : 'https://openapi.qoder.com.cn';
+  return REGIONS[regionOf(account)].openapi;
 }
 
 function authHeader(account) {
@@ -134,19 +167,18 @@ async function exchangePAT(account) {
   });
   if (r.status !== 200) {
     // 区域隔离：intl PAT 在 CN 网关上会 401，反之亦然——自动尝试另一区域的网关
-    const alt = c.region === 'intl' ? 'https://gateway.qoder.com.cn' : (c.region === 'cn' ? 'https://api1.qoder.sh' : null);
-    if (!alt) throw Object.assign(new Error(`jobToken 交换失败 ${r.status}: ${String(r.text || '').slice(0, 120)}`), { status: 502 });
-    const r2 = await httpJson(`${alt}/algo/api/v3/user/jobToken?Encode=1`, {
+    const other = regionOf(account) === 'intl' ? REGIONS.cn : REGIONS.intl;
+    const r2 = await httpJson(`${other.gateway}/algo/api/v3/user/jobToken?Encode=1`, {
       method: 'POST', headers: { ...signatureHeaders(), Authorization: `Bearer ${pat}` }, body: qoderEncode(Buffer.from(outer)), timeoutMs: 20000,
     });
-    if (r2.status !== 200) throw Object.assign(new Error(`jobToken 交换失败（双网关） ${r.status}/${r2.status}`), { status: 502 });
+    if (r2.status !== 200) throw Object.assign(new Error(`jobToken 交换失败（双网关 ${r.status}/${r2.status}）：${String(r.text || '').slice(0, 120)}`), { status: 502 });
     return finishExchange(account, r2.json);
   }
   return finishExchange(account, r.json);
 }
 
 /** consume a successful jobToken response: persist identity + tokens, build COSY session */
-function finishExchange(account, json, gatewayHost) {
+function finishExchange(account, json) {
   const { db } = require('../store');
   const c = account.credentials;
   const d = json?.data || json || {};
@@ -160,7 +192,6 @@ function finishExchange(account, json, gatewayHost) {
     username: d.name || null,
     plan: d.plan || null,
     jobExpiresAt: d.expireTime ? Number(d.expireTime) : null,
-    ...(gatewayHost ? { jobGateway: gatewayHost } : {}),
   };
   db.prepare('UPDATE accounts SET credentials=?, extra=? WHERE id=?')
     .run(JSON.stringify(fresh), JSON.stringify({ uid: fresh.userId, email: fresh.email, username: fresh.username, plan: fresh.plan, credits: account.extra?.credits, quota: account.extra?.quota }), account.id);
@@ -191,18 +222,87 @@ function ensureSession(account) {
   throw Object.assign(new Error('Qoder 聊天/在线目录需要 PAT（pt-）：客户端 → 设置 → 集成/Integrations 创建后填入账号'), { status: 401 });
 }
 
+/**
+ * 扫描本机 Qoder 登录态：桌面端（%APPDATA% 下 DPAPI+GCM 加密的 auth.v1.dat）与 CLI 认证文件。
+ * 两个版本都装时按 regionFilter 各取各的，label / 建议账号名统一走 _qoder_names。
+ * 聊天通道严格需要 PAT（pt-）；桌面/CLI 的 dt- 令牌只能查积分，因此不作为可导入项返回，
+ * 而是给出「去客户端创建 PAT 后手动添加」的提示。
+ */
+function scanLocal(regionFilter = null) {
+  const fs = require('fs'), os = require('os'), path = require('path');
+  const found = [];
+  const home = os.homedir();
+  const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+  const usable = (c) => c.pat || String(c.securityOauthToken || '').startsWith('pt-');
+  const noPatHint = (r) => `${REGIONS[r].scanLabel}（本机登录态无 PAT，聊天不可用；在客户端 设置 → 集成 创建 pt- PAT 后到面板手动添加）`;
+
+  // 1) 桌面端（国内版 + 国际版各自独立安装、独立登录）
+  for (const { dir, region } of DESKTOP_DIRS) {
+    if (regionFilter && region !== regionFilter) continue;
+    const appdir = path.join(appData, dir);
+    try {
+      if (!fs.existsSync(path.join(appdir, 'auth.v1.dat'))) continue;
+      const j = decryptDesktopAuth(appdir);
+      const token = j.token || j.securityOauthToken || j.security_oauth_token;
+      if (!token) {
+        found.push({ label: `${REGIONS[region].scanLabel}（解密成功但无 token）`, suggestName: null, credentials: null });
+        continue;
+      }
+      const creds = {
+        securityOauthToken: token,
+        refreshToken: j.refreshToken || null,
+        expiresAt: j.expiresAt ? Date.parse(j.expiresAt) || null : null,
+        region,
+      };
+      if (!usable(creds)) {
+        found.push({ label: noPatHint(region), suggestName: null, credentials: null });
+        continue;
+      }
+      found.push({ label: REGIONS[region].scanLabel, suggestName: REGIONS[region].accountName, credentials: creds });
+    } catch (e) {
+      found.push({ label: `${REGIONS[region].scanLabel}（解密失败：${e.message}；可在面板粘贴 PAT）`, suggestName: null, credentials: null });
+    }
+  }
+  // 2) CLI 认证文件（~/.qoder-cn、~/.qoder 等）
+  for (const { dir, region } of CLI_DIRS) {
+    if (regionFilter && region !== regionFilter) continue;
+    const authFile = path.join(home, dir, '.auth', 'user');
+    try {
+      if (!fs.existsSync(authFile)) continue;
+      const raw = fs.readFileSync(authFile, 'utf8');
+      let j = null;
+      try { j = JSON.parse(raw); } catch { j = null; }
+      const token = j?.accessToken || j?.security_oauth_token || j?.securityOauthToken;
+      const pat = j?.personalAccessToken || j?.pat;
+      if (pat && String(pat).startsWith('pt-')) {
+        found.push({ label: REGIONS[region].scanLabel, suggestName: REGIONS[region].accountName, credentials: { pat, region } });
+      } else if (token) {
+        found.push({ label: noPatHint(region), suggestName: null, credentials: null });
+      } else {
+        found.push({ label: `${REGIONS[region].scanLabel}（加密，请在面板粘贴 PAT）`, suggestName: null, credentials: null });
+      }
+    } catch { /* skip */ }
+  }
+  return found;
+}
+
 module.exports = {
+  // 供 qodercn 复用同一份扫描实现（各自只扫自己那一个区域）
+  scanLocal,
+
+  // 命名统一由 _qoder_names.js 提供（国内版/国际版共用一套叫法）
   id: 'qoder',
-  label: 'Qoder (阿里)',
-  homepage: 'https://qoder.com.cn',
+  label: REGIONS.intl.display,
+  homepage: REGIONS.intl.homepage,
   importLocal: true,
+  region: 'intl',
   credFields: [
-    { name: 'pat', label: 'PAT（推荐，qoder.com.cn/account/integrations 生成）', secret: true, placeholder: 'pt-...' },
+    { name: 'pat', label: 'PAT（推荐，客户端 → 设置 → 集成/Integrations 生成）', secret: true, placeholder: 'pt-...' },
     { name: 'securityOauthToken', label: 'securityOauthToken（或 jobToken）', secret: true },
-    { name: 'region', label: '区域', placeholder: 'cn（默认）或 intl' },
+    { name: 'region', label: '区域', placeholder: 'intl（默认）或 cn' },
     { name: 'deviceToken', label: '机器指纹 Cosy-MachineToken（签到需要，可选）', secret: true },
   ],
-  docs: '推荐用 PAT：Qoder 客户端 → 设置/账号 → Integrations 创建 Personal Access Token（pt- 开头）。也可「导入本机登录」自动读取 CLI 凭证。',
+  docs: '推荐用 PAT：Qoder 客户端 → 设置/账号 → Integrations 创建 Personal Access Token（pt- 开头）。也可「导入本机登录」自动读取本机客户端凭证。',
 
   // display -> internal mapping (from qoder2api research)
   _modelMap: {
@@ -212,8 +312,16 @@ module.exports = {
     'Kimi-K2.8-Preview': 'kmodel', 'MiniMax-M2.7': 'mmodel', Auto: 'auto',
   },
 
+  /**
+   * 展示名 → 对外模型名。
+   * 不加平台前缀：Qoder 目录里的 Qwen/GLM/Kimi/DeepSeek 与 trae、workbuddy、qwenwork
+   * 是同一批模型族，名字对齐后「统一模型」页才能按同名把它们聚合成一个入口。
+   * 平台归属由 models.provider_id 区分（重名不冲突，唯一约束是 provider_id+public_name）。
+   * 例外：Qoder 自有档位（auto 智能路由等）没有对应模型族，保留 qoder- 前缀以免名字过泛。
+   */
   _publicNameFor(display) {
-    return 'qoder-' + display.toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-|-$/g, '');
+    const flat = display.toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-|-$/g, '');
+    return GENERIC_NAMES.has(flat) ? `qoder-${flat}` : flat;
   },
 
   async listModels(account) {
@@ -433,70 +541,14 @@ module.exports = {
     }
   },
 
-  // scan local Qoder credentials: desktop app (DPAPI+GCM encrypted auth.v1.dat) and CLI auth files.
-  // Chat strictly requires a PAT (pt-); desktop/CLI tokens (dt-/oauth) can only check quota,
-  // so they are reported as NOT importable — otherwise every scan adds a "useless" intl account.
-  discoverLocal(regionFilter = null) {
-    const fs = require('fs'), os = require('os'), path = require('path');
-    const found = [];
-    const home = os.homedir();
-    const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
-    const usable = (c) => c.pat || String(c.securityOauthToken || '').startsWith('pt-');
-    // 1) desktop apps (CN + intl)
-    for (const [dir, region] of [['com.qodercn.app.stable', 'cn'], ['com.qoder.app.stable', 'intl']]) {
-      if (regionFilter && region !== regionFilter) continue;
-      const appdir = path.join(appData, dir);
-      try {
-        if (!fs.existsSync(path.join(appdir, 'auth.v1.dat'))) continue;
-        const j = decryptDesktopAuth(appdir);
-        const token = j.token || j.securityOauthToken || j.security_oauth_token;
-        if (!token) { found.push({ label: `${dir}（解密成功但无 token）`, suggestName: null, credentials: null }); continue; }
-        const creds = {
-          securityOauthToken: token,
-          refreshToken: j.refreshToken || null,
-          expiresAt: j.expiresAt ? Date.parse(j.expiresAt) || null : null,
-          region,
-        };
-        if (!usable(creds)) {
-          // token can't chat (no PAT) — surface as manual-paste hint, never auto-import
-          found.push({ label: (region === 'cn' ? '国内版' : '国际版') + '（本机登录态无 PAT，聊天不可用；在面板粘贴 pt- PAT 后手动添加）', suggestName: null, credentials: null });
-          continue;
-        }
-        found.push({
-          label: region === 'cn' ? '国内版' : '国际版',
-          suggestName: region === 'cn' ? 'qoder-国内版' : 'qoder-国际版',
-          credentials: creds,
-        });
-      } catch (e) {
-        found.push({ label: `${dir}（解密失败：${e.message}；可在面板粘贴 PAT）`, suggestName: null, credentials: null });
-      }
-    }
-    // 2) CLI auth files
-    for (const d of ['.qoder', '.qoder.cn']) {
-      const region = d === '.qoder.cn' ? 'cn' : 'intl';
-      if (regionFilter && region !== regionFilter) continue;
-      const authFile = path.join(home, d, '.auth', 'user');
-      try {
-        if (!fs.existsSync(authFile)) continue;
-        const raw = fs.readFileSync(authFile, 'utf8');
-        let j = null;
-        try { j = JSON.parse(raw); } catch { j = null; }
-        const token = j?.accessToken || j?.security_oauth_token || j?.securityOauthToken;
-        const pat = j?.personalAccessToken || j?.pat;
-        if (pat && String(pat).startsWith('pt-')) {
-          found.push({
-            label: region === 'cn' ? '国内版' : '国际版', suggestName: region === 'cn' ? 'qoder-国内版' : 'qoder-国际版',
-            credentials: { pat, region },
-          });
-        } else if (token) {
-          found.push({ label: (d === '.qoder.cn' ? '国内版' : '国际版') + '（本机登录态无 PAT，聊天不可用；在面板粘贴 pt- PAT 后手动添加）', suggestName: null, credentials: null });
-        } else {
-          found.push({ label: (d === '.qoder.cn' ? '国内版' : '国际版') + '（加密，请在面板粘贴 PAT）', suggestName: null, credentials: null });
-        }
-      } catch { /* skip */ }
-    }
-    return found;
-  },
+  // 扫描实现见模块级 scanLocal()：qoder 只扫国际版，qodercn 只扫国内版。
+
+  /**
+   * 只扫国际版。国内版由 qodercn 插件扫——两个通道各管各的区域，
+   * 否则启动时 qoder 先扫会把两个版本都收进来，qodercn 名下永远空着，
+   * 表现就是面板里「Qoder 中国版」拉不到模型（它根本没有账号可拉）。
+   */
+  discoverLocal(regionFilter = null) { return scanLocal(regionFilter || 'intl'); },
 
   async importLocal(opts = {}) {
     const found = this.discoverLocal();

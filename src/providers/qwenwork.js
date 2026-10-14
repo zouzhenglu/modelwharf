@@ -38,8 +38,23 @@ const OAUTH_CLIENT_ID = 'e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb'; // QWENWORK_CN_C
 const OAUTH_REDIRECT_URI = 'qwenwork-cn://';
 const DEVICE_FLOW_TIMEOUT_MS = 300000;
 
+// 千问办公的目录只有 flash / pro / qwen3.8-max-preview 三个「档位名」，不像别的平台
+// 带模型族前缀。直接暴露成 flash / pro 会占住两个过于通用的名字（别的平台也可能有），
+// 统一模型页按名字聚合时就分不清是谁的。这里统一加 qwenwork- 前缀。
+const MODEL_PREFIX = 'qwenwork-';
 const FALLBACK_MODELS = ['pro', 'flash'];
 const MODEL_ALIASES = { auto: 'pro', 'qwork-advanced': 'pro', 'qwork-auto': 'pro' };
+
+/**
+ * 档位名 → 对外模型名。
+ * qwen3.8-max-preview 已经是明确的模型族名（能和别的平台的 qwen3.8-max 对上），
+ * 保持原名；flash / pro 太泛，加 qwenwork- 前缀。
+ */
+function publicNameFor(key) {
+  const flat = String(key).toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-|-$/g, '');
+  if (flat.startsWith('qwen')) return flat;
+  return MODEL_PREFIX + flat;
+}
 
 // ---- credentials: refresh + identity ------------------------------------------
 
@@ -256,7 +271,7 @@ module.exports = {
       const models = (await this.listOnlineModels(account)).models;
       if (models.length) return models;
     } catch (e) { logger.warn(`qwenwork listModels: ${e.message} — falling back to static`); }
-    return FALLBACK_MODELS.map(m => ({ upstream: m, static: true }));
+    return FALLBACK_MODELS.map(m => ({ upstream: m, publicName: publicNameFor(m), static: true }));
   },
 
   /** live catalog: wasm-signed GET /api/v2/model/list -> qwork[] */
@@ -279,7 +294,7 @@ module.exports = {
       if (m.max_input_tokens) tags.push(`${Math.round(m.max_input_tokens / 1000)}k`);
       models.push({
         upstream: m.key,
-        publicName: m.key.toLowerCase(),
+        publicName: publicNameFor(m.key),
         // price_factor 0.1 = 千问办公的最低档；积分消耗按官方倍率折算
         free: rate != null && rate <= 0.1,
         multiplier: rate ?? 1,

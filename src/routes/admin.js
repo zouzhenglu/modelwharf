@@ -12,6 +12,7 @@ const { db, getSetting, setSetting } = require('../store');
 const registry = require('../core/registry');
 const accountsCore = require('../core/accounts');
 const modelsCore = require('../core/models');
+const modelname = require('../core/modelname');
 const engine = require('../core/engine');
 const logger = require('../logger');
 
@@ -482,44 +483,26 @@ router.get('/virtual-models/targets', (req, res) => {
 });
 
 // presets for one-click virtual model creation: group enabled real models by
-// normalized base name across providers (e.g. glm-5.2 exists on workbuddy + trae)
+// 模型族（归一化后跨平台的同一个模型），e.g. glm-5.2 exists on qoder + workbuddy + trae
 router.get('/virtual-models/presets', (req, res) => {
-  const rows = modelsCore.listEnabledModelNames();
-  const norm = (n) => n.toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-|-$/g, '');
-  const groups = new Map();
-  for (const r of rows) {
-    const key = norm(r.public_name);
-    if (!groups.has(key)) groups.set(key, { base: key, targets: [] });
-    groups.get(key).targets.push({ provider_id: r.provider_id, public_name: r.public_name });
-  }
-  const presets = [...groups.values()]
-    .map(g => ({ ...g, multiProvider: g.targets.length > 1, providers: g.targets.map(t => t.provider_id) }))
-    .sort((a, b) => (b.multiProvider - a.multiProvider) || a.base.localeCompare(b.base));
-  res.json(presets);
+  res.json(modelname.modelFamilies());
 });
 
-// one-click create ALL multi-provider presets as virtual models (skip existing names)
+// one-click create ALL cross-provider model families as virtual models (skip existing names)
 router.post('/virtual-models/create-all', (req, res) => {
-  const rows = modelsCore.listEnabledModelNames();
-  const norm = (n) => n.toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-|-$/g, '');
-  const groups = new Map();
-  for (const r of rows) {
-    const key = norm(r.public_name);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push({ provider_id: r.provider_id, public_name: r.public_name });
-  }
+  const families = modelname.crossProviderFamilies();
   const existing = new Set(modelsCore.listVirtualModels().map(v => v.public_name));
   const created = [], skipped = [];
-  for (const [base, targets] of groups) {
-    if (targets.length < 2) continue;         // only aggregate same name across 2+ providers
-    if (existing.has(base)) { skipped.push(base); continue; }
+  for (const f of families) {
+    if (f.targets.length < 2) continue;         // only aggregate across 2+ providers
+    if (existing.has(f.base)) { skipped.push(f.base); continue; }
     modelsCore.upsertVirtualModel({
-      public_name: base,
-      targets: targets.map((t, i) => ({ ...t, priority: (i + 1) * 10 })),
+      public_name: f.base,
+      targets: f.targets.map((t, i) => ({ ...t, priority: (i + 1) * 10 })),
       enabled: 1,
-      note: `聚合 ${targets.length} 个平台（${targets.map(t => t.provider_id).join('/')}），失败自动切换`,
+      // no auto note: the target chain column already shows providers and order
     });
-    created.push(base);
+    created.push(f.base);
   }
   res.json({ created, skipped });
 });
