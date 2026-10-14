@@ -1,6 +1,7 @@
 'use strict';
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const config = require('./config');
 const logger = require('./logger');
 const registry = require('./core/registry');
@@ -46,6 +47,12 @@ function start() {
   registry.loadAll();
   adminRoutes.setupAutoRefresh?.();
   const server = app.listen(config.port, config.host, () => {
+    // PID file for stop.bat
+    try { fs.writeFileSync(path.join(config.dataDir, 'dsh.pid'), String(process.pid)); } catch {}
+    const cleanup = () => { try { fs.unlinkSync(path.join(config.dataDir, 'dsh.pid')); } catch {} };
+    process.on('exit', cleanup);
+    process.on('SIGINT', () => { cleanup(); process.exit(0); });
+    process.on('SIGTERM', () => { cleanup(); process.exit(0); });
     logger.info(`dsh-free-api v${config.version} listening on http://${config.host}:${config.port}`);
     logger.info(`admin panel: http://localhost:${config.port}/admin  (password: ${config.adminPassword === 'admin' ? 'admin (default, change it!)' : '(from env/settings)'})`);
   });
