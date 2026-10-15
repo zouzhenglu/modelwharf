@@ -14,7 +14,7 @@
 
 ### Changed
 - **`/mcp` 端点鉴权**：与 `/v1` 网关同语义——配置了 API key 后必须携带 key，未配置任何 key 时保持开放模式
-- 测试扩容：34 → 47 个端到端用例（embeddings / count_tokens / thinking 映射 / 采样参数 / MCP 鉴权与聚合 / 负载均衡）
+- 测试扩容：34 → 50 个端到端用例（embeddings / count_tokens / thinking 映射 / 采样参数 / MCP 鉴权与聚合 / 负载均衡；含厂商插件 embeddings、虚拟模型 embeddings 故障转移、策略持久化）
 
 ## [0.9.0] - 2026-10-15（未发布）
 

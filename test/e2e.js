@@ -286,6 +286,22 @@ async function main() {
     assert.equal(r.json.data[0].embedding.length, 3);
     assert.equal(r.json.usage.prompt_tokens, 4);
   });
+  await t('embeddings via official vendor plugin (baseUrl override)', async () => {
+    // deepseek vendor plugin with account baseUrl pointed at the mock exercises official.js embeddings
+    const add = await call('POST', '/admin/api/accounts', {
+      provider_id: 'deepseek', name: 'mock-vendor',
+      credentials: { baseUrl: 'http://127.0.0.1:8399/v1', apiKey: 'x' },
+    }, auth);
+    assert.equal(add.status, 200, add.text);
+    await call('POST', '/admin/api/providers/deepseek/refresh-models', {}, auth);
+    const models = await call('GET', '/admin/api/models?provider_id=deepseek', null, auth);
+    const emb = models.json[0];
+    // unique public name: engine looks models up by name only, mock names collide with openai-compat rows
+    await call('PUT', `/admin/api/models/${emb.id}`, { public_name: 'vendor-emb' }, auth);
+    const r = await call('POST', '/v1/embeddings', { model: 'vendor-emb', input: 'hello' });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.data[0].embedding.length, 3);
+  });
 
   console.log('== gateway (anthropic) ==');
   await t('/v1/messages non-stream', async () => {
@@ -610,6 +626,35 @@ async function main() {
     const r = await call('POST', '/v1/embeddings', { model: 'no-emb', input: 'x' }, { Authorization: 'Bearer ' + fullKey });
     assert.equal(r.status, 501, r.text);
     assert.match(r.json.error.message, /embeddings/);
+  });
+  await t('virtual embeddings fails over past unsupported target', async () => {
+    const r = await call('POST', '/admin/api/virtual-models', {
+      public_name: 'uni-emb',
+      targets: [
+        { provider_id: 'e2echeckin', public_name: 'no-emb', priority: 10 },   // 501 无 embeddings
+        { provider_id: 'openai-compat', public_name: 'mock-a', priority: 20 }, // 可用
+      ],
+    }, auth);
+    assert.equal(r.status, 200, r.text);
+    const emb = await call('POST', '/v1/embeddings', { model: 'uni-emb', input: 'x' }, { Authorization: 'Bearer ' + fullKey });
+    assert.equal(emb.status, 200, emb.text);
+    assert.equal(emb.json.data[0].embedding.length, 3);
+  });
+  await t('PUT virtual-models persists strategy + target weights', async () => {
+    const r = await call('PUT', '/admin/api/virtual-models/uni-emb', {
+      strategy: 'weighted',
+      targets: [
+        { provider_id: 'e2echeckin', public_name: 'no-emb', priority: 10, weight: 30 },
+        { provider_id: 'openai-compat', public_name: 'mock-a', priority: 20, weight: 70 },
+      ],
+    }, auth);
+    assert.equal(r.status, 200, r.text);
+    const list = await call('GET', '/admin/api/virtual-models', null, auth);
+    const v = list.json.find(x => x.public_name === 'uni-emb');
+    assert.equal(v.strategy, 'weighted', r.text);
+    const targets = JSON.parse(v.targets);
+    assert.equal(targets[0].weight, 30);
+    assert.equal(targets[1].weight, 70);
   });
 
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
