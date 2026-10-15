@@ -31,6 +31,25 @@ function statusBadge(s) {
   return badge(s || 'active', map[s] || 'gray');
 }
 function switchHtml(on, onclick) { return `<div class="switch ${on ? 'on' : ''}" onclick="${onclick}"></div>`; }
+/** 行内「⋯」更多操作菜单；点击菜单外区域自动收起 */
+function moreMenu(itemsHtml) {
+  return `<details class="menu" onclick="menuStay(event)"><summary title="更多操作">⋯</summary><div class="menu-list">${itemsHtml}</div></details>`;
+}
+function menuStay(e) {
+  const d = e.currentTarget;
+  // 点 summary 由 details 原生开合；点菜单项执行后收起；点空白处不收起
+  if (e.target.closest('summary')) return;
+  if (e.target.closest('button')) { d.open = false; return; }
+  e.preventDefault();
+}
+document.addEventListener('click', e => {
+  document.querySelectorAll('details.menu[open]').forEach(d => { if (!d.contains(e.target)) d.open = false; });
+});
+/** 可排序表头；key 对应 virtualSort.key */
+function sortTh(label, key, extra) {
+  const ind = virtualSort.key === key ? (virtualSort.dir === 1 ? '▲' : '▼') : '↕';
+  return `<th class="sortable" title="点击排序" onclick="virtualSortBy('${key}')">${label}<span class="sort-ind">${ind}</span>${extra || ''}</th>`;
+}
 /** 页头：标题 + 可选副标题 + 右侧动作区 */
 function pageHead(title, sub, actionsHtml) {
   return `<div class="page-head"><h2>${title}</h2>${sub ? `<span class="sub">${sub}</span>` : ''}
@@ -226,6 +245,7 @@ async function renderAccounts(m) {
     api('/providers'),
     api('/accounts?' + new URLSearchParams(Object.fromEntries(Object.entries(acctFilter).filter(([, v]) => v)))),
   ]);
+  const onlineIds = new Set(providers.filter(p => p.supports_online).map(p => p.id));
   m.innerHTML = `
   ${pageHead(`平台账号 <span class="muted" style="font-size:13px">(${accounts.length})</span>`)}
   <div class="toolbar">
@@ -241,6 +261,7 @@ async function renderAccounts(m) {
     <button class="ghost" onclick="syncAllInfo()">同步积分</button>
     <button class="ghost" onclick="checkAllAccounts()">一键检测</button>
     <button class="ghost" onclick="importLocalAll()">扫描本机登录</button>
+    <button class="ghost" title="逐个拉取全部平台上账号可用的模型（增量，不删除已有）" onclick="refreshModelsAll()">同步全部模型</button>
     <button onclick="openAccountForm()">＋ 添加账号</button>
   </div>
   <div class="table-wrap">
@@ -249,7 +270,6 @@ async function renderAccounts(m) {
     <th title="该账号同时处理的最大请求数。达到上限后请求会分流到其他账号，避免单账号被上游限流">并发 ⓘ</th>
     <th>最近使用</th><th>启用</th><th>操作</th></tr>
   ${(() => {
-    const onlineIds = new Set(providers.filter(p => p.supports_online).map(p => p.id));
     return accounts.map(a => {
     const online = onlineIds.has(a.provider_id);
     return `<tr>
@@ -263,9 +283,11 @@ async function renderAccounts(m) {
     <td style="white-space:nowrap">
       <button class="small ghost" onclick="checkAccount(${a.id})">检测</button>
       <button class="small ghost" title="为该账号执行每日签到领积分（已签过会提示，不重复领取）" onclick="checkinAccount(${a.id})">签到</button>
-      <button class="small ghost" title="${online ? '只取上游当前实际可用的模型目录（与官方客户端显示一致，会替换现有列表，自定义条目会被移除）' : '从上游 /v1/models 在线目录同步该账号模型（增量补充）'}" onclick="restoreAccountModels(${a.id}, ${online})">恢复在线目录</button>
-      <button class="small ghost" onclick="openAccountForm(${a.id})">编辑</button>
-      <button class="small ghost danger" onclick="delAccount(${a.id})">删</button>
+      ${moreMenu(`
+        <button title="${online ? '只取上游当前实际可用的模型目录（与官方客户端显示一致，会替换现有列表，自定义条目会被移除）' : '从上游 /v1/models 在线目录同步该账号模型（增量补充）'}" onclick="restoreAccountModels(${a.id}, ${online})">${online ? '⇄ 恢复在线目录' : '⇄ 同步模型'}</button>
+        <button onclick="openAccountForm(${a.id})">✎ 编辑</button>
+        <button class="danger" onclick="delAccount(${a.id})">✕ 删除</button>
+      `)}
     </td></tr>`;
     }).join('');
   })()}
@@ -700,12 +722,39 @@ async function saveModel(id) {
 }
 
 // ---------- virtual models (统一模型) ----------
+// 列表排序状态：key = name(对外名称)/targets(目标数)/enabled/note，dir = 1升序 -1降序
+let virtualSort = { key: 'name', dir: 1 };
+function virtualSortBy(key) {
+  if (virtualSort.key === key) virtualSort.dir *= -1;
+  else virtualSort = { key, dir: 1 };
+  renderVirtual($('#main'));
+}
+/** 统一模型目标链 chips（带序号，突出优先级顺序） */
+function targetChainHtml(ts) {
+  if (!ts.length) return '<span class="muted">无目标</span>';
+  return `<div class="tchain">${ts.map((t, i) =>
+    `<span class="tchip"><i>${i + 1}</i>${esc(t.provider_id)}/${esc(t.public_name)}</span>`).join('')}</div>`;
+}
 async function renderVirtual(m) {
   const [virtuals, targets, presets] = await Promise.all([api('/virtual-models'), api('/virtual-models/targets'), api('/virtual-models/presets')]);
   const byProvider = {};
   for (const t of targets) (byProvider[t.provider_id] = byProvider[t.provider_id] || []).push(t.public_name);
+  // 排序：名称用 localeCompare，目标数/数字直接比，备注空值排最后
+  const rows = virtuals.map(v => {
+    const ts = JSON.parse(v.targets || '[]').sort((a, b) => (a.priority ?? 100) - (b.priority ?? 100));
+    return { ...v, _ts: ts, _n: ts.length };
+  });
+  const { key, dir } = virtualSort;
+  rows.sort((a, b) => {
+    let c;
+    if (key === 'name') c = a.public_name.localeCompare(b.public_name, 'zh-CN');
+    else if (key === 'targets') c = a._n - b._n;
+    else if (key === 'enabled') c = (b.enabled ? 1 : 0) - (a.enabled ? 1 : 0);
+    else c = String(a.note || '').localeCompare(String(b.note || ''), 'zh-CN');
+    return c * dir;
+  });
   m.innerHTML = `
-  ${pageHead(`统一模型 <span class="muted" style="font-size:13px">(${virtuals.length})</span>`)}
+  ${pageHead(`统一模型 <span class="muted" style="font-size:13px">(${virtuals.length})</span>`, '点击表头排序')}
   <div class="hint">统一模型把多个平台的真实模型聚合成一个对外名称：客户端请求它时，网关按目标顺序依次尝试，<b>失败自动切换下一个</b>。也可以用来改名（如对外叫 <span class="mono">gpt-4o</span>，实际走 DeepSeek/GLM）。与「模型管理」里的直接模型相互独立，都可通过 /v1/models 看到。</div>
   <div class="toolbar">
     <span class="muted">快速创建（同名多平台聚合）：</span>
@@ -718,19 +767,22 @@ async function renderVirtual(m) {
     <button onclick="openVirtualForm()">＋ 自定义</button>
   </div>
   <div class="table-wrap">
-  <table><tr><th>对外名称</th><th>目标链（按优先级）</th><th>启用</th><th>备注</th><th>操作</th></tr>
-  ${virtuals.map(v => {
-    const ts = JSON.parse(v.targets || '[]').sort((a, b) => (a.priority ?? 100) - (b.priority ?? 100));
-    return `<tr>
-    <td class="mono"><b>${esc(v.public_name)}</b></td>
-    <td>${ts.map((t, i) => `${i > 0 ? '<span class="muted"> → </span>' : ''}<span class="badge blue">${esc(t.provider_id)}/${esc(t.public_name)}</span>`).join('')}</td>
+  <table><tr>
+    ${sortTh('对外名称', 'name')}
+    ${sortTh('目标链（按优先级）', 'targets')}
+    ${sortTh('启用', 'enabled')}
+    ${sortTh('备注', 'note')}
+    <th>操作</th></tr>
+  ${rows.map(v => `<tr>
+    <td class="mono"><b>${esc(v.public_name)}</b><div class="muted" style="font-size:11px">${v._n} 个目标</div></td>
+    <td>${targetChainHtml(v._ts)}</td>
     <td>${switchHtml(v.enabled, `toggleVirtual('${esc(v.public_name)}', ${v.enabled ? 0 : 1})`)}</td>
-    <td class="muted">${esc(v.note || '')}</td>
-    <td><button class="small ghost" onclick="openVirtualForm('${esc(v.public_name)}')">编辑</button>
-        <button class="small ghost danger" onclick="delVirtual('${esc(v.public_name)}')">删</button></td>
-  </tr>`;
-  }).join('')}
-  ${!virtuals.length ? emptyRow(5, '🔀', '暂无统一模型 — 用上方预设一键创建，或「自定义」') : ''}
+    <td class="muted" style="max-width:180px;overflow:hidden;text-overflow:ellipsis">${esc(v.note || '')}</td>
+    <td style="white-space:nowrap">
+      <button class="small ghost" onclick="openVirtualForm('${esc(v.public_name)}')">编辑</button>
+      <button class="small ghost danger" onclick="delVirtual('${esc(v.public_name)}')">删</button></td>
+  </tr>`).join('')}
+  ${!rows.length ? emptyRow(5, '🔀', '暂无统一模型 — 用上方预设一键创建，或「自定义」') : ''}
   </table></div>`;
   window._virtualTargets = byProvider;
   $('#vpCreate').onclick = async () => {
