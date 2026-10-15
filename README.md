@@ -236,7 +236,7 @@ node scripts/zcode-integrate.js --key wh-xxx --base http://localhost:8317
 
 ```bash
 npm install
-npm test           # 54 个端到端用例（自带隔离服务 + mock 上游，不依赖真实账号）
+npm test           # 55 个端到端用例（自带隔离服务 + mock 上游，不依赖真实账号）
 ```
 
 ## 自动化（GitHub Actions）
