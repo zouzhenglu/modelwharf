@@ -305,6 +305,7 @@ th.sortable:hover{color:var(--text-dim)}
 .chart-tip .tr b{margin-left:auto;padding-left:14px;color:var(--text);font-variant-numeric:tabular-nums;font-weight:600}
 .chart-tip .dot{width:8px;height:8px;border-radius:3px;flex-shrink:0}
 .chart-tip .sep{border-top:1px solid var(--border);margin:5px 0}
+.chart-tip .tgrid{display:grid;grid-template-columns:auto auto;gap:0 20px}
 .chart-legend{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin-top:10px;font-size:12px;color:var(--text-dim)}
 .chart-legend .li{display:flex;align-items:center;gap:6px}
 .chart-legend .dot{width:9px;height:9px;border-radius:3px;flex-shrink:0}
@@ -327,6 +328,15 @@ th.sortable:hover{color:var(--text-dim)}
 .donut-legend .dot{width:9px;height:9px;border-radius:3px;flex-shrink:0}
 .donut-legend .v{margin-left:auto;color:var(--text);font-variant-numeric:tabular-nums;font-weight:600}
 .donut-legend .p{width:48px;text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+/* Top 榜行：两行布局，各段可收缩省略，窄栏不互相挤压 */
+.rank{display:flex;flex-direction:column;gap:4px;margin-bottom:11px}
+.rank .r1{display:flex;align-items:baseline;gap:8px;font-size:12.5px}
+.rank .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+.rank .val{white-space:nowrap;font-weight:600;font-variant-numeric:tabular-nums}
+.rank .share{white-space:nowrap;color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+.rank .r2{display:flex;align-items:center;gap:10px}
+.rank .r2 .pbar{flex:1;min-width:40px;max-width:none}
+.rank .sub{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:11px;text-align:right}
 /* 响应式 */
 @media (max-width:900px){
   nav{width:64px;padding:20px 8px}

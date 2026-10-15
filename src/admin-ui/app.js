@@ -322,19 +322,22 @@ function drawTrend(el) {
     tip.innerHTML = `<div class="tt">${esc(bucketTime(b.bucket, cfg.chart.bucketSec))}</div>` +
       series.map(s => `<div class="tr"><span class="dot" style="background:${s.color}"></span>${s.name}<b>${fmtMetric(s.values[idx], metric)}</b></div>`).join('') +
       `<div class="sep"></div>
-      <div class="tr">请求<b>${b.reqs}</b></div>
-      <div class="tr">失败<b>${b.errors}${b.reqs ? `（${(b.errors / b.reqs * 100).toFixed(0)}%）` : ''}</b></div>
-      <div class="tr">输入 tok<b>${fmtCompact(b.tin)}</b></div>
-      <div class="tr">输出 tok<b>${fmtCompact(b.tout)}</b></div>
-      <div class="tr">积分<b>${b.credits.toFixed(2)}</b></div>
-      <div class="tr">耗时<b>${b.reqs ? b.lat + 'ms' : '-'}</b></div>`;
+      <div class="tgrid">
+        <div class="tr">请求<b>${b.reqs}</b></div>
+        <div class="tr">失败<b>${b.errors}${b.reqs ? `（${(b.errors / b.reqs * 100).toFixed(0)}%）` : ''}</b></div>
+        <div class="tr">输入 tok<b>${fmtCompact(b.tin)}</b></div>
+        <div class="tr">输出 tok<b>${fmtCompact(b.tout)}</b></div>
+        <div class="tr">积分<b>${b.credits.toFixed(2)}</b></div>
+        <div class="tr">耗时<b>${b.reqs ? b.lat + 'ms' : '-'}</b></div>
+      </div>`;
     tip.style.display = 'block';
     const tw = tip.offsetWidth, th = tip.offsetHeight;
     const my = e.clientY - rect.top;
-    let ty = my - th - 14;
-    if (ty < 2) ty = Math.min(my + 14, H - th - 2);
-    tip.style.left = Math.min(Math.max(2, cx - tw / 2), W - tw - 2) + 'px';
-    tip.style.top = ty + 'px';
+    // 明细卡贴在十字线旁（默认右侧，放不下翻左侧），不遮挡悬浮点与折线
+    let tx = cx + 16;
+    if (tx + tw > W - 2) tx = cx - 16 - tw;
+    tip.style.left = Math.max(2, tx) + 'px';
+    tip.style.top = Math.min(Math.max(2, my - th / 2), H - th - 2) + 'px';
   });
 }
 function trendSet(id, key, val) {
@@ -434,7 +437,7 @@ async function renderDashboard(m) {
         const max = stats.byModel[0].reqs || 1;
         return `<table style="font-size:12.5px"><tr><th>模型</th><th>请求</th><th>占比</th><th>tok</th></tr>
         ${stats.byModel.slice(0, 8).map((r, i) => `<tr>
-          <td class="mono">${esc(r.public_model || '?')}</td>
+          <td class="mono" style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.public_model || '?')}">${esc(r.public_model || '?')}</td>
           <td><b>${r.reqs}</b></td>
           <td style="width:36%"><div class="pbar" style="max-width:none"><i style="width:${Math.round(r.reqs / max * 100)}%;background:${SERIES_COLORS[i % SERIES_COLORS.length]}"></i></div><span class="muted" style="font-size:11px">${(r.reqs / tot * 100).toFixed(1)}%</span></td>
           <td class="muted">${fmtCompact(r.tin + r.tout)}</td>
@@ -1324,18 +1327,24 @@ async function renderUsage(m) {
   ]);
   const statusData = chart.byStatus.map(r => ({ key: r.key, value: r.reqs, color: r.key === '失败' ? 'var(--red)' : 'var(--green)' }));
   const statusTotal = statusData.reduce((a, d) => a + d.value, 0);
-  /** Top 榜：名称 + 请求数/占比 + 明细（tok/积分/耗时） + 名次着色份额条 */
+  /** Top 榜：名称 + 请求数/占比 + 名次着色份额条 + 明细（tok/积分/耗时）；各行可收缩省略，窄栏不重叠 */
   const rankTable = (title, rows, subFmt) => !rows.length ? '' : (() => {
     const tot = rows.reduce((a, r) => a + r.reqs, 0) || 1;
     const max = rows[0].reqs || 1;
-    return `<div style="flex:1;min-width:300px">
-      <h4 style="font-size:13px;margin-bottom:8px;color:var(--text-dim)">${title}</h4>
-      <table style="font-size:12.5px">${rows.map((r, i) => `<tr>
-        <td class="mono" style="padding:4px 8px 4px 0;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.key)}">${esc(r.key)}${r.key.includes('#') || /^\d+$/.test(r.key) ? ' ' + badge('账号', 'gray') : ''}</td>
-        <td style="padding:4px 8px 4px 0;white-space:nowrap"><b>${r.reqs}</b> 次 <span class="muted">· ${(r.reqs / tot * 100).toFixed(1)}%</span></td>
-        <td style="padding:4px 8px 4px 0;white-space:nowrap;color:var(--muted)">${subFmt(r)}</td>
-        <td style="width:28%;padding:4px 0"><div class="pbar" style="max-width:none"><i style="width:${Math.round(r.reqs / max * 100)}%;background:${SERIES_COLORS[i % SERIES_COLORS.length]}"></i></div></td>
-      </tr>`).join('')}</table>
+    return `<div style="flex:1;min-width:240px;max-width:420px">
+      <h4 style="font-size:13px;margin-bottom:10px;color:var(--text-dim)">${title}</h4>
+      ${rows.map((r, i) => `
+      <div class="rank">
+        <div class="r1">
+          <span class="name mono" title="${esc(r.key)}">${esc(r.key)}${r.key.includes('#') || /^\d+$/.test(r.key) ? ' ' + badge('账号', 'gray') : ''}</span>
+          <span class="val">${r.reqs} 次</span>
+          <span class="share">${(r.reqs / tot * 100).toFixed(1)}%</span>
+        </div>
+        <div class="r2">
+          <div class="pbar"><i style="width:${Math.round(r.reqs / max * 100)}%;background:${SERIES_COLORS[i % SERIES_COLORS.length]}"></i></div>
+          <span class="sub" title="${esc(subFmt(r))}">${subFmt(r)}</span>
+        </div>
+      </div>`).join('')}
     </div>`;
   })();
   m.innerHTML = `
