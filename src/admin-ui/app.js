@@ -305,10 +305,11 @@ async function renderCheckin(m) {
   ${st.accounts.map(a => {
     const plat = CHECKIN_PROVIDER_LABEL[a.provider_id] || a.provider_id;
     let statusHtml, msg = a.message || '';
-    if (!a.supported) { statusHtml = badge('不支持', 'gray'); msg = '该平台无签到机制'; }
+    if (!a.supported) { statusHtml = badge('不支持', 'gray'); msg = msg || '该平台无签到机制'; }
     else if (!a.enabled) { statusHtml = badge('已停用', 'gray'); }
     else if (a.done && a.gained > 0 && a.claimed) statusHtml = badge(`+${a.gained}`, 'green');
     else if (a.done) statusHtml = badge('已签', 'green');
+    else if (a.message) statusHtml = badge(a.provider_id === 'qoder' ? '已禁用' : '无内容', 'gray');
     else statusHtml = badge('未签', 'yellow');
     return `<tr>
       <td>${esc(plat)} <span class="muted mono" style="font-size:11px">${esc(a.provider_id)}</span></td>

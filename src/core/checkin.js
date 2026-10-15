@@ -54,17 +54,31 @@ function alreadyCheckinSignal(r) {
   return false;
 }
 
-/** 该账号今天是否已成功签过（含"上游确认已签"） */
-function alreadyDoneToday(accountId) {
+/** 今天该账号最好的一次签到记录（成功1 > 跳过2 > 失败0） */
+function todayBest(accountId) {
   const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
-  return !!db.prepare('SELECT 1 FROM checkin_log WHERE account_id=? AND ok=1 AND ts>=? LIMIT 1')
-    .get(accountId, Math.floor(dayStart.getTime() / 1000));
+  const rows = db.prepare('SELECT ok, message FROM checkin_log WHERE account_id=? AND ts>=? ORDER BY ok DESC, id DESC')
+    .all(accountId, Math.floor(dayStart.getTime() / 1000));
+  return rows[0] || null;
 }
 
-/** 对单个账号签到。skipIfDone=true 时今天已签的直接跳过（定时轮用；手动点强制重试） */
+/** 该账号今天是否已成功签过（含"上游确认已签"） */
+function alreadyDoneToday(accountId) {
+  return todayBest(accountId)?.ok === 1;
+}
+
+/** 对单个账号签到。skipIfDone=true 时今天已有结论的（已签/平台禁用）直接跳过 */
 async function checkinAccount(account, { skipIfDone = true } = {}) {
-  if (skipIfDone && alreadyDoneToday(account.id)) {
-    return { ok: true, already: true, skipped: true, message: '今日已签到（本地记录）' };
+  if (skipIfDone) {
+    const rec = todayBest(account.id);
+    if (rec && (rec.ok === 1 || /已禁用/.test(rec.message || ''))) {
+      return {
+        ok: rec.ok === 1 ? true : null,
+        already: rec.ok === 1,
+        skipped: true,
+        message: rec.message || (rec.ok === 1 ? '今日已签到（本地记录）' : '已禁用（本地记录）'),
+      };
+    }
   }
   const plugin = registry.get(account.provider_id);
   if (!plugin || typeof plugin.checkin !== 'function') {
@@ -124,7 +138,7 @@ function status() {
     .all(Math.floor(dayStart.getTime() / 1000));
   const byAccount = new Map();
   for (const r of todayRows) {
-    // 同一天可能多次尝试：成功(1) > 已核对无内容(2) > 失败(0)，取最好的一次展示
+    // 同一天可能多次尝试：成功(1) > 跳过/无内容(2) > 失败(0)，取最好的一次展示
     const rank = (v) => (v === 1 ? 2 : v === 2 ? 1 : 0);
     const cur = byAccount.get(r.account_id);
     if (!cur || rank(r.ok) > rank(cur.ok)) byAccount.set(r.account_id, r);
@@ -134,14 +148,15 @@ function status() {
     hour: Number(getSetting('checkinHour', 9)),
     lastRun: getSetting('checkinLastRun', null),
     running,
-    today: { claimed: todayRows.filter(r => r.ok === 1 && r.gained > 0).length, ok: [...byAccount.values()].filter(r => r.ok === 1 || r.ok === 2).length },
+    today: { claimed: todayRows.filter(r => r.ok === 1 && r.gained > 0).length, ok: [...byAccount.values()].filter(r => r.ok === 1).length },
     accounts: accounts.map(a => {
       const r = byAccount.get(a.id);
       return {
         id: a.id, provider_id: a.provider_id, name: a.name, enabled: !!a.enabled,
         supported: typeof registry.get(a.provider_id)?.checkin === 'function',
-        done: !!(r && (r.ok === 1 || r.ok === 2)),
-        claimed: !!(r && r.ok === 1 && !r.message?.includes('已签')),
+        // 只有 ok=1 才算"已签"；ok=2 是核对过但无内容/已禁用，不算
+        done: !!(r && r.ok === 1),
+        claimed: !!(r && r.ok === 1 && r.gained > 0),
         message: r?.message || null,
         gained: r?.gained ?? null,
       };
