@@ -84,15 +84,6 @@ function listModels({ providerId, search, enabled, tag } = {}) {
   return db.prepare(sql).all(...args);
 }
 
-/** Public model names visible to clients, grouped, with enabled=1 and at least one enabled account */
-function listPublicModels() {
-  return db.prepare(`
-    SELECT m.public_name, m.provider_id, m.upstream_model, m.multiplier, m.is_free, m.ctx_window,
-           (SELECT COUNT(*) FROM accounts a WHERE a.provider_id=m.provider_id AND a.enabled=1 AND a.status NOT IN ('invalid','banned')) AS accounts
-    FROM models m WHERE m.enabled=1
-    ORDER BY m.public_name`).all().filter(m => m.accounts > 0);
-}
-
 /**
  * Route a public model name to a concrete (plugin, account, upstreamModel).
  * Strategy: prefer accounts that have used fewer credits today? Keep simple:

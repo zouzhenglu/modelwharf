@@ -196,8 +196,8 @@ router.post('/messages', async (req, res) => {
 });
 
 function parseEvent(data) {
+  if (data === '[DONE]') return { done: true };
   let j; try { j = JSON.parse(data); } catch { return null; }
-  if (j === '[DONE]' || data === '[DONE]') return { done: true };
   if (j.choices?.[0]) {
     const c = j.choices[0];
     const d = c.delta || c.message || {};

@@ -278,6 +278,21 @@ async function main() {
     assert.ok(text.includes('"index":1'), 'missing choice index 1 in stream');
     assert.ok(text.includes('[DONE]'));
   });
+  await t('legacy /v1/completions n=2 returns two texts', async () => {
+    const r = await call('POST', '/v1/completions', { model: 'mock-echo', prompt: 'hi', n: 2 });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.object, 'text_completion');
+    assert.equal(r.json.choices.length, 2, r.text);
+    assert.equal(r.json.choices[0].index, 0);
+    assert.equal(r.json.choices[1].index, 1);
+    assert.ok(r.json.choices[0].text.startsWith('echo#0:'), r.text);
+    assert.ok(r.json.choices[1].text.startsWith('echo#1:'), r.text);
+  });
+  await t('legacy /v1/completions rejects stream + n>1 clearly', async () => {
+    const r = await call('POST', '/v1/completions', { model: 'mock-echo', prompt: 'hi', stream: true, n: 2 });
+    assert.equal(r.status, 400, r.text);
+    assert.match(r.json.error.message, /chat\/completions/);
+  });
   await t('POST /v1/embeddings', async () => {
     const r = await call('POST', '/v1/embeddings', { model: 'mock-a', input: ['hello', 'world'] });
     assert.equal(r.status, 200, r.text);

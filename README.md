@@ -181,7 +181,7 @@ node scripts/zcode-integrate.js --key wh-xxx --base http://localhost:8317
 
 **已实现**：
 
-- OpenAI：`chat/completions`（流式/非流式/tools/图片/多选 `n`）、`completions`（基础）、`models`、`embeddings`；透传 `temperature` / `top_p` / `max_tokens`(含 `max_completion_tokens`) / `tool_choice` / `stop` / `seed` / `presence_penalty` / `frequency_penalty` / `logprobs` / `top_logprobs` / `n`
+- OpenAI：`chat/completions`（流式/非流式/tools/图片/多选 `n`）、`completions`（含多选 `n`）、`models`、`embeddings`；透传 `temperature` / `top_p` / `max_tokens`(含 `max_completion_tokens`) / `tool_choice` / `stop` / `seed` / `presence_penalty` / `frequency_penalty` / `logprobs` / `top_logprobs` / `n`
 - Anthropic：`messages` 流式事件、system、多轮、图片、`tools`（tool_use/tool_result 往返）、thinking 输出块、`count_tokens`（估算值）、`thinking: {budget_tokens}`（按预算映射思考档位，`-think` 后缀优先）
 - Responses：`/v1/responses` 流式事件、reasoning 汇总、`-think` 后缀路由
 - MCP：上游 stdio/http 服务注册、`tools/*` / `resources/*` / `prompts/*` 聚合、tool_filter、端点鉴权（与 `/v1` 网关同语义）
@@ -192,6 +192,7 @@ node scripts/zcode-integrate.js --key wh-xxx --base http://localhost:8317
 - `embeddings` 与采样参数透传依赖 OpenAI 兼容上游（openai-compat / 官方厂商 / ollama）；逆向平台（trae/qoder/qwen/workbuddy/qwenwork…）无 embeddings 时返回 501，收到不支持的采样参数由其插件白名单过滤
 - `count_tokens` 为本地估算（无上游 tokenizer，误差 ±20% 左右），Claude Code 等客户端的上下文预算足够用
 - MCP `resources/read` 需用 `resources/list` 返回的 `mcpres://` 前缀 URI；`resources/subscribe`（变更通知）不支持
+- legacy `/v1/completions` 的流式模式不支持 `n>1`（明确报 400，请改用 `/v1/chat/completions`）；非流式完整支持
 
 ## 已知限制（如实说明）
 
@@ -222,7 +223,7 @@ node scripts/zcode-integrate.js --key wh-xxx --base http://localhost:8317
 
 ```bash
 npm install
-npm test           # 50 个端到端用例（自带隔离服务 + mock 上游，不依赖真实账号）
+npm test           # 54 个端到端用例（自带隔离服务 + mock 上游，不依赖真实账号）
 ```
 
 ## 安全说明

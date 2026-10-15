@@ -851,7 +851,7 @@ async function renderVirtual(m) {
     ${sortTh('备注', 'note')}
     <th>操作</th></tr>
   ${rows.map(v => `<tr>
-    <td class="mono"><b>${esc(v.public_name)}</b><div class="muted" style="font-size:11px">${v._n} 个目标${v.tags ? ' · ' + vtagChips(v.tags) : ''}</div></td>
+    <td class="mono"><b>${esc(v.public_name)}</b><div class="muted" style="font-size:11px">${v._n} 个目标${v.strategy === 'weighted' ? ' · <span class="badge blue" title="按权重随机分散流量，失败自动切换">加权随机</span>' : v.strategy === 'least_conn' ? ' · <span class="badge purple" title="优先选择并发中的目标，失败自动切换">最少连接</span>' : ''}${v.tags ? ' · ' + vtagChips(v.tags) : ''}</div></td>
     <td>${targetChainHtml(v._ts, health)}</td>
     <td>${capabilityHtml(v._ts, modelIndex)}</td>
     <td>${switchHtml(v.enabled, `toggleVirtual('${esc(v.public_name)}', ${v.enabled ? 0 : 1})`)}</td>

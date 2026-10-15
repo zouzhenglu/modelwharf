@@ -10,11 +10,18 @@
 - **Anthropic `thinking: {budget_tokens}`**：按预算映射思考档位（≥16384 high / ≥4096 medium / 其余 low，`disabled` 关思考）；模型名后缀 `-think` 系列优先级更高
 - **OpenAI 采样参数透传**：`stop` / `seed` / `presence_penalty` / `frequency_penalty` / `logprobs` / `top_logprobs` / `n` 透传给 OpenAI 兼容上游；`n>1` 多选完整往返（非流式返回多 choices，流式带每选 index）
 - **MCP 网关 resources/prompts**：`resources/list`、`resources/templates/list`、`resources/read`（URI 带 `mcpres://服务id/` 前缀路由）、`prompts/list`、`prompts/get`（名称按 `服务id__提示词名` 聚合）
-- **统一模型负载均衡策略**：`priority`（顺序故障转移，默认）/ `weighted`（按权重随机）/ `least_conn`（最少连接优先）；管理面板可配策略与每目标权重
+- **统一模型负载均衡策略**：`priority`（顺序故障转移，默认）/ `weighted`（按权重随机）/ `least_conn`（最少连接优先）；管理面板可配策略与每目标权重，列表页非默认策略带徽标
+- legacy `/v1/completions` 多选 `n` 完整支持（非流式返回多条 choices；流式 `n>1` 明确报 400）
+
+### Fixed
+- MCP 资源 URI 模板前缀化时 `{placeholder}` 被 percent-encode 导致客户端无法替换（保留原样）
+- 统一模型不认 `-think` 系列后缀（`uni-test-think` 404）——剥后缀回查虚拟表
+- MCP `tools/call` / `prompts/get` 名称不含 `__` 时切出垃圾标识（如 `echo`→服务 `ech`）——明确报 `-32602`
+- 清理死代码：`models.js` 重复定义的 `listPublicModels`、三处永远走不到的 `[DONE]` 分支
 
 ### Changed
 - **`/mcp` 端点鉴权**：与 `/v1` 网关同语义——配置了 API key 后必须携带 key，未配置任何 key 时保持开放模式
-- 测试扩容：34 → 50 个端到端用例（embeddings / count_tokens / thinking 映射 / 采样参数 / MCP 鉴权与聚合 / 负载均衡；含厂商插件 embeddings、虚拟模型 embeddings 故障转移、策略持久化）
+- 测试扩容：34 → 54 个端到端用例（embeddings / count_tokens / thinking 映射 / 采样参数 / MCP 鉴权与聚合 / 负载均衡 / 多选与 legacy completions）
 
 ## [0.9.0] - 2026-10-15（未发布）
 

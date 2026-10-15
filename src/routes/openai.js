@@ -193,20 +193,34 @@ router.post('/chat/completions', checkModelAllowed, async (req, res) => {
 
 // ---------- /v1/completions (legacy) ----------
 router.post('/completions', checkModelAllowed, async (req, res) => {
-  const { model, prompt, stream = false, max_tokens = 256, temperature, top_p } = req.body || {};
+  const { model, prompt, stream = false, max_tokens = 256, temperature, top_p, n } = req.body || {};
   if (!model || prompt == null) return res.status(400).json({ error: { message: 'model and prompt required', type: 'invalid_request_error' } });
   const promptText = Array.isArray(prompt) ? prompt.join('\n') : String(prompt);
   const messages = [{ role: 'user', content: promptText }];
   const params = { max_tokens, temperature, top_p, ...passthroughParams(req.body || {}) };
   if (!stream) {
-    let text = '';
+    // n>1: per-index accumulate so multiple completions come back intact
+    const texts = new Map();
     const usageAcc = { input_tokens: 0, output_tokens: 0 };
     try {
       await engine.runChat({ publicModel: model, messages, params, source: 'openai', apikeyId: req.apikey.id },
-        (data) => { const ev = parseUpstreamEvent(data); if (ev?.choices?.[0]?.delta?.content) text += ev.choices[0].delta.content; return true; },
+        (data) => {
+          const ev = parseUpstreamEvent(data);
+          if (!ev) return true;
+          for (const c of ev.choices || []) {
+            const idx = c.index ?? 0;
+            if (c.delta?.content) texts.set(idx, (texts.get(idx) || '') + c.delta.content);
+          }
+          return true;
+        },
         (u) => Object.assign(usageAcc, u));
-      return res.json({ id: 'cmpl-' + crypto.randomBytes(10).toString('hex'), object: 'text_completion', created: Math.floor(Date.now() / 1000), model, choices: [{ text, index: 0, finish_reason: 'stop' }], usage: { prompt_tokens: usageAcc.input_tokens, completion_tokens: usageAcc.output_tokens, total_tokens: usageAcc.input_tokens + usageAcc.output_tokens } });
+      const order = [...texts.entries()].sort((a, b) => a[0] - b[0]);
+      const choices = (order.length ? order : [[0, '']]).map(([idx, text]) => ({ text, index: idx, finish_reason: 'stop' }));
+      return res.json({ id: 'cmpl-' + crypto.randomBytes(10).toString('hex'), object: 'text_completion', created: Math.floor(Date.now() / 1000), model, choices, usage: { prompt_tokens: usageAcc.input_tokens, completion_tokens: usageAcc.output_tokens, total_tokens: usageAcc.input_tokens + usageAcc.output_tokens } });
     } catch (err) { return res.status(err.status || 500).json({ error: { message: err.message, type: 'upstream_error' } }); }
+  }
+  if (Number(n) > 1) {
+    return res.status(400).json({ error: { message: 'streaming with n>1 is not supported on legacy /v1/completions — use /v1/chat/completions', type: 'invalid_request_error' } });
   }
   const sse = sseInit(res);
   try {
@@ -252,9 +266,9 @@ router.post('/embeddings', checkModelAllowed, async (req, res) => {
 // event parser via plugin.parseEvent; default assumes OpenAI-like chunks.
 // Returns { choices: [{index, delta, finish_reason, logprobs}], usage, done } or null.
 function parseUpstreamEvent(data) {
+  if (data === '[DONE]') return { done: true };
   let j;
   try { j = JSON.parse(data); } catch { return null; }
-  if (j === '[DONE]' || data === '[DONE]') return { done: true };
   // OpenAI style (multi-choice aware)
   if (Array.isArray(j.choices)) {
     const usage = j.usage ? { input_tokens: j.usage.prompt_tokens, output_tokens: j.usage.completion_tokens, credits: j.usage.credits } : undefined;
