@@ -150,6 +150,13 @@ for (const [id, label, baseUrl, homepage, models, docs] of VENDORS) {
         ...(opts.params.max_tokens ? { max_tokens: opts.params.max_tokens } : {}),
         ...(opts.params.temperature != null ? { temperature: opts.params.temperature } : {}),
         ...(opts.params.top_p != null ? { top_p: opts.params.top_p } : {}),
+        ...(opts.params.stop !== undefined ? { stop: opts.params.stop } : {}),
+        ...(opts.params.seed !== undefined ? { seed: opts.params.seed } : {}),
+        ...(opts.params.presence_penalty !== undefined ? { presence_penalty: opts.params.presence_penalty } : {}),
+        ...(opts.params.frequency_penalty !== undefined ? { frequency_penalty: opts.params.frequency_penalty } : {}),
+        ...(opts.params.logprobs !== undefined ? { logprobs: opts.params.logprobs } : {}),
+        ...(opts.params.top_logprobs !== undefined ? { top_logprobs: opts.params.top_logprobs } : {}),
+        ...(opts.params.n !== undefined ? { n: opts.params.n } : {}),
         ...(opts.params.reasoning_effort ? { reasoning_effort: opts.params.reasoning_effort } : {}),
         ...(opts.params.enable_thinking !== undefined ? { enable_thinking: opts.params.enable_thinking } : {}),
         ...(opts.params.thinking_budget ? { thinking_budget: opts.params.thinking_budget } : {}),
@@ -171,6 +178,23 @@ for (const [id, label, baseUrl, homepage, models, docs] of VENDORS) {
         if (j.usage) opts.onUsage?.({ input_tokens: j.usage.prompt_tokens, output_tokens: j.usage.completion_tokens });
         yield JSON.stringify(j);
       }
+    },
+    /** /v1/embeddings 透传（官方 OpenAI 兼容端点大多原生支持 embeddings） */
+    async embeddings(opts) {
+      const { base, h } = this._authHeaders(opts.account);
+      const { httpJson, config } = require('../utils/http');
+      const body = { model: opts.upstreamModel, input: opts.input };
+      if (opts.params?.dimensions) body.dimensions = opts.params.dimensions;
+      if (opts.params?.encoding_format) body.encoding_format = opts.params.encoding_format;
+      if (opts.params?.user) body.user = opts.params.user;
+      const r = await httpJson(`${base}/embeddings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...h },
+        body, timeoutMs: config.requestTimeoutMs,
+      });
+      if (r.status >= 400) throw Object.assign(new Error(`${this.id} ${r.status}: ${String(r.text || '').slice(0, 300)}`), { status: r.status });
+      const j = r.json || {};
+      return { data: j.data || [], model: j.model || opts.upstreamModel, usage: j.usage || {} };
     },
   };
   registry.push(plugin);

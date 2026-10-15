@@ -76,4 +76,60 @@ function reasoningParamsFor(providerId, reasoning) {
   }
 }
 
-module.exports = { normalizeMessages, parseModelSuffix, reasoningParamsFor };
+/**
+ * Anthropic 请求体 `thinking` 字段 -> 规范 reasoning 描述（与模型名后缀同构）:
+ *   {type:'disabled'} -> false（关思考）
+ *   {type:'enabled', budget_tokens:N} -> {effort}，按预算分档：>=16384 high，>=4096 medium，其余 low
+ * 返回 undefined 表示未指定（模型名后缀优先于本字段）。
+ */
+function reasoningFromThinking(thinking) {
+  if (!thinking || typeof thinking !== 'object') return undefined;
+  if (thinking.type === 'disabled') return false;
+  const budget = Number(thinking.budget_tokens) || 0;
+  if (thinking.type === 'enabled' || budget > 0) {
+    return { effort: budget >= 16384 ? 'high' : budget >= 4096 ? 'medium' : 'low' };
+  }
+  return undefined;
+}
+
+/**
+ * 粗略 token 估算（无本地 tokenizer 时的近似值，误差 ±20% 左右）:
+ * CJK 字符 ≈ 1 token/字，拉丁字符 ≈ 0.25 token/字符。
+ */
+function estimateTokens(text) {
+  if (!text) return 0;
+  let n = 0;
+  for (const ch of String(text)) {
+    const cp = ch.codePointAt(0);
+    if (cp >= 0x2e80) n += 1;              // CJK 及全角符号
+    else if (ch === '\n') n += 0.5;
+    else if (ch === ' ' || ch === '\t') n += 0.15;
+    else n += 0.27;
+  }
+  return Math.max(1, Math.ceil(n));
+}
+
+/** Anthropic 请求体（system/messages/tools）的输入 token 估算，供 count_tokens 用 */
+function estimateAnthropicInputTokens(body = {}) {
+  let total = 3; // reply priming
+  if (typeof body.system === 'string') total += estimateTokens(body.system);
+  else if (Array.isArray(body.system)) for (const b of body.system) total += estimateTokens(b.text || '');
+  for (const m of body.messages || []) {
+    total += 4; // 每条消息固定开销
+    if (typeof m.content === 'string') { total += estimateTokens(m.content); continue; }
+    for (const b of m.content || []) {
+      if (!b || typeof b !== 'object') continue;
+      if (b.type === 'text') total += estimateTokens(b.text || '');
+      else if (b.type === 'thinking') total += estimateTokens(b.thinking || '');
+      else if (b.type === 'tool_use') total += estimateTokens(b.name || '') + estimateTokens(JSON.stringify(b.input || {}));
+      else if (b.type === 'tool_result') {
+        const inner = typeof b.content === 'string' ? b.content : (b.content || []).map(c => c?.text || '').join('\n');
+        total += estimateTokens(inner);
+      } else if (b.type === 'image') total += 1600; // 图片粗估
+    }
+  }
+  if (Array.isArray(body.tools)) total += estimateTokens(JSON.stringify(body.tools));
+  return total;
+}
+
+module.exports = { normalizeMessages, parseModelSuffix, reasoningParamsFor, reasoningFromThinking, estimateTokens, estimateAnthropicInputTokens };

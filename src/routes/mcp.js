@@ -2,11 +2,12 @@
 /**
  * MCP (Model Context Protocol) gateway:
  *  - Registers MCP servers (stdio or http) in the admin panel
- *  - Exposes their tools to LLM clients two ways:
- *      1) tools listed via this gateway's own MCP endpoint (clients connect to /mcp)
- *      2) injected into chat requests when client sends tools (admin toggle per server)
- *  Implementation: JSON-RPC 2.0 over HTTP (streamable, SSE responses not needed for basic tool calls).
+ *  - Exposes their tools/resources/prompts to LLM clients via its own MCP endpoint:
+ *      1) aggregated via this gateway's own MCP endpoint (clients connect to /mcp)
+ *      2) tools injected into chat requests when client sends tools (admin toggle per server)
+ *  Implementation: JSON-RPC 2.0 over HTTP (streamable, SSE responses not needed for basic calls).
  *  stdio servers are spawned once and kept alive; lazily restarted if dead.
+ *  Auth: same as the AI gateways — Bearer/x-api-key checked against apikeys; open only when no keys exist.
  */
 const express = require('express');
 const { spawn } = require('child_process');
@@ -15,6 +16,21 @@ const logger = require('../logger');
 
 const router = express.Router();
 const procs = new Map(); // serverId -> {proc, pending:Map(id->resolve), nextId, buffer}
+
+// ---------- auth (与 /v1 网关同语义：未配置任何 key 时开放，配置后必须带 key) ----------
+function auth(req, res, next) {
+  const cfgKeys = (require('../config')).apiKeys;
+  const header = req.headers['authorization'] || '';
+  const key = header.startsWith('Bearer ') ? header.slice(7) : (req.headers['x-api-key'] || req.query.key || '');
+  let row = key ? db.prepare('SELECT * FROM apikeys WHERE key=?').get(key) : null;
+  if (!row && cfgKeys.includes(key)) row = { id: null, key, name: 'env-key', enabled: 1, allowed_models: '*' };
+  if (!row && !key && cfgKeys.length === 0 && db.prepare('SELECT COUNT(*) c FROM apikeys').get().c === 0) {
+    return next(); // open gateway mode
+  }
+  if (!row || !row.enabled) return res.status(401).json({ jsonrpc: '2.0', id: null, error: { code: -32001, message: 'invalid api key' } });
+  next();
+}
+router.use(auth);
 
 function listServers() {
   return db.prepare('SELECT * FROM mcp_servers').all().map(s => ({
@@ -106,6 +122,37 @@ async function listTools(server) {
   return tools;
 }
 
+// ---------- resources / prompts aggregation ----------
+// 资源 URI 用 mcpres://<serverId>/<encodeURIComponent(uri)> 前缀聚合，
+// 保证跨服务不冲突且 resources/read 能确定性还原到原服务。
+function prefixUri(serverId, uri) { return `mcpres://${encodeURIComponent(serverId)}/${encodeURIComponent(uri)}`; }
+function parsePrefixedUri(uri) {
+  const m = /^mcpres:\/\/([^/]+)\/(.+)$/.exec(String(uri || ''));
+  if (!m) return null;
+  try { return { serverId: decodeURIComponent(m[1]), uri: decodeURIComponent(m[2]) }; } catch { return null; }
+}
+
+async function listResources(server) {
+  const resources = [];
+  const templates = [];
+  try {
+    const resp = await rpcCall(server, 'resources/list', {});
+    for (const r of resp?.result?.resources || []) resources.push({ ...r, uri: prefixUri(server.id, r.uri) });
+  } catch (e) {
+    if (!/timeout/.test(e.message)) throw e; // 完全不支持 resources 的服务跳过
+  }
+  try {
+    const resp = await rpcCall(server, 'resources/templates/list', {});
+    for (const t of resp?.result?.resourceTemplates || []) templates.push({ ...t, uriTemplate: prefixUri(server.id, t.uriTemplate) });
+  } catch { /* 无模板也正常 */ }
+  return { resources, templates };
+}
+
+async function listPrompts(server) {
+  const resp = await rpcCall(server, 'prompts/list', {});
+  return (resp?.result?.prompts || []).map(p => ({ ...p, name: `${server.id}__${p.name}` }));
+}
+
 // kill procs on shutdown
 process.on('exit', () => { for (const [, s] of procs) { try { s.proc.kill(); } catch {} } });
 
@@ -134,9 +181,10 @@ code{background:#1e222b;border:1px solid #2a2f3a;border-radius:6px;padding:2px 8
       "url": "http://localhost:8317/mcp"
     }
   }
-}</pre></div>
+}</pre>
+<p class="muted" style="color:#8b93a5">网关配置了 API Key 时需带 <code>Authorization: Bearer &lt;key&gt;</code>（未配置任何 key 时开放）。</p></div>
 <div class="card"><p>已注册的 MCP 服务（${servers.length} 个）：${servers.length ? servers.map(s => `<code>${String(s.id).replace(/[<>&]/g, '')}</code>`).join('、') : '（无，去管理面板 → MCP 服务 添加）'}</p>
-<p class="muted" style="color:#8b93a5">工具将以 <code>服务id__工具名</code> 聚合暴露。用 <code>POST /mcp</code> 发送 JSON-RPC：<code>initialize</code> / <code>tools/list</code> / <code>tools/call</code>。</p></div>
+<p class="muted" style="color:#8b93a5">工具/提示词以 <code>服务id__名称</code> 聚合暴露；资源 URI 带 <code>mcpres://</code> 前缀。支持方法：<code>tools/list</code> / <code>tools/call</code> / <code>resources/list</code> / <code>resources/read</code> / <code>prompts/list</code> / <code>prompts/get</code>。</p></div>
 </body></html>`);
 });
 
@@ -144,7 +192,14 @@ router.post('/', async (req, res) => {
   const { method, params, id } = req.body || {};
   try {
     if (method === 'initialize') {
-      return res.json({ jsonrpc: '2.0', id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'modelwharf-mcp', version: '0.1.0' } } });
+      return res.json({
+        jsonrpc: '2.0', id,
+        result: {
+          protocolVersion: '2024-11-05',
+          capabilities: { tools: {}, resources: { subscribe: false, listChanged: false }, prompts: {} },
+          serverInfo: { name: 'modelwharf-mcp', version: '0.1.0' },
+        },
+      });
     }
     if (method === 'notifications/initialized' || method === 'notifications/cancelled') return res.status(202).end();
     if (method === 'tools/list') {
@@ -166,6 +221,56 @@ router.post('/', async (req, res) => {
       if (resp.error) return res.json({ jsonrpc: '2.0', id, error: resp.error });
       return res.json({ jsonrpc: '2.0', id, result: resp.result });
     }
+    // ---- resources: 聚合各上游服务，URI 加 mcpres:// 前缀 ----
+    if (method === 'resources/list' || method === 'resources/templates/list') {
+      const servers = listServers().filter(s => s.enabled);
+      const resources = []; const templates = [];
+      for (const s of servers) {
+        try {
+          const r = await listResources(s);
+          resources.push(...r.resources);
+          templates.push(...r.templates);
+        } catch (e) { logger.warn(`mcp ${method} failed for ${s.id}: ${e.message}`); }
+      }
+      return res.json({
+        jsonrpc: '2.0', id,
+        result: method === 'resources/list' ? { resources, resourceTemplates: templates } : { resourceTemplates: templates },
+      });
+    }
+    if (method === 'resources/read') {
+      const target = parsePrefixedUri(params?.uri);
+      if (!target) return res.json({ jsonrpc: '2.0', id, error: { code: -32602, message: `unknown resource uri '${params?.uri}' (expected mcpres://<server>/<uri> from resources/list)` } });
+      const server = getServer(target.serverId);
+      if (!server || !server.enabled) return res.json({ jsonrpc: '2.0', id, error: { code: -32602, message: `mcp server '${target.serverId}' not found or disabled` } });
+      const resp = await rpcCall(server, 'resources/read', { uri: target.uri });
+      if (resp.error) return res.json({ jsonrpc: '2.0', id, error: resp.error });
+      // contents 内的 uri 同步改写为聚合 URI，客户端二次读取仍可路由
+      const contents = (resp.result?.contents || []).map(c => ({ ...c, uri: prefixUri(target.serverId, c.uri || target.uri) }));
+      return res.json({ jsonrpc: '2.0', id, result: { ...resp.result, contents } });
+    }
+    if (method === 'resources/subscribe' || method === 'resources/unsubscribe') {
+      return res.json({ jsonrpc: '2.0', id, error: { code: -32601, message: `${method} not supported by gateway (no resource change notifications)` } });
+    }
+    // ---- prompts: 聚合，名称用 服务id__提示词名（与 tools 同约定） ----
+    if (method === 'prompts/list') {
+      const servers = listServers().filter(s => s.enabled);
+      const prompts = [];
+      for (const s of servers) {
+        try { prompts.push(...await listPrompts(s)); }
+        catch (e) { logger.warn(`mcp prompts/list failed for ${s.id}: ${e.message}`); }
+      }
+      return res.json({ jsonrpc: '2.0', id, result: { prompts } });
+    }
+    if (method === 'prompts/get') {
+      const name = params?.name || '';
+      const sep = name.indexOf('__');
+      const serverId = name.slice(0, sep); const promptName = name.slice(sep + 2);
+      const server = getServer(serverId);
+      if (!server || !server.enabled) return res.json({ jsonrpc: '2.0', id, error: { code: -32602, message: `mcp server '${serverId}' not found or disabled` } });
+      const resp = await rpcCall(server, 'prompts/get', { name: promptName, arguments: params?.arguments || {} });
+      if (resp.error) return res.json({ jsonrpc: '2.0', id, error: resp.error });
+      return res.json({ jsonrpc: '2.0', id, result: resp.result });
+    }
     if (method === 'ping') return res.json({ jsonrpc: '2.0', id, result: {} });
     return res.json({ jsonrpc: '2.0', id, error: { code: -32601, message: `method ${method} not supported` } });
   } catch (e) {
@@ -173,4 +278,4 @@ router.post('/', async (req, res) => {
   }
 });
 
-module.exports = { router, listServers, getServer, listTools, rpcCall, initialize };
+module.exports = { router, listServers, getServer, listTools, listResources, listPrompts, rpcCall, initialize };

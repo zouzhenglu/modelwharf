@@ -175,27 +175,23 @@ node scripts/zcode-integrate.js --key wh-xxx --base http://localhost:8317
 | 扩展接口 | provider 插件协议（见 `src/core/registry.js` 注释）；新增平台=一个文件；已内置 24 个官方厂商 + openai-compat/ollama 通用插件 |
 | 账号-模型绑定管理 | 模型层面启停 + API key 级 `allowed_models` 白名单 |
 | 本地集成 | 「导入本机登录」扫描 Trae/CodeBuddy/Qoder（国内版+国际版分别扫）/千问办公客户端 的本地凭证文件 |
-| 主流协议 | OpenAI `/v1/chat/completions`、`/v1/completions`、`/v1/models`；Responses `/v1/responses`；Anthropic `/v1/messages`（含 thinking/tool_use）；MCP 网关 |
+| 主流协议 | OpenAI `/v1/chat/completions`、`/v1/completions`、`/v1/models`、`/v1/embeddings`；Responses `/v1/responses`；Anthropic `/v1/messages`（含 thinking/tool_use/count_tokens）；MCP 网关（tools/resources/prompts） |
 
 ## 已实现 / 未实现（如实清单）
 
 **已实现**：
 
-- OpenAI：`chat/completions`（流式/非流式/tools/图片）、`completions`（基础）、`models`；透传 `temperature` / `top_p` / `max_tokens`(含 `max_completion_tokens`) / `tool_choice`
-- Anthropic：`messages` 流式事件、system、多轮、图片、`tools`（tool_use/tool_result 往返）、thinking 输出块
+- OpenAI：`chat/completions`（流式/非流式/tools/图片/多选 `n`）、`completions`（基础）、`models`、`embeddings`；透传 `temperature` / `top_p` / `max_tokens`(含 `max_completion_tokens`) / `tool_choice` / `stop` / `seed` / `presence_penalty` / `frequency_penalty` / `logprobs` / `top_logprobs` / `n`
+- Anthropic：`messages` 流式事件、system、多轮、图片、`tools`（tool_use/tool_result 往返）、thinking 输出块、`count_tokens`（估算值）、`thinking: {budget_tokens}`（按预算映射思考档位，`-think` 后缀优先）
 - Responses：`/v1/responses` 流式事件、reasoning 汇总、`-think` 后缀路由
-- MCP：上游 stdio/http 服务注册、工具聚合 `tools/list` / `tools/call`、tool_filter
-- 账号池：多账号轮询/优先级/并发上限/失效标记/退避冷却；虚拟模型多目标故障转移
+- MCP：上游 stdio/http 服务注册、`tools/*` / `resources/*` / `prompts/*` 聚合、tool_filter、端点鉴权（与 `/v1` 网关同语义）
+- 账号池：多账号轮询/优先级/并发上限/失效标记/退避冷却；虚拟模型多目标故障转移 + 负载均衡策略（顺序/加权随机/最少连接）
 
-**未实现**（用到会报错或被忽略，按需提 issue 排期）：
+**注意**（能力边界，如实说明）：
 
-- ❌ `/v1/embeddings` — 未实现（向量/Embedding 类需求不可用）
-- ❌ Anthropic `/v1/messages/count_tokens` — 未实现（Claude Code 个别版本会调用，报 404 不影响主流程）
-- ❌ Anthropic 请求体 `thinking: {budget_tokens}` 参数 — 不透传；请改用模型名后缀 `-think` / `-think-high` / `-xhigh` / `-nothink`
-- ❌ OpenAI 采样参数 `presence_penalty` / `frequency_penalty` / `stop` / `seed` / `logprobs` / `n` — 接受但**不透传**给上游
-- ❌ MCP `resources/*` 与 `prompts/*` — 仅支持 tools；上游服务的资源与提示词模板无法通过网关读取
-- ❌ MCP 网关端点（`/mcp`）鉴权 — 目前**不校验 API key**，仅建议本机使用；暴露到局域网前请知晓
-- ❌ 虚拟模型的加权负载均衡（当前按顺序故障转移，无权重/最少连接策略）
+- `embeddings` 与采样参数透传依赖 OpenAI 兼容上游（openai-compat / 官方厂商 / ollama）；逆向平台（trae/qoder/qwen/workbuddy/qwenwork…）无 embeddings 时返回 501，收到不支持的采样参数由其插件白名单过滤
+- `count_tokens` 为本地估算（无上游 tokenizer，误差 ±20% 左右），Claude Code 等客户端的上下文预算足够用
+- MCP `resources/read` 需用 `resources/list` 返回的 `mcpres://` 前缀 URI；`resources/subscribe`（变更通知）不支持
 
 ## 已知限制（如实说明）
 
@@ -226,12 +222,12 @@ node scripts/zcode-integrate.js --key wh-xxx --base http://localhost:8317
 
 ```bash
 npm install
-npm test           # 34 个端到端用例（自带隔离服务 + mock 上游，不依赖真实账号）
+npm test           # 47 个端到端用例（自带隔离服务 + mock 上游，不依赖真实账号）
 ```
 
 ## 安全说明
 
 - 所有凭证只存本机 SQLite（`data/`，已 gitignore），不外发
 - 面板密码默认 `admin`，仅限本机使用；对外暴露请务必设置 `DSH_ADMIN_PASSWORD` 与 `DSH_API_KEYS`（默认网关不设 key 时对局域网开放）
-- MCP 网关端点（`/mcp`）当前无鉴权，暴露前请知晓（见上方未实现清单）
+- MCP 网关端点（`/mcp`）鉴权与 `/v1` 相同：配置了 API key 后必须携带 key，未配置任何 key 时为开放模式
 - 如发现安全问题请勿公开提 issue，请联系仓库所有者

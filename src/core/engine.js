@@ -20,6 +20,43 @@ class UpstreamError extends Error {
   constructor(status, message, upstream) { super(message); this.status = status; this.upstream = upstream; }
 }
 
+// ---------- virtual target selection (负载均衡策略) ----------
+// target key: provider_id/public_name — in-flight counter shared by chat + embeddings
+const targetInflight = new Map();
+function targetKey(t) { return `${t.provider_id}/${t.public_name}`; }
+
+/**
+ * Order a virtual model's enabled targets per its strategy:
+ *  - 'priority'   (default): strict ascending priority, failover in that order (旧行为)
+ *  - 'weighted'   : weighted-random permutation (target.weight, default 100); failover walks the permutation
+ *  - 'least_conn' : fewest in-flight requests first (ties broken by priority, then id)
+ */
+function orderTargets(virtual) {
+  const targets = JSON.parse(virtual.targets || '[]').filter(t => t.enabled !== false);
+  const strategy = virtual.strategy || 'priority';
+  if (!targets.length) return [];
+  if (strategy === 'weighted') {
+    const pool = targets.map(t => ({ t, w: Math.max(1, Number(t.weight) || 100) }));
+    const out = [];
+    while (pool.length) {
+      const total = pool.reduce((s, x) => s + x.w, 0);
+      let r = Math.random() * total;
+      let i = 0;
+      for (; i < pool.length - 1; i++) { r -= pool[i].w; if (r <= 0) break; }
+      out.push(pool.splice(i, 1)[0].t);
+    }
+    return out;
+  }
+  const sorted = [...targets].sort((a, b) => (a.priority ?? 100) - (b.priority ?? 100) || targetKey(a).localeCompare(targetKey(b)));
+  if (strategy === 'least_conn') {
+    return sorted.sort((a, b) => (targetInflight.get(targetKey(a)) || 0) - (targetInflight.get(targetKey(b)) || 0));
+  }
+  return sorted;
+}
+
+function acquireTarget(t) { const k = targetKey(t); targetInflight.set(k, (targetInflight.get(k) || 0) + 1); }
+function releaseTarget(t) { const k = targetKey(t); targetInflight.set(k, Math.max(0, (targetInflight.get(k) || 1) - 1)); }
+
 /**
  * Run a chat request against the routed provider/account (or virtual chain).
  * @param {object} opts { publicModel, messages, tools, params, source, apikeyId, signal }
@@ -46,20 +83,21 @@ async function runChat(opts, onEvent, onUsage) {
   const virtual = models.getVirtualModel(opts.publicModel);
   if (virtual) {
     if (!virtual.enabled) throw new UpstreamError(404, `virtual model '${opts.publicModel}' is disabled`);
-    const targets = JSON.parse(virtual.targets || '[]')
-      .filter(t => t.enabled !== false)
-      .sort((a, b) => (a.priority ?? 100) - (b.priority ?? 100));
+    const targets = orderTargets(virtual);
     if (!targets.length) throw new UpstreamError(503, `virtual model '${opts.publicModel}' has no enabled targets`);
     let lastErr = null;
     for (const t of targets) {
       if (opts.forceAccount && t.provider_id !== opts.forceAccount.provider_id) continue; // per-account test: restrict to that provider
       const row = db.prepare('SELECT * FROM models WHERE provider_id=? AND public_name=? AND enabled=1').get(t.provider_id, t.public_name);
       if (!row) { lastErr = new UpstreamError(404, `target ${t.provider_id}/${t.public_name} missing or disabled`); continue; }
+      acquireTarget(t);
       try {
         return await runSingle(opts, row, onEvent, onUsage, started, opts.publicModel);
       } catch (err) {
         lastErr = err;
         logger.warn(`virtual '${opts.publicModel}' target ${t.provider_id}/${t.public_name} failed: ${err.message} — trying next`);
+      } finally {
+        releaseTarget(t);
       }
     }
     throw lastErr || new UpstreamError(502, 'all virtual targets failed');
@@ -102,12 +140,15 @@ async function runSingle(opts, model, onEvent, onUsage, started, usagePublicMode
   // When the requested public name had a suffix, strip it for the upstream call if the
   // stored upstream_model equals the suffixed public name (i.e. suffix was the only diff),
   // or if the upstream model doesn't exist but the base does.
-  const { baseModel, reasoning } = parseModelSuffix(usagePublicModel || opts.publicModel);
+  const { baseModel, reasoning: suffixReasoning } = parseModelSuffix(usagePublicModel || opts.publicModel);
   let upstreamModel = model.upstream_model;
-  if (reasoning !== undefined && baseModel && baseModel !== (usagePublicModel || opts.publicModel)) {
+  if (suffixReasoning !== undefined && baseModel && baseModel !== (usagePublicModel || opts.publicModel)) {
     if (upstreamModel === (usagePublicModel || opts.publicModel)) upstreamModel = baseModel;
   }
+  // reasoning 来源优先级: 模型名后缀 > 请求体映射（如 Anthropic thinking.budget_tokens）
+  const reasoning = suffixReasoning !== undefined ? suffixReasoning : opts.params?.reasoning;
   const extraParams = reasoningParamsFor(model.provider_id, reasoning);
+  const { reasoning: _reasoning, ...safeParams } = opts.params || {};
 
   accounts.acquire(account.id);
   let usage = null;
@@ -117,7 +158,7 @@ async function runSingle(opts, model, onEvent, onUsage, started, usagePublicMode
       upstreamModel,
       messages: opts.messages,
       tools: opts.tools,
-      params: { ...(opts.params || {}), ...extraParams },
+      params: { ...safeParams, ...extraParams },
       signal: opts.signal,
       onUsage: (u) => { usage = usage || {}; Object.assign(usage, u); },
     })) {
@@ -153,4 +194,90 @@ async function runSingle(opts, model, onEvent, onUsage, started, usagePublicMode
   }
 }
 
-module.exports = { runChat, runSingle, UpstreamError };
+// ---------- embeddings ----------
+/**
+ * Run an embeddings request: route model -> account -> plugin.embeddings.
+ * Virtual models fail over across targets like chat (501 "unsupported" also moves on).
+ * Plugins without an embeddings() implementation get a clear 501.
+ * @param {object} opts { publicModel, input, params, source, apikeyId, signal }
+ * @returns {object} OpenAI-style { data, model, usage }
+ */
+async function runEmbeddings(opts) {
+  const started = Date.now();
+  const virtual = models.getVirtualModel(opts.publicModel);
+  if (virtual) {
+    if (!virtual.enabled) throw new UpstreamError(404, `virtual model '${opts.publicModel}' is disabled`);
+    const targets = orderTargets(virtual);
+    if (!targets.length) throw new UpstreamError(503, `virtual model '${opts.publicModel}' has no enabled targets`);
+    let lastErr = null;
+    for (const t of targets) {
+      const row = db.prepare('SELECT * FROM models WHERE provider_id=? AND public_name=? AND enabled=1').get(t.provider_id, t.public_name);
+      if (!row) { lastErr = new UpstreamError(404, `target ${t.provider_id}/${t.public_name} missing or disabled`); continue; }
+      acquireTarget(t);
+      try {
+        return await runSingleEmbeddings(opts, row, started);
+      } catch (err) {
+        lastErr = err;
+        logger.warn(`virtual '${opts.publicModel}' embeddings target ${t.provider_id}/${t.public_name} failed: ${err.message} — trying next`);
+      } finally {
+        releaseTarget(t);
+      }
+    }
+    throw lastErr || new UpstreamError(502, 'all virtual targets failed');
+  }
+  let publicName = opts.publicModel;
+  let model = db.prepare('SELECT * FROM models WHERE public_name=? AND enabled=1').get(publicName);
+  if (!model) {
+    const { baseModel } = parseModelSuffix(publicName);
+    if (baseModel && baseModel !== publicName) {
+      model = db.prepare('SELECT * FROM models WHERE public_name=? AND enabled=1').get(baseModel);
+      if (model) publicName = baseModel;
+    }
+  }
+  if (!model) throw new UpstreamError(404, `model '${opts.publicModel}' not found`);
+  return runSingleEmbeddings(opts, model, started);
+}
+
+async function runSingleEmbeddings(opts, model, started) {
+  const plugin = registry.get(model.provider_id);
+  if (!plugin) throw new UpstreamError(500, `provider plugin '${model.provider_id}' missing`);
+  // 不支持 embeddings 的平台直接 501（不占账号、不计失败），错误信息说清楚
+  if (typeof plugin.embeddings !== 'function') {
+    throw new UpstreamError(501, `provider '${model.provider_id}' does not support embeddings — /v1/embeddings 仅 OpenAI 兼容上游（openai-compat / 官方厂商 / ollama）可用`);
+  }
+  const account = accounts.pickAccount(model.provider_id);
+  if (!account) throw new UpstreamError(503, `no healthy account available for provider '${model.provider_id}' (all cooling/invalid/disabled)`);
+  accounts.acquire(account.id);
+  try {
+    const out = await plugin.embeddings({
+      account,
+      upstreamModel: model.upstream_model,
+      input: opts.input,
+      params: opts.params || {},
+      signal: opts.signal,
+    }) || {};
+    accounts.reportSuccess(account.id);
+    models.recordUsage({
+      apikeyId: opts.apikeyId, providerId: model.provider_id, accountId: account.id,
+      publicModel: opts.publicModel, upstreamModel: model.upstream_model,
+      inputTokens: out.usage?.prompt_tokens || 0, outputTokens: 0, credits: 0,
+      multiplier: model.multiplier || 1, latencyMs: Date.now() - started, status: 200, source: opts.source,
+    });
+    return out;
+  } catch (err) {
+    const status = err.status || 502;
+    accounts.reportFailure(account.id, err);
+    models.recordUsage({
+      apikeyId: opts.apikeyId, providerId: model.provider_id, accountId: account.id,
+      publicModel: opts.publicModel, upstreamModel: model.upstream_model,
+      inputTokens: 0, outputTokens: 0, credits: 0, multiplier: model.multiplier || 1,
+      latencyMs: Date.now() - started, status, error: err.message, source: opts.source,
+    });
+    logger.error(`embeddings failed [${model.provider_id}/${model.upstream_model}] via account#${account.id}: ${err.message}`);
+    throw new UpstreamError(status >= 400 && status < 600 ? status : 502, err.message, err.upstream);
+  } finally {
+    accounts.release(account.id);
+  }
+}
+
+module.exports = { runChat, runSingle, runEmbeddings, UpstreamError };

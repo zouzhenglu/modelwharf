@@ -62,6 +62,13 @@ function makeGeneric(id, label, docs, defaults = {}) {
         ...(params.max_tokens ? { max_tokens: params.max_tokens } : {}),
         ...(params.temperature != null ? { temperature: params.temperature } : {}),
         ...(params.top_p != null ? { top_p: params.top_p } : {}),
+        ...(params.stop !== undefined ? { stop: params.stop } : {}),
+        ...(params.seed !== undefined ? { seed: params.seed } : {}),
+        ...(params.presence_penalty !== undefined ? { presence_penalty: params.presence_penalty } : {}),
+        ...(params.frequency_penalty !== undefined ? { frequency_penalty: params.frequency_penalty } : {}),
+        ...(params.logprobs !== undefined ? { logprobs: params.logprobs } : {}),
+        ...(params.top_logprobs !== undefined ? { top_logprobs: params.top_logprobs } : {}),
+        ...(params.n !== undefined ? { n: params.n } : {}),
         ...(params.reasoning_effort ? { reasoning_effort: params.reasoning_effort } : {}),
         ...(params.enable_thinking !== undefined ? { enable_thinking: params.enable_thinking } : {}),
         ...(params.thinking_budget ? { thinking_budget: params.thinking_budget } : {}),
@@ -85,6 +92,22 @@ function makeGeneric(id, label, docs, defaults = {}) {
         if (j.usage) onUsage?.({ input_tokens: j.usage.prompt_tokens, output_tokens: j.usage.completion_tokens });
         yield JSON.stringify(j);
       }
+    },
+    /** /v1/embeddings 透传（OpenAI 兼容上游原生支持） */
+    async embeddings({ account, upstreamModel, input, params }) {
+      const base = account.credentials.baseUrl.replace(/\/+$/, '');
+      const body = { model: upstreamModel, input };
+      if (params?.dimensions) body.dimensions = params.dimensions;
+      if (params?.encoding_format) body.encoding_format = params.encoding_format;
+      if (params?.user) body.user = params.user;
+      const r = await httpJson(`${base}/embeddings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${account.credentials.apiKey}` },
+        body, timeoutMs: config.requestTimeoutMs,
+      });
+      if (r.status >= 400) throw Object.assign(new Error(`${id} ${r.status}: ${String(r.text || '').slice(0, 300)}`), { status: r.status });
+      const j = r.json || {};
+      return { data: j.data || [], model: j.model || upstreamModel, usage: j.usage || {} };
     },
   };
 }

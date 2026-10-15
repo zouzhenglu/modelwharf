@@ -9,6 +9,7 @@ const express = require('express');
 const crypto = require('crypto');
 const engine = require('../core/engine');
 const modelsCore = require('../core/models');
+const { estimateAnthropicInputTokens, reasoningFromThinking } = require('../core/messages');
 const { sseInit } = require('../utils/sse');
 const { db } = require('../store');
 
@@ -32,6 +33,16 @@ router.use(auth);
 router.get('/models', (req, res) => {
   const list = modelsCore.listPublicModels();
   res.json({ data: list.map(m => ({ id: m.public_name, type: 'model', display_name: m.public_name })), has_more: false });
+});
+
+// Anthropic count_tokens: token 数为本地估算（无上游 tokenizer），Claude Code 等
+// 客户端用它做上下文预算，估算值即可；形状与官方一致 { input_tokens }。
+router.post('/messages/count_tokens', (req, res) => {
+  const body = req.body || {};
+  if (!Array.isArray(body.messages)) {
+    return res.status(400).json({ type: 'error', error: { type: 'invalid_request_error', message: 'messages required' } });
+  }
+  res.json({ input_tokens: estimateAnthropicInputTokens(body) });
 });
 
 // Anthropic messages -> canonical (already OpenAI-ish in our core)
@@ -87,7 +98,8 @@ router.post('/messages', async (req, res) => {
   }
   const messages = toCanonical(body);
   const tools = anthropicToolsToOpenAI(body.tools);
-  const params = { temperature: body.temperature, top_p: body.top_p, max_tokens: body.max_tokens };
+  // thinking:{type,budget_tokens} -> 规范 reasoning（模型名后缀优先于该字段）
+  const params = { temperature: body.temperature, top_p: body.top_p, max_tokens: body.max_tokens, reasoning: reasoningFromThinking(body.thinking) };
   const usageAcc = { input_tokens: 0, output_tokens: 0, credits: 0 };
   const msgId = 'msg_' + crypto.randomBytes(12).toString('hex');
 

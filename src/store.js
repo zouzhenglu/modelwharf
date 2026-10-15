@@ -100,7 +100,8 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
 CREATE TABLE IF NOT EXISTS virtual_models (
   public_name TEXT PRIMARY KEY,   -- the name clients see (e.g. gpt-4o or glm-5.3)
   enabled INTEGER DEFAULT 1,
-  targets TEXT NOT NULL,          -- JSON [{provider_id, public_name, priority}] priority ascending = tried first
+  targets TEXT NOT NULL,          -- JSON [{provider_id, public_name, priority, weight}] priority ascending = tried first
+  strategy TEXT DEFAULT 'priority', -- priority | weighted | least_conn（虚拟目标选择策略）
   tags TEXT DEFAULT '',           -- free text tags for filtering (comma separated)
   note TEXT,
   created_at INTEGER DEFAULT (unixepoch())
@@ -125,6 +126,12 @@ try {
   db.prepare('SELECT tags FROM virtual_models LIMIT 1').get();
 } catch {
   db.exec('ALTER TABLE virtual_models ADD COLUMN tags TEXT DEFAULT \'\'');
+}
+// migration: virtual_models.strategy added for weighted/least-conn load balancing
+try {
+  db.prepare('SELECT strategy FROM virtual_models LIMIT 1').get();
+} catch {
+  db.exec('ALTER TABLE virtual_models ADD COLUMN strategy TEXT DEFAULT \'priority\'');
 }
 
 const stmts = {

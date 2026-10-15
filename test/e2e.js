@@ -50,6 +50,28 @@ module.exports = {
 function removeTestPlugin() { try { fs.rmSync(TEST_PLUGIN_PATH, { force: true }); } catch {} }
 fs.writeFileSync(TEST_PLUGIN_PATH, TEST_PLUGIN_SRC);
 
+// line-based JSON-RPC stdio MCP mock server (tools + resources + prompts), written to TMPDIR at use
+const MCP_MOCK_SRC = `
+const rl = require('readline').createInterface({ input: process.stdin });
+rl.on('line', (line) => {
+  let msg; try { msg = JSON.parse(line); } catch { return; }
+  const reply = (result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }) + '\\n');
+  const fail = (code, message) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code, message } }) + '\\n');
+  const args = (msg.params && msg.params.arguments) || {};
+  switch (msg.method) {
+    case 'initialize': return reply({ protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'mock-mcp', version: '0' } });
+    case 'tools/list': return reply({ tools: [{ name: 'echo', description: 'echo tool', inputSchema: { type: 'object', properties: { text: { type: 'string' } } } }] });
+    case 'tools/call': return reply({ content: [{ type: 'text', text: 'ok:' + JSON.stringify(args) }] });
+    case 'resources/list': return reply({ resources: [{ uri: 'memo://note', name: 'note', description: 'a note', mimeType: 'text/plain' }] });
+    case 'resources/templates/list': return reply({ resourceTemplates: [{ uriTemplate: 'memo://{name}', name: 'memo' }] });
+    case 'resources/read': return reply({ contents: [{ uri: (msg.params && msg.params.uri) || 'memo://note', mimeType: 'text/plain', text: 'hello-resource' }] });
+    case 'prompts/list': return reply({ prompts: [{ name: 'greet', description: 'greet prompt', arguments: [{ name: 'who', required: true }] }] });
+    case 'prompts/get': return reply({ description: 'greet', messages: [{ role: 'user', content: { type: 'text', text: 'hi ' + (args.who || '') } }] });
+    default: return fail(-32601, 'unknown method ' + msg.method);
+  }
+});
+`;
+
 async function call(method, path, body, headers = {}) {
   const resp = await fetch(BASE + path, {
     method,
@@ -109,13 +131,40 @@ async function main() {
   const mock = http.createServer((req, res) => {
     if (req.url === '/v1/models') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ data: [{ id: 'mock-model-a' }, { id: 'mock-model-b' }] }));
+      return res.end(JSON.stringify({ data: [{ id: 'mock-model-a' }, { id: 'mock-model-b' }, { id: 'mock-echo' }] }));
+    }
+    if (req.url === '/v1/embeddings') {
+      let body = '';
+      req.on('data', c => body += c);
+      req.on('end', () => {
+        const j = JSON.parse(body || '{}');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ object: 'list', data: [{ object: 'embedding', embedding: [0.1, 0.2, 0.3], index: 0 }], model: j.model, usage: { prompt_tokens: 4, total_tokens: 4 } }));
+      });
+      return;
     }
     if (req.url === '/v1/chat/completions') {
       let body = '';
       req.on('data', c => body += c);
       req.on('end', () => {
-        const wantsStream = JSON.parse(body || '{}').stream;
+        const j = JSON.parse(body || '{}');
+        // mock-echo: echo received upstream params back as content; honor n (multi-choice)
+        if (j.model === 'mock-echo') {
+          const echo = {
+            stop: j.stop, seed: j.seed, presence_penalty: j.presence_penalty, frequency_penalty: j.frequency_penalty,
+            logprobs: j.logprobs, top_logprobs: j.top_logprobs, n: j.n,
+            reasoning_effort: j.reasoning_effort, enable_thinking: j.enable_thinking, thinking_budget: j.thinking_budget,
+          };
+          const n = Math.max(1, Number(j.n) || 1);
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          for (let i = 0; i < n; i++) {
+            res.write(`data: ${JSON.stringify({ choices: [{ index: i, delta: { role: 'assistant', content: `echo#${i}:${JSON.stringify(echo)}` } }] })}\n\n`);
+            res.write(`data: ${JSON.stringify({ choices: [{ index: i, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+          }
+          res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {} }], usage: { prompt_tokens: 3, completion_tokens: 4 } })}\n\n`);
+          res.write('data: [DONE]\n\n');
+          return res.end();
+        }
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
         res.write(`data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', content: '你好' } }] })}\n\n`);
         res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: '，世界！' } }] })}\n\n`);
@@ -195,6 +244,48 @@ async function main() {
     const r = await call('POST', '/v1/chat/completions', { model: 'nope', messages: [{ role: 'user', content: 'x' }] });
     assert.equal(r.status, 404);
   });
+  await t('sampling params passthrough (stop/seed/penalties/logprobs)', async () => {
+    const r = await call('POST', '/v1/chat/completions', {
+      model: 'mock-echo', messages: [{ role: 'user', content: 'hi' }],
+      stop: ['cat'], seed: 7, presence_penalty: 0.5, frequency_penalty: 0.3, logprobs: true, top_logprobs: 2,
+    });
+    assert.equal(r.status, 200, r.text);
+    const content = r.json.choices[0].message.content;
+    const echo = JSON.parse(content.slice(content.indexOf('{')));
+    assert.deepEqual(echo.stop, ['cat']);
+    assert.equal(echo.seed, 7);
+    assert.equal(echo.presence_penalty, 0.5);
+    assert.equal(echo.frequency_penalty, 0.3);
+    assert.equal(echo.logprobs, true);
+    assert.equal(echo.top_logprobs, 2);
+  });
+  await t('n=2 returns two indexed choices', async () => {
+    const r = await call('POST', '/v1/chat/completions', { model: 'mock-echo', messages: [{ role: 'user', content: 'hi' }], n: 2 });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.choices.length, 2, r.text);
+    assert.equal(r.json.choices[0].index, 0);
+    assert.equal(r.json.choices[1].index, 1);
+    assert.ok(r.json.choices[0].message.content.startsWith('echo#0:'));
+    assert.ok(r.json.choices[1].message.content.startsWith('echo#1:'));
+  });
+  await t('stream n=2 keeps per-choice indexes', async () => {
+    const resp = await fetch(BASE + '/v1/chat/completions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'mock-echo', messages: [{ role: 'user', content: 'hi' }], stream: true, n: 2 }),
+    });
+    assert.equal(resp.status, 200);
+    const text = await resp.text();
+    assert.ok(text.includes('"index":1'), 'missing choice index 1 in stream');
+    assert.ok(text.includes('[DONE]'));
+  });
+  await t('POST /v1/embeddings', async () => {
+    const r = await call('POST', '/v1/embeddings', { model: 'mock-a', input: ['hello', 'world'] });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.object, 'list');
+    assert.equal(r.json.model, 'mock-a');
+    assert.equal(r.json.data[0].embedding.length, 3);
+    assert.equal(r.json.usage.prompt_tokens, 4);
+  });
 
   console.log('== gateway (anthropic) ==');
   await t('/v1/messages non-stream', async () => {
@@ -202,6 +293,41 @@ async function main() {
     assert.equal(r.status, 200, r.text);
     assert.equal(r.json.type, 'message');
     assert.equal(r.json.content[0].text, '你好，世界！');
+  });
+  await t('/v1/messages/count_tokens returns estimate', async () => {
+    const r = await call('POST', '/v1/messages/count_tokens', { model: 'mock-a', messages: [{ role: 'user', content: 'hello你好' }] });
+    assert.equal(r.status, 200, r.text);
+    assert.ok(r.json.input_tokens > 0, r.text);
+  });
+  await t('thinking budget_tokens maps to reasoning effort', async () => {
+    const r = await call('POST', '/v1/messages', {
+      model: 'mock-echo', max_tokens: 100,
+      thinking: { type: 'enabled', budget_tokens: 20000 }, messages: [{ role: 'user', content: 'hi' }],
+    });
+    assert.equal(r.status, 200, r.text);
+    const content = r.json.content[0].text;
+    const echo = JSON.parse(content.slice(content.indexOf('{')));
+    assert.equal(echo.reasoning_effort, 'high', content);
+  });
+  await t('thinking disabled maps to reasoning off', async () => {
+    const r = await call('POST', '/v1/messages', {
+      model: 'mock-echo', max_tokens: 100,
+      thinking: { type: 'disabled' }, messages: [{ role: 'user', content: 'hi' }],
+    });
+    assert.equal(r.status, 200, r.text);
+    const content = r.json.content[0].text;
+    const echo = JSON.parse(content.slice(content.indexOf('{')));
+    assert.equal(echo.reasoning_effort, 'none', content);
+  });
+  await t('model suffix -think overrides thinking field', async () => {
+    const r = await call('POST', '/v1/messages', {
+      model: 'mock-echo-think', max_tokens: 100,
+      thinking: { type: 'disabled' }, messages: [{ role: 'user', content: 'hi' }],
+    });
+    assert.equal(r.status, 200, r.text);
+    const content = r.json.content[0].text;
+    const echo = JSON.parse(content.slice(content.indexOf('{')));
+    assert.equal(echo.reasoning_effort, 'medium', content);
   });
 
   console.log('== apikeys ==');
@@ -235,13 +361,44 @@ async function main() {
   });
 
   console.log('== mcp gateway ==');
-  await t('mcp initialize + tools/list (empty ok)', async () => {
+  await t('mcp auth: no key -> 401 once keys exist', async () => {
     const r = await call('POST', '/mcp', { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    assert.equal(r.status, 401, r.text);
+  });
+  const mcpAuth = { Authorization: 'Bearer ' + fullKey };
+  await t('mcp initialize + tools/list (empty ok)', async () => {
+    const r = await call('POST', '/mcp', { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }, mcpAuth);
     assert.equal(r.status, 200);
     assert.equal(r.json.result.serverInfo.name, 'modelwharf-mcp');
-    const r2 = await call('POST', '/mcp', { jsonrpc: '2.0', id: 2, method: 'tools/list' });
+    assert.ok(r.json.result.capabilities.resources, 'resources capability missing');
+    assert.ok(r.json.result.capabilities.prompts, 'prompts capability missing');
+    const r2 = await call('POST', '/mcp', { jsonrpc: '2.0', id: 2, method: 'tools/list' }, mcpAuth);
     assert.equal(r2.status, 200);
     assert.ok(Array.isArray(r2.json.result.tools));
+  });
+  await t('mcp stdio upstream: tools/resources/prompts aggregated', async () => {
+    const script = path.join(TMPDIR, 'mcp-mock.js');
+    fs.writeFileSync(script, MCP_MOCK_SRC);
+    const add = await call('POST', '/admin/api/mcp', { id: 'mock', transport: 'stdio', command: process.execPath, args: [script] }, auth);
+    assert.equal(add.status, 200, add.text);
+    // tools
+    const tools = await call('POST', '/mcp', { jsonrpc: '2.0', id: 3, method: 'tools/list' }, mcpAuth);
+    assert.ok(tools.json.result.tools.find(x => x.name === 'mock__echo'), tools.text);
+    const toolCall = await call('POST', '/mcp', { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'mock__echo', arguments: { text: 'hi' } } }, mcpAuth);
+    assert.equal(toolCall.json.result.content[0].text, 'ok:{"text":"hi"}', toolCall.text);
+    // resources: URI 带 mcpres:// 前缀，read 可还原路由
+    const rl = await call('POST', '/mcp', { jsonrpc: '2.0', id: 5, method: 'resources/list' }, mcpAuth);
+    const uri = rl.json.result.resources[0]?.uri;
+    assert.ok(uri && uri.startsWith('mcpres://mock/'), `bad resource uri: ${uri}`);
+    assert.ok(rl.json.result.resourceTemplates[0]?.uriTemplate.startsWith('mcpres://mock/'), rl.text);
+    const rd = await call('POST', '/mcp', { jsonrpc: '2.0', id: 6, method: 'resources/read', params: { uri } }, mcpAuth);
+    assert.equal(rd.json.result.contents[0].text, 'hello-resource', rd.text);
+    assert.ok(rd.json.result.contents[0].uri.startsWith('mcpres://mock/'));
+    // prompts: 名称按 服务id__提示词名 聚合
+    const pl = await call('POST', '/mcp', { jsonrpc: '2.0', id: 7, method: 'prompts/list' }, mcpAuth);
+    assert.equal(pl.json.result.prompts[0]?.name, 'mock__greet', pl.text);
+    const pg = await call('POST', '/mcp', { jsonrpc: '2.0', id: 8, method: 'prompts/get', params: { name: 'mock__greet', arguments: { who: 'bob' } } }, mcpAuth);
+    assert.equal(pg.json.result.messages[0].content.text, 'hi bob', pg.text);
   });
 
   console.log('== providers: no-healthy-account path ==');
@@ -292,6 +449,12 @@ async function main() {
     assert.equal(r.status, 200, r.text);
     assert.equal(r.json.choices[0].message.content, '你好，世界！');
   });
+  // 死端点账号完成故障转移使命后禁用：否则轮询池 50% 抽中它，后续用例随机 502
+  {
+    const accts = await call('GET', '/admin/api/accounts?provider_id=openai-compat', null, auth);
+    const deadAcct = accts.json.find(a => a.name === 'dead-upstream');
+    if (deadAcct) await call('PUT', '/admin/api/accounts/' + deadAcct.id, { enabled: false }, auth);
+  }
   await t('virtual model appears in /v1/models', async () => {
     const r = await call('GET', '/v1/models', null, { Authorization: 'Bearer ' + fullKey });
     assert.ok(r.json.data.find(m => m.id === 'uni-test'));
@@ -305,6 +468,43 @@ async function main() {
     const chat = await call('POST', '/v1/chat/completions', { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] }, { Authorization: 'Bearer ' + fullKey });
     assert.equal(chat.status, 200);
     assert.equal(chat.json.model, 'gpt-4o');
+  });
+  // 负载均衡测试（账号路由已确定：dead-upstream 已禁用）
+  await t('virtual weighted strategy spreads traffic', async () => {
+    const r = await call('POST', '/admin/api/virtual-models', {
+      public_name: 'uni-weighted',
+      strategy: 'weighted',
+      targets: [
+        { provider_id: 'openai-compat', public_name: 'mock-a', priority: 10, weight: 100 },
+        { provider_id: 'openai-compat', public_name: 'mock-echo', priority: 20, weight: 100 },
+      ],
+    }, auth);
+    assert.equal(r.status, 200, r.text);
+    const kinds = new Set();
+    for (let i = 0; i < 20; i++) {
+      const chat = await call('POST', '/v1/chat/completions', { model: 'uni-weighted', messages: [{ role: 'user', content: 'hi' }] }, { Authorization: 'Bearer ' + fullKey });
+      assert.equal(chat.status, 200, chat.text);
+      kinds.add(chat.json.choices[0].message.content.startsWith('echo#') ? 'echo' : 'greet');
+    }
+    assert.ok(kinds.has('echo') && kinds.has('greet'), 'weighted strategy did not spread: ' + [...kinds]);
+  });
+  await t('virtual least_conn strategy spreads concurrent traffic', async () => {
+    const r = await call('POST', '/admin/api/virtual-models', {
+      public_name: 'uni-least',
+      strategy: 'least_conn',
+      targets: [
+        { provider_id: 'openai-compat', public_name: 'mock-a', priority: 10 },
+        { provider_id: 'openai-compat', public_name: 'mock-echo', priority: 20 },
+      ],
+    }, auth);
+    assert.equal(r.status, 200, r.text);
+    // 抬高并发上限，确保 6 个并发都能拿到账号
+    const accts = await call('GET', '/admin/api/accounts?provider_id=openai-compat', null, auth);
+    for (const a of accts.json.filter(x => x.enabled)) await call('PUT', '/admin/api/accounts/' + a.id, { max_concurrency: 10 }, auth);
+    const results = await Promise.all([...Array(6)].map(() => call('POST', '/v1/chat/completions', { model: 'uni-least', messages: [{ role: 'user', content: 'hi' }] }, { Authorization: 'Bearer ' + fullKey })));
+    for (const x of results) assert.equal(x.status, 200, x.text);
+    const kinds = new Set(results.map(x => x.json.choices[0].message.content.startsWith('echo#') ? 'echo' : 'greet'));
+    assert.ok(kinds.has('echo') && kinds.has('greet'), 'least_conn strategy did not spread: ' + [...kinds]);
   });
 
   console.log('== usage chart ==');
@@ -397,10 +597,19 @@ async function main() {
   await t('checkin-all runs and logs', async () => {
     const r = await call('POST', '/admin/api/checkin/all', {}, auth);
     assert.equal(r.status, 200);
-    assert.ok(r.json.total >= 2); // mock + dead-upstream accounts
+    assert.ok(r.json.total >= 2); // mock + mock-checkin accounts
     const st = await call('GET', '/admin/api/checkin/status', null, auth);
     assert.ok(st.json.recent.length >= 1);
     assert.ok(st.json.accounts.find(a => a.name === 'mock-checkin').done === true);
+  });
+
+  console.log('== embeddings: unsupported provider ==');
+  await t('provider without embeddings -> 501', async () => {
+    const add = await call('POST', '/admin/api/models', { provider_id: 'e2echeckin', upstream_model: 'mock-model-a', public_name: 'no-emb' }, auth);
+    assert.equal(add.status, 200, add.text);
+    const r = await call('POST', '/v1/embeddings', { model: 'no-emb', input: 'x' }, { Authorization: 'Bearer ' + fullKey });
+    assert.equal(r.status, 501, r.text);
+    assert.match(r.json.error.message, /embeddings/);
   });
 
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);

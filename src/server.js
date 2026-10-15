@@ -38,9 +38,9 @@ app.get('/docs/api.md', (req, res) => {
 一个把多个 AI 平台聚合成标准 API 的本地网关。本文档供 AI 助手阅读后直接完成接入。
 
 ## 端点
-- OpenAI 协议: \`POST ${base}/v1/chat/completions\`（兼容 \`/v1/completions\`、\`/v1/responses\`、\`GET /v1/models\`）
-- Anthropic 协议: \`POST ${base}/v1/messages\`（Claude Code: \`ANTHROPIC_BASE_URL=${base}\`）
-- MCP: \`POST ${base}/mcp\`（JSON-RPC over HTTP）
+- OpenAI 协议: \`POST ${base}/v1/chat/completions\`（兼容 \`/v1/completions\`、\`/v1/responses\`、\`/v1/embeddings\`、\`GET /v1/models\`）
+- Anthropic 协议: \`POST ${base}/v1/messages\`（含 \`/v1/messages/count_tokens\`；Claude Code: \`ANTHROPIC_BASE_URL=${base}\`）
+- MCP: \`POST ${base}/mcp\`（JSON-RPC over HTTP，tools/resources/prompts 聚合）
 - 健康检查: \`GET ${base}/health\`
 
 ## 认证

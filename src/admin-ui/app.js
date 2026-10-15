@@ -890,11 +890,17 @@ async function delVirtual(name) { if (!confirm(`删除统一模型「${name}」�
 async function openVirtualForm(name) {
   const byProvider = window._virtualTargets || {};
   const v = name ? (await api('/virtual-models')).find(x => x.public_name === name) : null;
-  const targets = v ? JSON.parse(v.targets || '[]').sort((a, b) => (a.priority ?? 100) - (b.priority ?? 100)) : [{ provider_id: '', public_name: '', priority: 100 }];
+  const targets = v ? JSON.parse(v.targets || '[]').sort((a, b) => (a.priority ?? 100) - (b.priority ?? 100)) : [{ provider_id: '', public_name: '', priority: 100, weight: 100 }];
   openModal(v ? `编辑统一模型 — ${name}` : '新建统一模型', `
     <div class="field"><label>对外名称（客户端填的 model，可与真实模型重名以"伪装"）</label>
       <input id="vfName" value="${esc(v?.public_name || '')}" placeholder="如 gpt-4o 或 glm-5.3" ${v ? 'readonly style="opacity:.6"' : ''}></div>
-    <div class="field"><label>目标链（从上到下依次尝试，失败自动切下一个）</label>
+    <div class="field"><label>负载策略</label>
+      <select id="vfStrategy">
+        <option value="priority" ${(!v || v.strategy === 'priority') ? 'selected' : ''}>顺序故障转移（按优先级从上到下，失败切下一个）</option>
+        <option value="weighted" ${v?.strategy === 'weighted' ? 'selected' : ''}>加权随机（按权重分散流量，失败自动切换）</option>
+        <option value="least_conn" ${v?.strategy === 'least_conn' ? 'selected' : ''}>最少连接（优先并发少的目标，失败自动切换）</option>
+      </select></div>
+    <div class="field"><label>目标链（优先级=行顺序；权重仅「加权随机」用）</label>
       <div id="vfTargets">
       ${targets.map((t, i) => virtualTargetRow(i, t, byProvider)).join('')}
       </div>
@@ -911,6 +917,7 @@ function virtualTargetRow(i, t, byProvider) {
     <select class="vtProvider" style="width:150px" onchange="vtProviderChange(this)">
       <option value="">选平台…</option>${provs.map(p => `<option value="${esc(p)}" ${t.provider_id === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select>
     <select class="vtModel" style="width:220px">${(byProvider[t.provider_id] || []).map(mm => `<option value="${esc(mm)}" ${t.public_name === mm ? 'selected' : ''}>${esc(mm)}</option>`).join('') || `<option value="${esc(t.public_name || '')}">${esc(t.public_name || '（先选平台）')}</option>`}</select>
+    <input class="vtWeight" type="number" min="1" step="1" style="width:70px" value="${Number(t.weight) || 100}" title="权重（加权随机策略用，越大流量越多）">
     <button class="small ghost" title="上移" onclick="moveVirtualRow(this,-1)">↑</button>
     <button class="small ghost" title="下移" onclick="moveVirtualRow(this,1)">↓</button>
     <button class="small ghost" title="移除" onclick="this.parentElement.remove();renumberVirtualRows()">✕</button>
@@ -940,8 +947,9 @@ async function saveVirtual(origName) {
     provider_id: row.querySelector('.vtProvider').value,
     public_name: row.querySelector('.vtModel').value,
     priority: (i + 1) * 10,
+    weight: Math.max(1, parseInt(row.querySelector('.vtWeight')?.value, 10) || 100),
   })).filter(t => t.provider_id && t.public_name);
-  const body = { public_name: $('#vfName').value.trim(), targets, note: $('#vfNote').value, tags: $('#vfTags').value };
+  const body = { public_name: $('#vfName').value.trim(), targets, note: $('#vfNote').value, tags: $('#vfTags').value, strategy: $('#vfStrategy').value };
   if (!body.public_name) return toast('请填对外名称', true);
   if (!targets.length) return toast('至少需要一个有效目标', true);
   try {
