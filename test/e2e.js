@@ -406,7 +406,9 @@ async function main() {
     const rl = await call('POST', '/mcp', { jsonrpc: '2.0', id: 5, method: 'resources/list' }, mcpAuth);
     const uri = rl.json.result.resources[0]?.uri;
     assert.ok(uri && uri.startsWith('mcpres://mock/'), `bad resource uri: ${uri}`);
-    assert.ok(rl.json.result.resourceTemplates[0]?.uriTemplate.startsWith('mcpres://mock/'), rl.text);
+    const tmpl = rl.json.result.resourceTemplates[0]?.uriTemplate || '';
+    assert.ok(tmpl.startsWith('mcpres://mock/'), rl.text);
+    assert.ok(tmpl.includes('{name}'), `template placeholder must survive prefixing: ${tmpl}`);
     const rd = await call('POST', '/mcp', { jsonrpc: '2.0', id: 6, method: 'resources/read', params: { uri } }, mcpAuth);
     assert.equal(rd.json.result.contents[0].text, 'hello-resource', rd.text);
     assert.ok(rd.json.result.contents[0].uri.startsWith('mcpres://mock/'));
@@ -415,6 +417,11 @@ async function main() {
     assert.equal(pl.json.result.prompts[0]?.name, 'mock__greet', pl.text);
     const pg = await call('POST', '/mcp', { jsonrpc: '2.0', id: 8, method: 'prompts/get', params: { name: 'mock__greet', arguments: { who: 'bob' } } }, mcpAuth);
     assert.equal(pg.json.result.messages[0].content.text, 'hi bob', pg.text);
+  });
+  await t('mcp rejects tool names without server prefix', async () => {
+    const r = await call('POST', '/mcp', { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'echo', arguments: {} } }, mcpAuth);
+    assert.equal(r.json.error.code, -32602, r.text);
+    assert.match(r.json.error.message, /服务id__工具名/);
   });
 
   console.log('== providers: no-healthy-account path ==');
@@ -471,6 +478,11 @@ async function main() {
     const deadAcct = accts.json.find(a => a.name === 'dead-upstream');
     if (deadAcct) await call('PUT', '/admin/api/accounts/' + deadAcct.id, { enabled: false }, auth);
   }
+  await t('virtual model honors -think suffix', async () => {
+    const r = await call('POST', '/v1/chat/completions', { model: 'uni-test-think', messages: [{ role: 'user', content: 'hi' }] }, { Authorization: 'Bearer ' + fullKey });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.choices[0].message.content, '你好，世界！');
+  });
   await t('virtual model appears in /v1/models', async () => {
     const r = await call('GET', '/v1/models', null, { Authorization: 'Bearer ' + fullKey });
     assert.ok(r.json.data.find(m => m.id === 'uni-test'));

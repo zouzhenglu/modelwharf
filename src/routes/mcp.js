@@ -126,6 +126,11 @@ async function listTools(server) {
 // 资源 URI 用 mcpres://<serverId>/<encodeURIComponent(uri)> 前缀聚合，
 // 保证跨服务不冲突且 resources/read 能确定性还原到原服务。
 function prefixUri(serverId, uri) { return `mcpres://${encodeURIComponent(serverId)}/${encodeURIComponent(uri)}`; }
+// URI 模板的 {placeholder} 必须原样保留（RFC 6570 客户端要往里替换），只编码其余部分
+function prefixUriTemplate(serverId, tpl) {
+  const body = String(tpl || '').split(/(\{[^}]*\})/).map(part => (part.startsWith('{') ? part : encodeURIComponent(part))).join('');
+  return `mcpres://${encodeURIComponent(serverId)}/${body}`;
+}
 function parsePrefixedUri(uri) {
   const m = /^mcpres:\/\/([^/]+)\/(.+)$/.exec(String(uri || ''));
   if (!m) return null;
@@ -143,7 +148,7 @@ async function listResources(server) {
   }
   try {
     const resp = await rpcCall(server, 'resources/templates/list', {});
-    for (const t of resp?.result?.resourceTemplates || []) templates.push({ ...t, uriTemplate: prefixUri(server.id, t.uriTemplate) });
+    for (const t of resp?.result?.resourceTemplates || []) templates.push({ ...t, uriTemplate: prefixUriTemplate(server.id, t.uriTemplate) });
   } catch { /* 无模板也正常 */ }
   return { resources, templates };
 }
@@ -214,6 +219,7 @@ router.post('/', async (req, res) => {
     if (method === 'tools/call') {
       const name = params?.name || '';
       const sep = name.indexOf('__');
+      if (sep <= 0) return res.json({ jsonrpc: '2.0', id, error: { code: -32602, message: `tool name must be '服务id__工具名', got '${name}'` } });
       const serverId = name.slice(0, sep); const toolName = name.slice(sep + 2);
       const server = getServer(serverId);
       if (!server || !server.enabled) return res.json({ jsonrpc: '2.0', id, error: { code: -32602, message: `mcp server '${serverId}' not found or disabled` } });
@@ -264,6 +270,7 @@ router.post('/', async (req, res) => {
     if (method === 'prompts/get') {
       const name = params?.name || '';
       const sep = name.indexOf('__');
+      if (sep <= 0) return res.json({ jsonrpc: '2.0', id, error: { code: -32602, message: `prompt name must be '服务id__提示词名', got '${name}'` } });
       const serverId = name.slice(0, sep); const promptName = name.slice(sep + 2);
       const server = getServer(serverId);
       if (!server || !server.enabled) return res.json({ jsonrpc: '2.0', id, error: { code: -32602, message: `mcp server '${serverId}' not found or disabled` } });

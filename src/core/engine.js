@@ -80,7 +80,12 @@ async function runChat(opts, onEvent, onUsage) {
       if (row) opts.forceModel = row;
     }
   }
-  const virtual = models.getVirtualModel(opts.publicModel);
+  let virtual = models.getVirtualModel(opts.publicModel);
+  if (!virtual) {
+    // 统一模型同样吃 -think 系列后缀：剥掉后缀再查一次虚拟表
+    const { baseModel: vBase } = parseModelSuffix(opts.publicModel);
+    if (vBase && vBase !== opts.publicModel) virtual = models.getVirtualModel(vBase);
+  }
   if (virtual) {
     if (!virtual.enabled) throw new UpstreamError(404, `virtual model '${opts.publicModel}' is disabled`);
     const targets = orderTargets(virtual);
@@ -204,7 +209,11 @@ async function runSingle(opts, model, onEvent, onUsage, started, usagePublicMode
  */
 async function runEmbeddings(opts) {
   const started = Date.now();
-  const virtual = models.getVirtualModel(opts.publicModel);
+  let virtual = models.getVirtualModel(opts.publicModel);
+  if (!virtual) {
+    const { baseModel: vBase } = parseModelSuffix(opts.publicModel);
+    if (vBase && vBase !== opts.publicModel) virtual = models.getVirtualModel(vBase);
+  }
   if (virtual) {
     if (!virtual.enabled) throw new UpstreamError(404, `virtual model '${opts.publicModel}' is disabled`);
     const targets = orderTargets(virtual);
