@@ -124,14 +124,14 @@ function listVirtualModels() {
 function getVirtualModel(publicName) {
   return db.prepare('SELECT * FROM virtual_models WHERE public_name=?').get(publicName);
 }
-function upsertVirtualModel({ public_name, targets, enabled = 1, note = null }) {
+function upsertVirtualModel({ public_name, targets, enabled = 1, note = null, tags = '' }) {
   if (!public_name || !Array.isArray(targets) || !targets.length) throw new Error('public_name and targets required');
   for (const t of targets) {
     if (!t.provider_id || !t.public_name) throw new Error('each target needs provider_id + public_name');
   }
-  db.prepare(`INSERT INTO virtual_models(public_name, targets, enabled, note) VALUES(?,?,?,?)
-    ON CONFLICT(public_name) DO UPDATE SET targets=excluded.targets, enabled=excluded.enabled, note=excluded.note`)
-    .run(public_name, JSON.stringify(targets), enabled ? 1 : 0, note);
+  db.prepare(`INSERT INTO virtual_models(public_name, targets, enabled, note, tags) VALUES(?,?,?,?,?)
+    ON CONFLICT(public_name) DO UPDATE SET targets=excluded.targets, enabled=excluded.enabled, note=excluded.note, tags=excluded.tags`)
+    .run(public_name, JSON.stringify(targets), enabled ? 1 : 0, note, tags || '');
   return getVirtualModel(public_name);
 }
 function deleteVirtualModel(publicName) {

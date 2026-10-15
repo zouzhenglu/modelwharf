@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS virtual_models (
   public_name TEXT PRIMARY KEY,   -- the name clients see (e.g. gpt-4o or glm-5.3)
   enabled INTEGER DEFAULT 1,
   targets TEXT NOT NULL,          -- JSON [{provider_id, public_name, priority}] priority ascending = tried first
+  tags TEXT DEFAULT '',           -- free text tags for filtering (comma separated)
   note TEXT,
   created_at INTEGER DEFAULT (unixepoch())
 );
@@ -119,6 +120,12 @@ CREATE INDEX IF NOT EXISTS idx_usage_model ON usage(public_model);
 CREATE INDEX IF NOT EXISTS idx_usage_apikey ON usage(apikey_id);
 CREATE INDEX IF NOT EXISTS idx_checkin_ts ON checkin_log(ts);
 `);
+// migration: virtual_models.tags added in ui-redesign; older DBs lack the column
+try {
+  db.prepare('SELECT tags FROM virtual_models LIMIT 1').get();
+} catch {
+  db.exec('ALTER TABLE virtual_models ADD COLUMN tags TEXT DEFAULT \'\'');
+}
 
 const stmts = {
   getSetting: db.prepare('SELECT value FROM settings WHERE key=?'),

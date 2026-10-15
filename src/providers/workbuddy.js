@@ -273,13 +273,13 @@ module.exports = {
       // "已签到"幂等：业务码/文案识别不挑 HTTP 状态码（实测 400 + code 10001）
       if (/已签到|已经签到|already/i.test(msgText) || Number(j.code) === 10001) {
         const credits = await refreshCredits(account).catch(() => null);
-        return { ok: true, already: true, message: '今日已签到', gained: 0, extra: credits ? { credits } : undefined };
+        return { ok: true, already: true, message: '今日已签到', gained: 0, extra: credits ? { ...credits } : undefined };
       }
       if (r.status === 200) {
         if (j.code != null && j.code !== 0) return { ok: false, message: msgText || `code ${j.code}` };
         const gained = Number(j?.data?.credits ?? j?.data?.Credits ?? 0) || null;
         const credits = await refreshCredits(account).catch(() => null);
-        return { ok: true, gained, message: `签到成功${gained ? ` +${gained}` : ''}`, extra: credits ? { credits } : undefined };
+        return { ok: true, gained, message: `签到成功${gained ? ` +${gained}` : ''}`, extra: credits ? { ...credits } : undefined };
       }
       lastStatus = r.status; lastRaw = { status: r.status, json: r.json, text: String(r.text || '').slice(0, 300) };
       if (r.status !== 404 && r.status !== 405 && r.status !== 410) break; // 路径不存在才 fallback

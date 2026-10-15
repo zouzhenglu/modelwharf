@@ -462,13 +462,14 @@ router.post('/virtual-models', (req, res) => {
 router.put('/virtual-models/:name', (req, res) => {
   const existing = modelsCore.getVirtualModel(req.params.name);
   if (!existing) return res.status(404).json({ error: 'not found' });
-  const { targets, enabled, note } = req.body || {};
+  const { targets, enabled, note, tags } = req.body || {};
   try {
     const v = modelsCore.upsertVirtualModel({
       public_name: existing.public_name,
       targets: targets ?? JSON.parse(existing.targets),
       enabled: enabled === undefined ? existing.enabled : enabled,
       note: note ?? existing.note,
+      tags: tags ?? existing.tags,
     });
     res.json({ ok: true, virtual: v });
   } catch (e) { res.status(400).json({ error: e.message }); }
