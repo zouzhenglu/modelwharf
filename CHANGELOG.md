@@ -2,6 +2,14 @@
 
 本文件记录面向用户的显著变更。版本与 git tag 一一对应；日期为 tag 创建日期。
 
+## [0.9.0] - 2026-10-15（未发布）
+
+### Changed
+- **项目更名**：dsh-free-api → **modelwharf（模型码头）**
+- 环境变量前缀 `DSH_*` → `WH_*`（旧 `DSH_*` 仍作别名兼容）
+- API key 前缀 `sk-dsh-` → `wh-`（旧 key 继续有效）；数据库文件名 `dsh.db` → `wharf.db`（旧库自动沿用，无需迁移）
+- ZCode 集成脚本改写 provider id 为 `modelwharf`，重跑会自动清理旧条目 `new-provider-dsh`
+
 ## [0.8.0] - 2026-10-15
 
 ### Added

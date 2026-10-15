@@ -1,12 +1,12 @@
 'use strict';
 /**
- * Wire dsh-free-api into ZCode as a custom OpenAI-compatible provider.
+ * Wire modelwharf into ZCode as a custom OpenAI-compatible provider.
  *
  * Writes two ZCode config files (with .bak backups, merge-not-overwrite):
  *   ~/.zcode/v2/config.json            provider entry: name/kind/options/models
  *   ~/.zcode/v2/provider_config.json   providerOrder + personalModelIds/modelOrder
  *
- * Usage: node scripts/zcode-integrate.js [--key sk-dsh-xxx] [--base http://localhost:8317]
+ * Usage: node scripts/zcode-integrate.js [--key wh-xxx] [--base http://localhost:8317]
  * Key defaults to the first enabled key in the gateway DB (creates one if none).
  */
 const fs = require('fs');
@@ -15,8 +15,16 @@ const os = require('os');
 const Database = require('better-sqlite3-multiple-ciphers');
 
 const ROOT = path.join(__dirname, '..');
+
+// 数据库文件：优先新名 wharf.db，兼容旧名 dsh.db（与 src/config.js 同规则）
+function dbFile() {
+  const fresh = path.join(ROOT, 'data', 'wharf.db');
+  const legacy = path.join(ROOT, 'data', 'dsh.db');
+  return fs.existsSync(fresh) || !fs.existsSync(legacy) ? fresh : legacy;
+}
 const ZCODE_DIR = path.join(os.homedir(), '.zcode', 'v2');
-const PROVIDER_ID = 'new-provider-dsh';
+const PROVIDER_ID = 'modelwharf';
+const LEGACY_PROVIDER_ID = 'new-provider-dsh'; // 前身 dsh-free-api 写入的旧条目，重跑时清理
 
 // --- args ---
 const args = process.argv.slice(2);
@@ -29,22 +37,22 @@ const BASE = argOf('--base', 'http://localhost:8317');
 // --- pick API key: --key > first enabled key in DB > create one ---
 let apiKey = argOf('--key', null);
 if (!apiKey) {
-  const db = new Database(path.join(ROOT, 'data', 'dsh.db'), { readonly: true });
+  const db = new Database(dbFile(), { readonly: true });
   const row = db.prepare('SELECT key FROM apikeys WHERE enabled=1 ORDER BY id LIMIT 1').get();
   apiKey = row?.key || null;
   db.close();
 }
 if (!apiKey) {
   const crypto = require('crypto');
-  apiKey = 'sk-dsh-' + crypto.randomBytes(24).toString('hex');
-  const db = new Database(path.join(ROOT, 'data', 'dsh.db'));
+  apiKey = 'wh-' + crypto.randomBytes(24).toString('hex');
+  const db = new Database(dbFile());
   db.prepare('INSERT INTO apikeys(key,name,allowed_models) VALUES(?,?,?)').run(apiKey, 'zcode', '*');
   db.close();
   console.log(`[zcode-integrate] no key existed — created gateway key "zcode": ${apiKey.slice(0, 12)}...`);
 }
 
 // --- which models does the gateway actually serve right now ---
-const gdb = new Database(path.join(ROOT, 'data', 'dsh.db'), { readonly: true });
+const gdb = new Database(dbFile(), { readonly: true });
 const virtuals = gdb.prepare('SELECT public_name FROM virtual_models WHERE enabled=1 ORDER BY public_name').all();
 const regulars = gdb.prepare(`
   SELECT m.public_name, MAX(m.ctx_window) ctx, MAX(m.multiplier) mult FROM models m
@@ -80,8 +88,9 @@ const cfgPath = path.join(ZCODE_DIR, 'config.json');
 const cfgBak = backup(cfgPath);
 const cfg = readJsonSafe(cfgPath) || { provider: {} };
 cfg.provider = cfg.provider || {};
+delete cfg.provider[LEGACY_PROVIDER_ID]; // 清掉旧名条目，避免重复
 cfg.provider[PROVIDER_ID] = {
-  name: 'dsh-free-api',
+  name: 'modelwharf',
   kind: 'openai-compatible',
   options: { apiKey, baseURL: BASE + '/v1', apiKeyRequired: true },
   source: 'custom',
@@ -99,12 +108,12 @@ const pcPath = path.join(ZCODE_DIR, 'provider_config.json');
 const pcBak = backup(pcPath);
 const pc = readJsonSafe(pcPath) || { schemaVersion: 1, config: {} };
 pc.config = pc.config || {};
-pc.config.providerOrder = [...(pc.config.providerOrder || []).filter(id => id !== PROVIDER_ID), PROVIDER_ID];
+pc.config.providerOrder = [...(pc.config.providerOrder || []).filter(id => id !== PROVIDER_ID && id !== LEGACY_PROVIDER_ID), PROVIDER_ID];
 pc.config.providerConfigRules = pc.config.providerConfigRules || {};
-pc.config.providerConfigRules.providerRules = (pc.config.providerConfigRules.providerRules || []).filter(r => r.providerId !== PROVIDER_ID);
+pc.config.providerConfigRules.providerRules = (pc.config.providerConfigRules.providerRules || []).filter(r => r.providerId !== PROVIDER_ID && r.providerId !== LEGACY_PROVIDER_ID);
 pc.config.providerConfigRules.providerRules.push({
   providerId: PROVIDER_ID,
-  providerName: 'dsh-free-api',
+  providerName: 'modelwharf',
   enabled: true,
   config: {
     group: 'standard-personal',
@@ -116,7 +125,7 @@ pc.config.providerConfigRules.providerRules.push({
 });
 // per-model rules (context window) so ZCode sizes prompts correctly
 pc.config.modelConfigRules = pc.config.modelConfigRules || {};
-pc.config.modelConfigRules.providerModelRules = (pc.config.modelConfigRules.providerModelRules || []).filter(r => r.providerId !== PROVIDER_ID);
+pc.config.modelConfigRules.providerModelRules = (pc.config.modelConfigRules.providerModelRules || []).filter(r => r.providerId !== PROVIDER_ID && r.providerId !== LEGACY_PROVIDER_ID);
 for (const id of modelIds) {
   pc.config.modelConfigRules.providerModelRules.push({
     modelId: id,
@@ -128,5 +137,5 @@ fs.writeFileSync(pcPath, JSON.stringify(pc, null, 2));
 console.log(`[zcode-integrate] ${pcPath} updated${pcBak ? ` (backup: ${path.basename(pcBak)})` : ''}`);
 
 console.log(`
-[zcode-integrate] Done. Restart ZCode, then pick provider "dsh-free-api" (统一模型: ${virtuals.length} 个).
+[zcode-integrate] Done. Restart ZCode, then pick provider "modelwharf" (统一模型: ${virtuals.length} 个).
 Gateway: ${BASE}  ·  Admin: ${BASE}/admin  ·  Key: ${apiKey.slice(0, 12)}…`);

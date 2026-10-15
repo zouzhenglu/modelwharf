@@ -1,6 +1,6 @@
-/* dsh-free-api admin console */
+/* modelwharf admin console */
 'use strict';
-let TOKEN = localStorage.getItem('dsh_token') || '';
+let TOKEN = localStorage.getItem('wharf_token') || '';
 let PAGE = 'dashboard';
 
 const $ = sel => document.querySelector(sel);
@@ -65,7 +65,7 @@ async function doLogin() {
     const r = await fetch('/admin/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: $('#pw').value }) });
     if (!r.ok) throw new Error('密码错误');
     const j = await r.json();
-    TOKEN = j.token; localStorage.setItem('dsh_token', TOKEN);
+    TOKEN = j.token; localStorage.setItem('wharf_token', TOKEN);
     boot();
   } catch (e) { toast(e.message, true); }
 }
@@ -494,7 +494,7 @@ async function syncAccountModels(id) {
     renderAccounts($('#main'));
   } catch (e) { toast('同步失败: ' + e.message, true); }
 }
-// 恢复在线目录（参照 dsh-llm-workbuddy 插件语义）：不追求上游报给账号的全部模型，
+// 恢复在线目录（参照 dsh-llm-workbuddy（本网关前身的 workbuddy 插件）语义）：不追求上游报给账号的全部模型，
 // 只取官方客户端实际显示的目录。支持在线目录的平台按账号取目录并替换列表；
 // 官方 API / 本地渠道没有客户端目录，退化为 /v1/models 在线目录的增量同步。
 async function restoreAccountModels(id, online) {
@@ -1307,7 +1307,7 @@ async function pgSend() {
       ? { model, stream, max_tokens: params.max_tokens || 1024, system: system || undefined, messages, temperature: params.temperature, top_p: params.top_p }
       : { model, stream, messages: system ? [{ role: 'system', content: system }, ...messages] : messages, ...params };
   Object.keys(wireBody).forEach(k => wireBody[k] === undefined && delete wireBody[k]);
-  const requestPreview = `POST ${protocol === 'responses' ? '/v1/responses' : '/v1/chat/completions'}\nAuthorization: Bearer sk-dsh-****\nContent-Type: application/json\n\n` +
+  const requestPreview = `POST ${protocol === 'responses' ? '/v1/responses' : '/v1/chat/completions'}\nAuthorization: Bearer wh-****\nContent-Type: application/json\n\n` +
     JSON.stringify(wireBody, null, 2);
   window._pgState = { requestPreview, rawEvents: [], liveText: '', statusHtml: '<p class="muted">请求中…</p>', protocol };
   pgRenderOut();
@@ -1399,7 +1399,7 @@ async function renderDocs(m) {
     : `（用你自己的 key 替换，当前可用的 Key：${d.keyNames.map(esc).join('、')} — 完整 key 只在创建时显示过）`;
   const curlEx = `curl ${d.base}/v1/chat/completions \\
   -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer sk-dsh-你的key" \\
+  -H "Authorization: Bearer wh-你的key" \\
   -d '{
     "model": "${esc(d.sampleModel)}",
     "messages": [{"role": "user", "content": "你好"}],
@@ -1407,7 +1407,7 @@ async function renderDocs(m) {
   }'`;
   const pyEx = `from openai import OpenAI
 
-client = OpenAI(base_url="${d.base}/v1", api_key="sk-dsh-你的key")
+client = OpenAI(base_url="${d.base}/v1", api_key="wh-你的key")
 
 resp = client.chat.completions.create(
     model="${esc(d.sampleModel)}",          # 模型列表见 GET /v1/models
@@ -1420,7 +1420,7 @@ for chunk in resp:
         print(delta.content, end="", flush=True)`;
   const ccEx = `# Claude Code（Anthropic 协议，网关自动转换）
 set ANTHROPIC_BASE_URL=${d.base}
-set ANTHROPIC_AUTH_TOKEN=sk-dsh-你的key
+set ANTHROPIC_AUTH_TOKEN=wh-你的key
 set ANTHROPIC_MODEL=${esc(d.sampleModel)}
 claude`;
   const aiPrompt = `请把下面的 AI 网关接入到当前项目的开发工具里，并验证可用：
@@ -1428,7 +1428,7 @@ claude`;
 网关地址：${d.base}（OpenAI 兼容 + Anthropic 兼容）
 - OpenAI 协议：\`${d.base}/v1/chat/completions\`（也有 \`/v1/responses\`、\`/v1/models\`）
 - Anthropic 协议：\`${d.base}/v1/messages\`（Claude Code 等工具用 \`ANTHROPIC_BASE_URL=${d.base}\`）
-- API Key：sk-dsh-***（用户会提供完整值；放入 \`Authorization: Bearer\` 头；Anthropic 工具放 \`ANTHROPIC_AUTH_TOKEN\`）
+- API Key：wh-***（用户会提供完整值；放入 \`Authorization: Bearer\` 头；Anthropic 工具放 \`ANTHROPIC_AUTH_TOKEN\`）
 - 模型：先请求 \`GET ${d.base}/v1/models\` 拿到可用列表（当前共 ${d.modelCount} 个，统一模型 ${d.virtualCount} 个），示例 model 名：\`${esc(d.sampleModel)}\`
 - 流式：请求体传 \`"stream": true\`，响应为 SSE（\`data: {...}\\n\\n\`，以 \`data: [DONE]\` 结束）
 - 验证：发一条最小对话请求确认能返回内容，失败时把上游错误原样上报给用户

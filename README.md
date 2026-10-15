@@ -1,4 +1,4 @@
-# dsh-free-api
+# modelwharf 模型码头
 
 多平台 AI 代理网关：把 **workbuddy(腾讯 CodeBuddy)、Trae(字节)、通义千问(chat.qwen.ai)、千问办公(QwenWork)、Qoder(阿里，国内/国际)、以及任意 OpenAI 兼容 API / 本地模型(Ollama)** 统一代理成标准 API，供各类 harness 工具（Claude Code、Cline、OpenClaw、Cursor 等）接入。自带网页管理面板。
 
@@ -71,14 +71,14 @@ npm start                 # 默认 http://localhost:8317
 | Responses API | `http://localhost:8317/v1` | Codex CLI、OpenAI Responses SDK |
 | MCP | `http://localhost:8317/mcp` | Claude Desktop、Cursor 等 MCP 客户端 |
 
-key 在面板生成（形如 `sk-dsh-...`）。未配置任何 key 时网关为**开放模式**（不带认证头即可访问，仅限本机使用）。
+key 在面板生成（形如 `wh-...`）。未配置任何 key 时网关为**开放模式**（不带认证头即可访问，仅限本机使用）。
 
 ### OpenAI 协议（Chat Completions）
 
 ```bash
 curl http://localhost:8317/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-dsh-..." \
+  -H "Authorization: Bearer wh-..." \
   -d '{"model": "glm-5.3", "messages": [{"role":"user","content":"你好"}], "stream": true}'
 ```
 
@@ -93,7 +93,7 @@ curl http://localhost:8317/v1/chat/completions \
 
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:8317
-export ANTHROPIC_AUTH_TOKEN=sk-dsh-...
+export ANTHROPIC_AUTH_TOKEN=wh-...
 claude
 ```
 
@@ -110,17 +110,17 @@ Codex 配置 `base_url = http://localhost:8317/v1`（Wire API 选 Responses）�
 面板 → MCP 服务 添加上游 MCP server（stdio / http 均可），网关把所有已启用服务的工具聚合暴露在 `http://localhost:8317/mcp`（Streamable HTTP，JSON-RPC：`initialize` / `tools/list` / `tools/call`），工具名格式 `服务id__工具名`。客户端配置：
 
 ```json
-{ "mcpServers": { "dsh-free-api": { "type": "http", "url": "http://localhost:8317/mcp" } } }
+{ "mcpServers": { "modelwharf": { "type": "http", "url": "http://localhost:8317/mcp" } } }
 ```
 
 ### ZCode 一键集成
 
 ```bash
 node scripts/zcode-integrate.js            # 自动取网关里第一个可用 key（没有就创建）
-node scripts/zcode-integrate.js --key sk-dsh-xxx --base http://localhost:8317
+node scripts/zcode-integrate.js --key wh-xxx --base http://localhost:8317
 ```
 
-写入前自动备份 `~/.zcode/v2/` 两个配置文件（合并写入、非覆盖），重启 ZCode 后选择提供商「dsh-free-api」。
+写入前自动备份 `~/.zcode/v2/` 两个配置文件（合并写入、非覆盖），重启 ZCode 后选择提供商「modelwharf」。
 
 ### 思考（reasoning）控制
 
@@ -147,17 +147,20 @@ node scripts/zcode-integrate.js --key sk-dsh-xxx --base http://localhost:8317
 
 ## 环境变量
 
+> 从前身 `dsh-free-api` 升级：`DSH_*` 环境变量仍然生效（作别名）；数据库沿用旧 `data/dsh.db`，自动识别，无需迁移；已生成的 `sk-dsh-` 开头的 key 继续有效。新部署请直接用下表新变量名。
+
+
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `DSH_PORT` | `8317` | 监听端口 |
-| `DSH_HOST` | `0.0.0.0` | 监听地址（仅本机用可设 `127.0.0.1`） |
-| `DSH_ADMIN_PASSWORD` | `admin` | 面板登录密码 |
-| `DSH_API_KEYS` | 空 | 逗号分隔的静态 key；不设且面板未建 key 时为开放模式 |
-| `DSH_DATA_DIR` | `./data` | SQLite 数据目录（凭证存这里，勿外传） |
-| `DSH_LOG_DIR` | `./logs` | 日志目录 |
-| `DSH_SESSION_SECRET` | 随机 | 面板会话签名密钥（重启后登录态失效，长期使用建议固定） |
-| `DSH_REQUEST_TIMEOUT_MS` | `300000` | 上游请求超时 |
-| `DSH_LOG_RETENTION_DAYS` | `30` | 用量日志保留天数 |
+| `WH_PORT` | `8317` | 监听端口 |
+| `WH_HOST` | `0.0.0.0` | 监听地址（仅本机用可设 `127.0.0.1`） |
+| `WH_ADMIN_PASSWORD` | `admin` | 面板登录密码 |
+| `WH_API_KEYS` | 空 | 逗号分隔的静态 key；不设且面板未建 key 时为开放模式 |
+| `WH_DATA_DIR` | `./data` | SQLite 数据目录（凭证存这里，勿外传） |
+| `WH_LOG_DIR` | `./logs` | 日志目录 |
+| `WH_SESSION_SECRET` | 随机 | 面板会话签名密钥（重启后登录态失效，长期使用建议固定） |
+| `WH_REQUEST_TIMEOUT_MS` | `300000` | 上游请求超时 |
+| `WH_LOG_RETENTION_DAYS` | `30` | 用量日志保留天数 |
 
 ## 功能对照需求
 
@@ -214,7 +217,7 @@ node scripts/zcode-integrate.js --key sk-dsh-xxx --base http://localhost:8317
 
 ## Git 管理
 
-- `main` 稳定发布分支，每个发布打 tag（最新 `v0.8.1`，见 [CHANGELOG.md](CHANGELOG.md)）
+- `main` 稳定发布分支，每个发布打 tag（见 [CHANGELOG.md](CHANGELOG.md)）
 - `dev` 开发分支，功能验证后合入 main 并打 tag
 - `data/`（数据库）、`logs/`、`.env` 均已 gitignore，凭证不会入库
 - 许可证：MIT（见 [LICENSE](LICENSE)；`src/providers/_qwenwork_wasm_helper.mjs` 来自 Buddy2api，同为 MIT）

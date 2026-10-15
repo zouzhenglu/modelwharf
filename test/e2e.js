@@ -13,7 +13,7 @@ const os = require('os');
 
 const PORT = 8397;
 const BASE = `http://localhost:${PORT}`;
-const TMPDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-e2e-'));
+const TMPDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'wharf-e2e-'));
 let TOKEN = '';
 let serverProc = null;
 
@@ -238,7 +238,7 @@ async function main() {
   await t('mcp initialize + tools/list (empty ok)', async () => {
     const r = await call('POST', '/mcp', { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
     assert.equal(r.status, 200);
-    assert.equal(r.json.result.serverInfo.name, 'dsh-free-api-mcp');
+    assert.equal(r.json.result.serverInfo.name, 'modelwharf-mcp');
     const r2 = await call('POST', '/mcp', { jsonrpc: '2.0', id: 2, method: 'tools/list' });
     assert.equal(r2.status, 200);
     assert.ok(Array.isArray(r2.json.result.tools));

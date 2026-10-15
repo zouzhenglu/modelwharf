@@ -21,7 +21,7 @@ const router = express.Router();
 // ---------- session auth ----------
 const sessions = new Map(); // token -> expiry
 function requireAuth(req, res, next) {
-  const token = (req.headers['authorization'] || '').replace(/^Bearer /, '') || req.cookies?.dsh_session || req.query.session;
+  const token = (req.headers['authorization'] || '').replace(/^Bearer /, '') || req.cookies?.wharf_session || req.query.session;
   if (token && sessions.has(token) && sessions.get(token) > Date.now()) return next();
   res.status(401).json({ error: 'unauthorized' });
 }
@@ -375,7 +375,7 @@ router.get('/apikeys', (req, res) => {
 });
 router.post('/apikeys', (req, res) => {
   const { name, allowed_models = '*', rpm_limit = 0, daily_limit = 0 } = req.body || {};
-  const key = 'sk-dsh-' + crypto.randomBytes(24).toString('hex');
+  const key = 'wh-' + crypto.randomBytes(24).toString('hex');
   const r = db.prepare('INSERT INTO apikeys(key,name,allowed_models,rpm_limit,daily_limit) VALUES(?,?,?,?,?)').run(key, name || null, allowed_models, rpm_limit, daily_limit);
   res.json({ ok: true, id: r.lastInsertRowid, key }); // full key shown once
 });
@@ -838,7 +838,7 @@ router.post('/test/chat', async (req, res) => {
 
 // logs tail
 router.get('/logs', (req, res) => {
-  const file = path.join(config.logDir, 'dsh.log');
+  const file = path.join(config.logDir, 'wharf.log');
   if (!fs.existsSync(file)) return res.json({ lines: [] });
   const data = fs.readFileSync(file, 'utf8').trimEnd().split('\n');
   res.json({ lines: data.slice(-Number(req.query.size || 200)) });

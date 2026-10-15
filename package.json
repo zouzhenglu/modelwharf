@@ -1,7 +1,7 @@
 {
-  "name": "dsh-free-api",
-  "version": "0.8.0",
-  "description": "Multi-platform AI proxy: workbuddy / trae / qwen / qoder / qodercn -> OpenAI & Anthropic compatible API with admin panel",
+  "name": "modelwharf",
+  "version": "0.9.0",
+  "description": "modelwharf — 模型码头: multi-platform AI proxy (workbuddy/trae/qwen/qoder + 24 official vendors) -> OpenAI & Anthropic & MCP compatible API with admin panel",
   "main": "src/server.js",
   "type": "commonjs",
   "private": true,

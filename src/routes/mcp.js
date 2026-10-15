@@ -94,7 +94,7 @@ function rpcCall(server, method, params) {
 }
 
 async function initialize(server) {
-  await rpcCall(server, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'dsh-free-api', version: '0.1.0' } });
+  await rpcCall(server, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'modelwharf', version: '0.1.0' } });
   if (server.transport === 'stdio') rpcCall(server, 'notifications/initialized', {}).catch(() => {});
 }
 
@@ -125,11 +125,11 @@ router.get('/', (req, res) => {
 code{background:#1e222b;border:1px solid #2a2f3a;border-radius:6px;padding:2px 8px;font-family:ui-monospace,Consolas,monospace;font-size:13px}
 .card{background:#171a21;border:1px solid #2a2f3a;border-radius:12px;padding:20px 24px;margin:16px 0}</style></head><body>
 <h1>🛰 MCP Gateway</h1>
-<div class="card"><p>这是 dsh-free-api 的 MCP 网关端点，使用 <b>JSON-RPC over HTTP</b>（Streamable HTTP 传输）。</p>
+<div class="card"><p>这是 modelwharf 的 MCP 网关端点，使用 <b>JSON-RPC over HTTP</b>（Streamable HTTP 传输）。</p>
 <p>客户端配置（如 Claude Desktop / Cursor 的 mcp 配置）：</p>
 <pre style="background:#1e222b;border:1px solid #2a2f3a;border-radius:8px;padding:12px;overflow:auto">{
   "mcpServers": {
-    "dsh-free-api": {
+    "modelwharf": {
       "type": "http",
       "url": "http://localhost:8317/mcp"
     }
@@ -144,7 +144,7 @@ router.post('/', async (req, res) => {
   const { method, params, id } = req.body || {};
   try {
     if (method === 'initialize') {
-      return res.json({ jsonrpc: '2.0', id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'dsh-free-api-mcp', version: '0.1.0' } } });
+      return res.json({ jsonrpc: '2.0', id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'modelwharf-mcp', version: '0.1.0' } } });
     }
     if (method === 'notifications/initialized' || method === 'notifications/cancelled') return res.status(202).end();
     if (method === 'tools/list') {

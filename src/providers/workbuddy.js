@@ -405,7 +405,7 @@ module.exports = {
   },
 
   // ---------- OAuth device-flow login (添加账号自动跳授权页) ----------
-  // Port of @axiaohungry/dsh-llm-workbuddy loginWorkBuddy():
+  // Ported from the workbuddy plugin of the author's earlier dsh-llm project (loginWorkBuddy()):
   //   POST /v2/plugin/auth/state?platform=CLI -> {state, authUrl}
   //   open authUrl in browser -> user logs in
   //   poll GET /v2/plugin/auth/token?state=... until tokens arrive (10min)

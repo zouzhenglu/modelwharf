@@ -33,7 +33,7 @@ app.get('/docs/api.md', (req, res) => {
   const models = modelsCore.listPublicModels();
   const open = config.apiKeys.length === 0 && db.prepare('SELECT COUNT(*) c FROM apikeys').get().c === 0;
   const sample = models[0]?.public_name || 'glm-5.3';
-  const md = `# dsh-free-api 接入说明（AI 可读）
+  const md = `# modelwharf 接入说明（AI 可读）
 
 一个把多个 AI 平台聚合成标准 API 的本地网关。本文档供 AI 助手阅读后直接完成接入。
 
@@ -44,7 +44,7 @@ app.get('/docs/api.md', (req, res) => {
 - 健康检查: \`GET ${base}/health\`
 
 ## 认证
-${open ? '当前网关为开放模式（未配置任何 API Key），可不带认证头。' : `请求头 \`Authorization: Bearer <key>\`。key 由网关主人提供（管理面板 ${base}/admin 生成），形如 \`sk-dsh-...\`。Anthropic 工具用 \`x-api-key\` 或 \`ANTHROPIC_AUTH_TOKEN\`。`}
+${open ? '当前网关为开放模式（未配置任何 API Key），可不带认证头。' : `请求头 \`Authorization: Bearer <key>\`。key 由网关主人提供（管理面板 ${base}/admin 生成），形如 \`wh-...\`。Anthropic 工具用 \`x-api-key\` 或 \`ANTHROPIC_AUTH_TOKEN\`。`}
 当前生效 key 的名字（非完整值）: ${db.prepare('SELECT name FROM apikeys WHERE enabled=1').all().map(k => k.name || '(未命名)').join(', ') || '（无，开放模式）'}
 
 ## 模型
@@ -58,7 +58,7 @@ ${models.slice(0, 40).map(m => `- \`${m.public_name}\`（${m.provider_id}${m.is_
 \`\`\`bash
 curl ${base}/v1/chat/completions \\
   -H "Content-Type: application/json" \\
-  ${open ? '' : '-H "Authorization: Bearer sk-dsh-..." \\\n  '}-d '{"model": "${sample}", "messages": [{"role":"user","content":"你好"}], "stream": true}'
+  ${open ? '' : '-H "Authorization: Bearer wh-..." \\\n  '}-d '{"model": "${sample}", "messages": [{"role":"user","content":"你好"}], "stream": true}'
 \`\`\`
 
 流式响应为标准 SSE（\`data: {JSON}\\n\\n\`，以 \`data: [DONE]\` 结束）；非流式返回标准 OpenAI chat.completion JSON。
@@ -96,12 +96,12 @@ function start() {
   adminRoutes.setupCheckin?.();   // 自动签到调度（默认每日 09:00，启动补签）
   const server = app.listen(config.port, config.host, () => {
     // PID file for stop.bat
-    try { fs.writeFileSync(path.join(config.dataDir, 'dsh.pid'), String(process.pid)); } catch {}
-    const cleanup = () => { try { fs.unlinkSync(path.join(config.dataDir, 'dsh.pid')); } catch {} };
+    try { fs.writeFileSync(path.join(config.dataDir, 'wharf.pid'), String(process.pid)); } catch {}
+    const cleanup = () => { try { fs.unlinkSync(path.join(config.dataDir, 'wharf.pid')); } catch {} };
     process.on('exit', cleanup);
     process.on('SIGINT', () => { cleanup(); process.exit(0); });
     process.on('SIGTERM', () => { cleanup(); process.exit(0); });
-    logger.info(`dsh-free-api v${config.version} listening on http://${config.host}:${config.port}`);
+    logger.info(`modelwharf v${config.version} listening on http://${config.host}:${config.port}`);
     logger.info(`admin panel: http://localhost:${config.port}/admin  (password: ${config.adminPassword === 'admin' ? 'admin (default, change it!)' : '(from env/settings)'})`);
   });
   server.on('error', (e) => { logger.error(`listen failed: ${e.message}`); process.exit(1); });
