@@ -1,0 +1,12 @@
+.git
+.github
+.zcode
+data/
+logs/
+node_modules/
+test/
+*.log
+*.bat
+.env
+Dockerfile
+.dockerignore

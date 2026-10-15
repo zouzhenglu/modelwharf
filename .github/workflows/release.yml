@@ -1,0 +1,51 @@
+name: Release
+
+# 打 tag（v*）自动发布：先跑测试，通过后创建 GitHub Release，
+# 附源码 zip，说明取自 CHANGELOG.md 对应版本小节。
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run e2e tests
+        run: npm test
+
+      - name: Build source zip
+        run: git archive --format=zip --prefix=modelwharf-${GITHUB_REF_NAME}/ -o modelwharf-${GITHUB_REF_NAME}.zip HEAD
+
+      - name: Extract release notes from CHANGELOG
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          awk -v ver="$VER" '
+            $0 ~ "^## \\[" ver "\\]" { found = 1; next }
+            /^## \[/ && found { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "CHANGELOG.md 中未找到 $VER 小节，改用占位说明。" > release-notes.md
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          EXTRA=""
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then EXTRA="--prerelease"; fi
+          gh release create "$GITHUB_REF_NAME" "modelwharf-${GITHUB_REF_NAME}.zip" \
+            --title "modelwharf $GITHUB_REF_NAME" \
+            --notes-file release-notes.md $EXTRA

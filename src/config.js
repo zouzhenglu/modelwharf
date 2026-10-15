@@ -38,7 +38,7 @@ const config = {
   apiKeys: (env('WH_API_KEYS', 'DSH_API_KEYS') || '').split(',').map(s => s.trim()).filter(Boolean),
   requestTimeoutMs: parseInt(env('WH_REQUEST_TIMEOUT_MS', 'DSH_REQUEST_TIMEOUT_MS') || '300000', 10),
   logRetentionDays: parseInt(env('WH_LOG_RETENTION_DAYS', 'DSH_LOG_RETENTION_DAYS') || '30', 10),
-  version: '0.10.0',
+  version: '0.11.0',
 };
 
 module.exports = config;

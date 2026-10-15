@@ -25,7 +25,7 @@ harness 工具 ──►  本网关 (OpenAI /v1  +  Anthropic /v1/messages  +  M
 
 ## 快速开始
 
-要求：Node.js ≥ 20（Windows 可直接双击 `start.bat`，停止用 `stop.bat`）。
+要求：Node.js ≥ 22.19（Windows 可直接双击 `start.bat`，停止用 `stop.bat`）。
 
 ```bash
 npm install
@@ -238,6 +238,26 @@ node scripts/zcode-integrate.js --key wh-xxx --base http://localhost:8317
 npm install
 npm test           # 54 个端到端用例（自带隔离服务 + mock 上游，不依赖真实账号）
 ```
+
+## 自动化（GitHub Actions）
+
+| 工作流 | 触发 | 做什么 |
+|---|---|---|
+| `ci.yml` | push `main`/`dev`、任何 PR | Linux + Windows × Node 22/24 四路跑全部端到端用例 |
+| `release.yml` | push tag `v*` | 测试通过后自动创建 GitHub Release，附源码 zip，发布说明取自 CHANGELOG 对应小节 |
+| `docker.yml` | push `main`、push tag `v*` | 自动构建镜像推 GHCR：`main` → `:main`，tag → `:x.y.z` / `:x.y` / `:latest` |
+
+```bash
+# 发版：打 tag 即自动出 Release + Docker 镜像
+git tag v0.11.0 && git push origin v0.11.0
+
+# 部署（数据与日志挂卷持久化）
+docker run -d -p 8317:8317 -v wharf-data:/app/data -v wharf-logs:/app/logs \
+  ghcr.io/zouzhenglu/modelwharf:latest
+```
+
+> 首次推送镜像后，GHCR 上的包默认是 private，需在包设置里改为 public 才能匿名拉取。
+> 千问办公（qwenwork）依赖本机客户端的 wasm 签名，容器内无法使用该 provider，其余全部可用。
 
 ## 安全说明
 
