@@ -85,7 +85,9 @@ curl http://localhost:8317/v1/chat/completions \
 - 模型清单：`GET /v1/models`（key 限定了 allowed_models 时只返回该 key 可用的）
 - 认证三选一：`Authorization: Bearer <key>`、`x-api-key: <key>`、`?key=<key>`
 - 支持流式 SSE、非流式、`tools`/`tool_choice` 工具调用、图片输入（`image_url`，base64 或 URL）
-- 兼容 `POST /v1/completions`（legacy 补全，基础支持）
+- 采样参数透传给 OpenAI 兼容上游：`temperature` / `top_p` / `max_tokens` / `stop` / `seed` / `presence_penalty` / `frequency_penalty` / `logprobs` / `top_logprobs` / `n`（`n>1` 多选完整往返）
+- 向量：`POST /v1/embeddings`（OpenAI 兼容上游透传，逆向平台返回 501）
+- 兼容 `POST /v1/completions`（legacy 补全，含 `n>1` 多选；流式 `n>1` 报 400）
 
 **Cline / Cursor / 其他 OpenAI 兼容工具**：Base URL 填 `http://localhost:8317/v1`，API Key 填面板生成的 key，模型从 `/v1/models` 里选。
 
@@ -99,6 +101,8 @@ claude
 
 - 端点：`POST /v1/messages`（流式 SSE 事件与官方一致：`message_start` / `content_block_*` / `message_delta` / `message_stop`）
 - 支持 system（字符串或 blocks）、多轮对话、图片（base64/URL）、`tools` 工具调用（`tool_use`/`tool_result`）、thinking 输出块
+- `POST /v1/messages/count_tokens` 可用（本地估算，供 Claude Code 等做上下文预算）
+- 请求体 `thinking: {type, budget_tokens}` 直接支持（预算→思考档位映射；模型名后缀优先）
 - `GET /v1/models` 返回 Anthropic 形式模型列表
 
 ### Responses API（Codex CLI）
@@ -107,7 +111,13 @@ Codex 配置 `base_url = http://localhost:8317/v1`（Wire API 选 Responses）�
 
 ### MCP 网关
 
-面板 → MCP 服务 添加上游 MCP server（stdio / http 均可），网关把所有已启用服务的工具聚合暴露在 `http://localhost:8317/mcp`（Streamable HTTP，JSON-RPC：`initialize` / `tools/list` / `tools/call`），工具名格式 `服务id__工具名`。客户端配置：
+面板 → MCP 服务 添加上游 MCP server（stdio / http 均可），网关把所有已启用服务的 **tools / resources / prompts** 聚合暴露在 `http://localhost:8317/mcp`（Streamable HTTP，JSON-RPC）：
+
+- `tools/list` / `tools/call`、`prompts/list` / `prompts/get`：名称格式 `服务id__名称`
+- `resources/list` / `resources/read`：资源 URI 带 `mcpres://服务id/…` 前缀（模板占位符原样保留）
+- 认证与 `/v1` 相同：配置了 API key 后须带 key，未配置任何 key 时开放
+
+客户端配置：
 
 ```json
 { "mcpServers": { "modelwharf": { "type": "http", "url": "http://localhost:8317/mcp" } } }
@@ -134,6 +144,8 @@ node scripts/zcode-integrate.js --key wh-xxx --base http://localhost:8317
 | `<model>-nothink` | 关闭思考 |
 
 后缀会按各平台协议自动映射（OpenAI 系 `reasoning_effort`、千问系 `enable_thinking`/`thinking_budget`、智谱/豆包 `thinking.type` 等）。
+
+用 Anthropic 协议时也可以直接传 `thinking: {type: "enabled", budget_tokens: N}`（预算 ≥16384→high、≥4096→medium、其余 low；`{type:"disabled"}` 关思考）；模型名后缀与该字段同时存在时**后缀优先**。
 
 ## 三、给 AI 看的接入说明
 
@@ -175,9 +187,10 @@ node scripts/zcode-integrate.js --key wh-xxx --base http://localhost:8317
 | 扩展接口 | provider 插件协议（见 `src/core/registry.js` 注释）；新增平台=一个文件；已内置 24 个官方厂商 + openai-compat/ollama 通用插件 |
 | 账号-模型绑定管理 | 模型层面启停 + API key 级 `allowed_models` 白名单 |
 | 本地集成 | 「导入本机登录」扫描 Trae/CodeBuddy/Qoder（国内版+国际版分别扫）/千问办公客户端 的本地凭证文件 |
+| 负载均衡/故障转移 | 虚拟（统一）模型多目标：顺序故障转移 / 加权随机 / 最少连接 三种策略，失败自动切换；单平台内账号按优先级+轮询 |
 | 主流协议 | OpenAI `/v1/chat/completions`、`/v1/completions`、`/v1/models`、`/v1/embeddings`；Responses `/v1/responses`；Anthropic `/v1/messages`（含 thinking/tool_use/count_tokens）；MCP 网关（tools/resources/prompts） |
 
-## 已实现 / 未实现（如实清单）
+## 已实现 / 能力边界（如实清单）
 
 **已实现**：
 
