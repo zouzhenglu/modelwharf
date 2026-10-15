@@ -266,17 +266,23 @@ pre{
 th.sortable{cursor:pointer;user-select:none}
 th.sortable:hover{color:var(--text-dim)}
 .sort-ind{font-size:9px;margin-left:3px;opacity:.75}
-/* 统一模型目标链 chips */
-.tchain{display:flex;flex-wrap:wrap;gap:4px;max-width:560px}
+/* 统一模型目标链（垂直列表，从上到下 = 优先级从高到低） */
+.tchain{display:flex;flex-direction:column;align-items:flex-start;gap:4px;max-width:340px}
 .tchip{
-  display:inline-flex;align-items:center;gap:5px;background:var(--accent-soft);
+  display:inline-flex;align-items:center;gap:6px;background:var(--accent-soft);
   border:1px solid var(--accent-border);color:var(--accent);border-radius:7px;
-  padding:1px 8px 1px 2px;font-size:11px;font-family:var(--mono);line-height:1.6;white-space:nowrap;
+  padding:1px 9px 1px 2px;font-size:11px;font-family:var(--mono);line-height:1.7;white-space:nowrap;
 }
 .tchip i{
   font-style:normal;min-width:15px;height:15px;border-radius:5px;background:rgba(91,157,255,.28);
   display:inline-flex;align-items:center;justify-content:center;font-size:9.5px;font-family:var(--font);
 }
+/* 目标健康点：该目标所属平台的账号池真实状态（active=绿 cooling=黄 无可用=红 未配置=灰） */
+.tdot{width:7px;height:7px;border-radius:50%;flex-shrink:0;box-shadow:0 0 4px currentColor}
+.tdot.ok{background:var(--green);color:var(--green)}
+.tdot.warn{background:var(--yellow);color:var(--yellow)}
+.tdot.bad{background:var(--red);color:var(--red)}
+.tdot.none{background:var(--muted);color:transparent}
 /* 响应式 */
 @media (max-width:900px){
   nav{width:64px;padding:20px 8px}
