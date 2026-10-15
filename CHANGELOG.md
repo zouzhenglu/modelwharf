@@ -2,7 +2,7 @@
 
 本文件记录面向用户的显著变更。版本与 git tag 一一对应；日期为 tag 创建日期。
 
-## [0.10.0] - 2026-10-15（未发布）
+## [0.10.0] - 2026-10-15
 
 ### Added
 - **`POST /v1/embeddings`**：OpenAI 兼容上游（openai-compat / 官方厂商 / ollama）透传 embeddings；虚拟模型同样支持故障转移；逆向平台无 embeddings 能力时明确报 501
@@ -23,7 +23,7 @@
 - **`/mcp` 端点鉴权**：与 `/v1` 网关同语义——配置了 API key 后必须携带 key，未配置任何 key 时保持开放模式
 - 测试扩容：34 → 54 个端到端用例（embeddings / count_tokens / thinking 映射 / 采样参数 / MCP 鉴权与聚合 / 负载均衡 / 多选与 legacy completions）
 
-## [0.9.0] - 2026-10-15（未发布）
+## [0.9.0] - 2026-10-15
 
 ### Changed
 - **项目更名**：dsh-free-api → **modelwharf（模型码头）**
