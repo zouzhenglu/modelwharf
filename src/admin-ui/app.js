@@ -598,6 +598,16 @@ async function saveAccount(id) {
 }
 
 // ---------- models ----------
+/** 模型 tags → 语义着色小徽章（thinking 蓝 / vision 绿 / tools 黄 / Nk 紫 / 其余灰） */
+function modelTagBadges(tags) {
+  const list = String(tags || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!list.length) return '<span class="muted">-</span>';
+  return list.map(t => {
+    const cls = /thinking/i.test(t) ? 'think' : /vision/i.test(t) ? 'vision' : /tools/i.test(t) ? 'tools'
+      : /^\d+k$/i.test(t) ? 'ctx' : 'other';
+    return `<span class="mtag ${cls}">${esc(t)}</span>`;
+  }).join('');
+}
 let modelFilter = { provider_id: '', search: '', enabled: '', tag: '' };
 async function renderModels(m) {
   const [providers, models] = await Promise.all([
@@ -630,18 +640,20 @@ async function renderModels(m) {
     <button class="small ghost" onclick="batchDevVariants()">隐藏 __dev 变体</button>
   </div>
   <div class="table-wrap">
-  <table><tr><th style="width:26px"></th><th>对外名称</th><th>平台</th><th>上游模型</th><th>倍率</th><th>免费</th><th>可用账号</th><th>标签</th><th>启用</th><th>操作</th></tr>
+  <table style="table-layout:fixed">
+    <colgroup><col style="width:30px"><col style="width:22%"><col style="width:90px"><col style="width:14%"><col style="width:56px"><col style="width:64px"><col style="width:60px"><col><col style="width:52px"><col style="width:118px"></colgroup>
+    <tr><th style="width:26px"></th><th>对外名称</th><th>平台</th><th>上游模型</th><th>倍率</th><th>免费</th><th>账号</th><th>能力标签</th><th>启用</th><th>操作</th></tr>
   ${models.map(md => `<tr>
     <td><input type="checkbox" class="mfCheck" value="${md.id}" style="width:auto"></td>
-    <td class="mono"><b>${esc(md.public_name)}</b>${md.note ? `<div class="muted">${esc(md.note)}</div>` : ''}</td>
-    <td>${esc(md.provider_id)}</td>
-    <td class="mono muted">${esc(md.upstream_model)}</td>
+    <td style="overflow:hidden;text-overflow:ellipsis"><span class="mono" style="font-weight:600">${esc(md.public_name)}</span>${md.note ? `<div class="muted" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(md.note)}</div>` : ''}</td>
+    <td><span class="badge gray">${esc(md.provider_id)}</span></td>
+    <td class="mono muted" style="overflow:hidden;text-overflow:ellipsis" title="${esc(md.upstream_model)}">${esc(md.upstream_model)}</td>
     <td>${md.multiplier}x</td>
-    <td>${md.is_free ? badge('免费', 'green') : badge('计费', 'gray')}</td>
+    <td>${md.is_free ? badge('免费', 'green') : '<span class="muted">计费</span>'}</td>
     <td>${md.account_count}</td>
-    <td class="muted">${esc(md.tags || '')}</td>
+    <td style="overflow:hidden">${modelTagBadges(md.tags)}</td>
     <td>${switchHtml(md.enabled, `toggleModel(${md.id})`)}</td>
-    <td><button class="small ghost" onclick="openModelForm(${md.id})">编辑</button>
+    <td style="white-space:nowrap"><button class="small ghost" onclick="openModelForm(${md.id})">编辑</button>
         <button class="small ghost danger" onclick="delModel(${md.id})">删</button></td>
   </tr>`).join('')}
   ${!models.length ? emptyRow(10, '🧩', '暂无模型 — 添加账号后在上方选择平台「开始同步」，或手动添加') : ''}

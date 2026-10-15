@@ -283,6 +283,16 @@ th.sortable:hover{color:var(--text-dim)}
 .tdot.warn{background:var(--yellow);color:var(--yellow)}
 .tdot.bad{background:var(--red);color:var(--red)}
 .tdot.none{background:var(--muted);color:transparent}
+/* 模型能力小徽章（模型管理标签列：按语义着色） */
+.mtag{
+  display:inline-block;padding:1px 8px;border-radius:6px;font-size:10.5px;font-weight:550;
+  line-height:1.6;white-space:nowrap;margin:1px 3px 1px 0;font-family:var(--mono);
+}
+.mtag.think{background:var(--accent-soft);color:var(--accent)}
+.mtag.vision{background:var(--green-soft);color:var(--green)}
+.mtag.tools{background:var(--yellow-soft);color:var(--yellow)}
+.mtag.ctx{background:var(--purple-soft);color:var(--purple)}
+.mtag.other{background:rgba(116,128,154,.13);color:var(--text-dim)}
 /* 响应式 */
 @media (max-width:900px){
   nav{width:64px;padding:20px 8px}
