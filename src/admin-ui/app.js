@@ -147,44 +147,302 @@ function providerOptgroups(providers, selectedId, skipOther) {
     `<optgroup label="${esc(g.name)}">${g.providers.map(p =>
       `<option value="${p.id}" ${selectedId === p.id ? 'selected' : ''}>${esc(p.label)}</option>`).join('')}</optgroup>`).join('');
 }
-/** 24h 趋势柱状图（仪表盘/用量页共用） */
-function chartHtml(chart, height = 120) {
-  const maxReqs = Math.max(1, ...chart.series.map(s => s.reqs));
-  const step = Math.ceil(chart.series.length / 12);
+// ---------- 图表引擎（纯 SVG 手绘，无外部依赖） ----------
+const CHARTS = {};                 // 图表 id -> { kind, chart, height }
+let chartSeq = 0;
+const trendUI = { metric: 'reqs', type: 'line' };   // 指标/形态选择，仪表盘与用量页共用
+const TREND_METRICS = [['reqs', '请求量'], ['errors', '失败数'], ['tokens', 'Token'], ['credits', '积分'], ['lat', '耗时']];
+const TREND_TYPES = [['line', '折线'], ['area', '面积'], ['bar', '柱状']];
+const SERIES_COLORS = ['var(--accent)', 'var(--cyan)', 'var(--purple)', 'var(--green)', 'var(--yellow)', 'var(--red)'];
+
+function fmtCompact(n) {
+  n = Number(n) || 0;
+  const a = Math.abs(n);
+  if (a >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+  if (a >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (a >= 1e4) return (n / 1e3).toFixed(0) + 'k';
+  if (a >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+function fmtMetric(v, metric) {
+  if (metric === 'credits') return (Number(v) || 0).toFixed(2);
+  if (metric === 'lat') return fmtCompact(Math.round(v)) + 'ms';
+  return fmtCompact(v);
+}
+function niceMax(v) {
+  if (v <= 0) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(v)));
+  const d = v / p;
+  return (d <= 1 ? 1 : d <= 2 ? 2 : d <= 2.5 ? 2.5 : d <= 5 ? 5 : 10) * p;
+}
+/** 指标 -> 曲线组（请求量拆成功/失败，Token 拆输入/输出，耗时拆平均/最大） */
+function trendSeries(buckets, metric) {
+  if (metric === 'errors') return [{ name: '失败', color: 'var(--red)', values: buckets.map(b => b.errors) }];
+  if (metric === 'tokens') return [
+    { name: '输入 tok', color: 'var(--cyan)', values: buckets.map(b => b.tin) },
+    { name: '输出 tok', color: 'var(--purple)', values: buckets.map(b => b.tout) },
+  ];
+  if (metric === 'credits') return [{ name: '积分', color: 'var(--yellow)', values: buckets.map(b => b.credits) }];
+  if (metric === 'lat') return [
+    { name: '平均耗时', color: 'var(--green)', values: buckets.map(b => b.lat) },
+    { name: '最大耗时', color: 'var(--muted)', dashed: true, values: buckets.map(b => b.latMax) },
+  ];
+  return [
+    { name: '成功', color: 'var(--accent)', values: buckets.map(b => b.reqs - b.errors) },
+    { name: '失败', color: 'var(--red)', values: buckets.map(b => b.errors) },
+  ];
+}
+function bucketTime(bucket, bucketSec) {
+  const d = new Date(bucket * 1000);
+  const p = x => String(x).padStart(2, '0');
+  return bucketSec === 3600
+    ? `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:00`
+    : `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+/** 趋势图：指标/形态切换 + 坐标轴 + 悬浮明细 + 图例 + 窗口汇总；返回外壳，由 bindCharts 绘制 */
+function trendChartHtml(chart, height = 180) {
+  const id = 'cht' + (++chartSeq);
+  CHARTS[id] = { kind: 'trend', chart, height };
   return `
-  <div style="display:flex;align-items:flex-end;gap:3px;height:${height}px;padding:0 4px">
-    ${chart.series.map(s => `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%" title="${s.label} · ${s.reqs} 请求 · 失败 ${s.errors}">
-      <div style="width:70%;background:${s.errors ? 'linear-gradient(180deg,var(--red),var(--accent))' : 'linear-gradient(180deg,var(--accent),rgba(91,157,255,.35))'};border-radius:4px 4px 0 0;height:${Math.round(s.reqs / maxReqs * 92)}%;min-height:${s.reqs ? '4px' : '0'};box-shadow:0 0 6px rgba(91,157,255,.25)"></div>
-    </div>`).join('')}
+  <div class="toolbar" style="margin-bottom:10px;gap:10px">
+    <div class="chart-tabs">${TREND_METRICS.map(([k, l]) => `<a data-metric="${k}" onclick="trendSet('${id}','metric','${k}')"${trendUI.metric === k ? ' class="active"' : ''}>${l}</a>`).join('')}</div>
+    <span class="spacer"></span>
+    <div class="chart-tabs">${TREND_TYPES.map(([k, l]) => `<a data-type="${k}" onclick="trendSet('${id}','type','${k}')"${trendUI.type === k ? ' class="active"' : ''}>${l}</a>`).join('')}</div>
   </div>
-  <div style="display:flex;gap:3px;padding:6px 4px 0">
-    ${chart.series.filter((s, i) => i % step === 0).map(s => `<span class="muted mono" style="flex:1;font-size:10px;text-align:center">${s.label}</span>`).join('')}
+  <div class="chart-box" id="${id}" data-chart="${id}"></div>
+  ${trendChipsHtml(chart)}`;
+}
+/** 窗口汇总条：总请求/失败率/峰值/tok/积分/耗时，一眼看清数值含义 */
+function trendChipsHtml(chart) {
+  const s = chart.series;
+  const sum = k => s.reduce((a, b) => a + (b[k] || 0), 0);
+  const reqs = sum('reqs'), errors = sum('errors');
+  const peak = s.reduce((a, b) => (b.reqs > (a ? a.reqs : -1) ? b : a), null);
+  const latAvg = reqs ? Math.round(s.reduce((a, b) => a + b.lat * b.reqs, 0) / reqs) : 0;
+  return `<div class="chart-chips">
+    <span class="chip">总请求 <b>${fmtCompact(reqs)}</b></span>
+    <span class="chip">失败 <b style="color:${errors ? 'var(--red)' : 'var(--green)'}">${fmtCompact(errors)}</b></span>
+    <span class="chip">失败率 <b>${reqs ? (errors / reqs * 100).toFixed(1) : '0.0'}%</b></span>
+    <span class="chip">峰值 <b>${peak && peak.reqs ? peak.reqs : '-'}</b>${peak && peak.reqs ? ` @ ${esc(peak.label)}` : ''}</span>
+    <span class="chip">输入 tok <b>${fmtCompact(sum('tin'))}</b></span>
+    <span class="chip">输出 tok <b>${fmtCompact(sum('tout'))}</b></span>
+    <span class="chip">积分 <b>${sum('credits').toFixed(2)}</b></span>
+    <span class="chip">平均耗时 <b>${latAvg}ms</b></span>
   </div>`;
+}
+function trendLegendHtml(series, metric) {
+  return `<div class="chart-legend">${series.map(s => {
+    const nz = s.values.filter(v => v > 0);
+    const v = metric === 'lat'
+      ? '均 ' + fmtMetric(nz.length ? nz.reduce((a, b) => a + b, 0) / nz.length : 0, metric)
+      : '合计 ' + fmtMetric(s.values.reduce((a, b) => a + b, 0), metric);
+    return `<span class="li"><span class="dot" style="background:${s.color}"></span>${s.name} <b>${v}</b></span>`;
+  }).join('')}</div>`;
+}
+function drawTrend(el) {
+  const cfg = CHARTS[el.dataset.chart];
+  if (!cfg) return;
+  const buckets = cfg.chart.series;
+  const metric = trendUI.metric, type = trendUI.type;
+  const series = trendSeries(buckets, metric);
+  const W = Math.max(320, el.clientWidth || 640);
+  const H = cfg.height;
+  const padL = 46, padR = 56, padT = 14, padB = 22;
+  const iw = W - padL - padR, ih = H - padT - padB;
+  const n = buckets.length || 1;
+  const yMax = niceMax(Math.max(1, ...series.flatMap(s => s.values)) * 1.06);
+  const X = i => padL + (i + 0.5) * iw / n;
+  const Y = v => padT + ih - Math.min(1, v / yMax) * ih;
+  let grid = '';
+  for (let i = 0; i <= 4; i++) {
+    const y = padT + ih - i * ih / 4;
+    grid += `<line x1="${padL}" y1="${y}" x2="${padL + iw}" y2="${y}" stroke="var(--border)"${i ? ' stroke-dasharray="3 4"' : ''}/>`;
+    grid += `<text x="${padL - 7}" y="${y + 3.5}" text-anchor="end" font-size="9.5" fill="var(--muted)">${fmtMetric(yMax * i / 4, metric)}</text>`;
+  }
+  const step = Math.max(1, Math.ceil(n / Math.max(2, Math.floor(iw / 56))));
+  buckets.forEach((b, i) => {
+    if (i % step) return;
+    grid += `<text x="${X(i)}" y="${H - 5}" text-anchor="middle" font-size="9.5" fill="var(--muted)">${esc(b.label)}</text>`;
+  });
+  const linePath = vals => vals.map((v, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)} ${Y(v).toFixed(1)}`).join(' ');
+  const endLabel = s => {
+    const last = s.values[n - 1] ?? 0;
+    return `<circle cx="${X(n - 1)}" cy="${Y(last)}" r="2.6" fill="${s.color}"/>` +
+      `<text x="${X(n - 1) + 7}" y="${Y(last) + 3.5}" font-size="10" fill="${s.color}">${fmtMetric(last, metric)}</text>`;
+  };
+  let body = '';
+  if (type === 'bar') {
+    const bw = Math.max(2, Math.min(24, iw / n * 0.62));
+    const cum = new Array(n).fill(0);
+    for (const s of series.filter(x => !x.dashed)) {
+      body += s.values.map((v, i) => {
+        const y0 = Y(cum[i]), y1 = Y(cum[i] + v);
+        cum[i] += v;
+        return v > 0 ? `<rect x="${X(i) - bw / 2}" y="${y1}" width="${bw}" height="${Math.max(1, y0 - y1)}" rx="1.5" fill="${s.color}" opacity=".85"/>` : '';
+      }).join('');
+    }
+    for (const s of series.filter(x => x.dashed)) body += `<path d="${linePath(s.values)}" fill="none" stroke="${s.color}" stroke-width="1.6" stroke-dasharray="5 4"/>` + endLabel(s);
+  } else {
+    for (const s of series) {
+      const d = linePath(s.values);
+      if (type === 'area') body += `<path d="${d} L${X(n - 1)} ${padT + ih} L${X(0)} ${padT + ih} Z" fill="${s.color}" opacity=".13"/>`;
+      body += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"${s.dashed ? ' stroke-dasharray="5 4"' : ''}/>`;
+      body += endLabel(s);
+    }
+  }
+  const hover = `<g class="hover-g" style="display:none">
+    <line class="h-line" y1="${padT}" y2="${padT + ih}" stroke="var(--border-strong)" stroke-dasharray="3 3"/>
+    ${series.map(s => `<circle class="h-dot" r="4" fill="var(--panel-2)" stroke="${s.color}" stroke-width="2"/>`).join('')}
+  </g>`;
+  el.innerHTML = `<svg width="${W}" height="${H}" style="display:block">${grid}${body}${hover}</svg>
+    <div class="chart-tip"></div>${trendLegendHtml(series, metric)}`;
+
+  // 悬浮：十字线 + 该时刻全部指标明细（悬浮数值，不再只有 title 提示）
+  const svg = el.querySelector('svg');
+  const tip = el.querySelector('.chart-tip');
+  const hg = el.querySelector('.hover-g');
+  const hLine = el.querySelector('.h-line');
+  const hDots = [...el.querySelectorAll('.h-dot')];
+  const hide = () => { hg.style.display = 'none'; tip.style.display = 'none'; };
+  svg.addEventListener('mouseleave', hide);
+  svg.addEventListener('mousemove', e => {
+    const rect = svg.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    if (x < padL || x > padL + iw) return hide();
+    const idx = Math.min(n - 1, Math.max(0, Math.floor((x - padL) / (iw / n))));
+    const cx = X(idx);
+    hg.style.display = '';
+    hLine.setAttribute('x1', cx); hLine.setAttribute('x2', cx);
+    hDots.forEach((d, i) => {
+      if (type === 'bar' && !series[i].dashed) { d.style.display = 'none'; return; }
+      d.style.display = '';
+      d.setAttribute('cx', cx); d.setAttribute('cy', Y(series[i].values[idx]));
+    });
+    const b = buckets[idx];
+    tip.innerHTML = `<div class="tt">${esc(bucketTime(b.bucket, cfg.chart.bucketSec))}</div>` +
+      series.map(s => `<div class="tr"><span class="dot" style="background:${s.color}"></span>${s.name}<b>${fmtMetric(s.values[idx], metric)}</b></div>`).join('') +
+      `<div class="sep"></div>
+      <div class="tr">请求<b>${b.reqs}</b></div>
+      <div class="tr">失败<b>${b.errors}${b.reqs ? `（${(b.errors / b.reqs * 100).toFixed(0)}%）` : ''}</b></div>
+      <div class="tr">输入 tok<b>${fmtCompact(b.tin)}</b></div>
+      <div class="tr">输出 tok<b>${fmtCompact(b.tout)}</b></div>
+      <div class="tr">积分<b>${b.credits.toFixed(2)}</b></div>
+      <div class="tr">耗时<b>${b.reqs ? b.lat + 'ms' : '-'}</b></div>`;
+    tip.style.display = 'block';
+    const tw = tip.offsetWidth, th = tip.offsetHeight;
+    const my = e.clientY - rect.top;
+    let ty = my - th - 14;
+    if (ty < 2) ty = Math.min(my + 14, H - th - 2);
+    tip.style.left = Math.min(Math.max(2, cx - tw / 2), W - tw - 2) + 'px';
+    tip.style.top = ty + 'px';
+  });
+}
+function trendSet(id, key, val) {
+  trendUI[key] = val;
+  const el = document.getElementById(id);
+  if (el) drawTrend(el);
+  document.querySelectorAll(`.chart-tabs a[data-${key}]`).forEach(a => a.classList.toggle('active', a.dataset[key] === val));
+}
+function bindCharts() {
+  document.querySelectorAll('[data-chart]').forEach(el => {
+    const cfg = CHARTS[el.dataset.chart];
+    if (cfg?.kind === 'trend') drawTrend(el);
+  });
+}
+let chartRsz;
+window.addEventListener('resize', () => { clearTimeout(chartRsz); chartRsz = setTimeout(bindCharts, 160); });
+
+/** 环形图（结果分布等）：中心总量 + 数值/占比图例 */
+function donutHtml(data, centerValue, centerLabel, size = 128) {
+  const total = data.reduce((a, d) => a + d.value, 0);
+  const r = size / 2 - 11, cx = size / 2, cy = size / 2, C = 2 * Math.PI * r;
+  let acc = 0;
+  const arcs = data.map(d => {
+    const frac = total ? d.value / total : 0;
+    const seg = `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${d.color}" stroke-width="13"
+      stroke-dasharray="${(frac * C).toFixed(2)} ${C.toFixed(2)}" stroke-dashoffset="${(-acc * C).toFixed(2)}"
+      transform="rotate(-90 ${cx} ${cy})"><title>${esc(d.key)}：${d.value}（${(frac * 100).toFixed(1)}%）</title></circle>`;
+    acc += frac;
+    return seg;
+  }).join('');
+  return `<div class="donut-wrap">
+    <svg width="${size}" height="${size}" style="flex-shrink:0">
+      <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--border)" stroke-width="13"/>
+      ${arcs}
+      <text x="${cx}" y="${cy - 1}" text-anchor="middle" font-size="19" font-weight="700" fill="var(--text)">${esc(String(centerValue))}</text>
+      <text x="${cx}" y="${cy + 16}" text-anchor="middle" font-size="10" fill="var(--muted)">${esc(centerLabel)}</text>
+    </svg>
+    <div class="donut-legend">${data.map(d => `<div class="li"><span class="dot" style="background:${d.color}"></span>${esc(d.key)}<span class="v">${fmtCompact(d.value)}</span><span class="p">${total ? (d.value / total * 100).toFixed(1) : '0.0'}%</span></div>`).join('')}</div>
+  </div>`;
+}
+/** 迷你趋势线（统计卡用） */
+function sparklineHtml(values, color = 'var(--accent)', w = 110, h = 28) {
+  const n = values.length || 1;
+  const max = Math.max(1, ...values);
+  const X = i => n === 1 ? w / 2 : 2 + i * (w - 6) / (n - 1);
+  const Y = v => h - 3 - (v / max) * (h - 8);
+  const d = values.map((v, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)} ${Y(v).toFixed(1)}`).join(' ');
+  return `<svg class="spark" width="${w}" height="${h}">
+    <path d="${d} L${X(n - 1).toFixed(1)} ${h - 2} L${X(0).toFixed(1)} ${h - 2} Z" fill="${color}" opacity=".12"/>
+    <path d="${d}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round"/>
+    <circle cx="${X(n - 1).toFixed(1)}" cy="${Y(values[n - 1] || 0).toFixed(1)}" r="2.2" fill="${color}"/>
+  </svg>`;
+}
+/** 今日 vs 昨日变化；invert=true 时下降为绿（如失败数） */
+function deltaHtml(now, prev, invert = false) {
+  if (!prev) return '<span class="delta flat">较昨日 —</span>';
+  const pct = (now - prev) / prev * 100;
+  const flat = Math.abs(pct) < 0.5;
+  const up = pct > 0;
+  const cls = flat ? 'flat' : (up !== invert ? 'up' : 'down');
+  return `<span class="delta ${cls}">${flat ? '→' : up ? '↑' : '↓'} ${Math.abs(pct).toFixed(0)}% 较昨日</span>`;
 }
 async function renderDashboard(m) {
   const [stats, chart] = await Promise.all([api('/stats'), api('/usage/chart?hours=24')]);
+  const s24 = chart.series;
+  const tokToday = stats.today.tin + stats.today.tout, tokYest = stats.yesterday.tin + stats.yesterday.tout;
   m.innerHTML = `
   ${pageHead('仪表盘', '网关运行总览')}
   <div class="statgrid">
-    <div class="stat"><div class="l">今日请求</div><div class="v">${stats.today.reqs}</div><div class="d" style="color:${stats.today.errors ? 'var(--red)' : 'var(--green)'}">失败 ${stats.today.errors}</div></div>
-    <div class="stat"><div class="l">今日 Token</div><div class="v">${(stats.today.tin/1000).toFixed(1)}k <span class="muted" style="font-size:14px">/</span> ${(stats.today.tout/1000).toFixed(1)}k</div><div class="d">输入 / 输出</div></div>
-    <div class="stat"><div class="l">今日积分消耗</div><div class="v">${stats.today.credits.toFixed(2)}</div></div>
-    <div class="stat"><div class="l">累计请求</div><div class="v">${stats.total.reqs}</div><div class="d">累计积分 ${stats.total.credits.toFixed(1)}</div></div>
+    <div class="stat"><div class="l">今日请求</div><div class="v">${stats.today.reqs}</div>
+      <div class="d">${deltaHtml(stats.today.reqs, stats.yesterday.reqs)}</div>
+      ${sparklineHtml(s24.map(b => b.reqs))}</div>
+    <div class="stat"><div class="l">今日失败</div><div class="v" style="color:${stats.today.errors ? 'var(--red)' : 'inherit'}">${stats.today.errors}</div>
+      <div class="d">失败率 ${(stats.today.reqs ? stats.today.errors / stats.today.reqs * 100 : 0).toFixed(1)}% · ${deltaHtml(stats.today.errors, stats.yesterday.errors, true)}</div>
+      ${sparklineHtml(s24.map(b => b.errors), 'var(--red)')}</div>
+    <div class="stat"><div class="l">今日 Token</div><div class="v">${fmtCompact(stats.today.tin)} <span class="muted" style="font-size:14px">/</span> ${fmtCompact(stats.today.tout)}</div>
+      <div class="d">输入 / 输出 · ${deltaHtml(tokToday, tokYest)}</div>
+      ${sparklineHtml(s24.map(b => b.tout), 'var(--purple)')}</div>
+    <div class="stat"><div class="l">今日积分消耗</div><div class="v">${stats.today.credits.toFixed(2)}</div>
+      <div class="d">${deltaHtml(stats.today.credits, stats.yesterday.credits)}</div>
+      ${sparklineHtml(s24.map(b => b.credits), 'var(--yellow)')}</div>
+    <div class="stat"><div class="l">累计请求</div><div class="v">${fmtCompact(stats.total.reqs)}</div>
+      <div class="d">累计积分 ${stats.total.credits.toFixed(1)} · 今日占比 ${(stats.total.reqs ? stats.today.reqs / stats.total.reqs * 100 : 0).toFixed(1)}%</div></div>
   </div>
   <div class="card">
-    <div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:14px;margin:0">最近 24 小时趋势</h3><span class="spacer"></span>
+    <div class="toolbar" style="margin-bottom:2px"><h3 style="font-size:14px;margin:0">最近 24 小时趋势</h3><span class="spacer"></span>
       <a href="javascript:go('usage')" style="font-size:13px">查看完整用量 →</a></div>
-    ${chartHtml(chart, 110)}
+    ${trendChartHtml(chart, 180)}
   </div>
   <div style="display:flex;gap:16px;flex-wrap:wrap">
     <div class="card" style="flex:1;min-width:300px;margin:0"><h3 style="font-size:14px">账号健康 <a href="javascript:go('accounts')" style="font-size:12px;font-weight:400">管理 →</a></h3>
       <div id="dashAccounts" class="muted">加载中…</div>
     </div>
     <div class="card" style="flex:1;min-width:300px;margin:0"><h3 style="font-size:14px">今日模型 Top <a href="javascript:go('usage')" style="font-size:12px;font-weight:400">全部 →</a></h3>
-      ${stats.byModel.length ? `<table style="font-size:13px"><tr><th>模型</th><th>请求</th><th>tok</th></tr>
-      ${stats.byModel.slice(0, 8).map(r => `<tr><td class="mono">${esc(r.public_model)}</td><td>${r.reqs}</td><td class="muted">${((r.tin+r.tout)/1000).toFixed(1)}k</td></tr>`).join('')}</table>` : '<p class="muted">暂无数据</p>'}
+      ${stats.byModel.length ? (() => {
+        const tot = stats.byModel.reduce((a, r) => a + r.reqs, 0) || 1;
+        const max = stats.byModel[0].reqs || 1;
+        return `<table style="font-size:12.5px"><tr><th>模型</th><th>请求</th><th>占比</th><th>tok</th></tr>
+        ${stats.byModel.slice(0, 8).map((r, i) => `<tr>
+          <td class="mono">${esc(r.public_model || '?')}</td>
+          <td><b>${r.reqs}</b></td>
+          <td style="width:36%"><div class="pbar" style="max-width:none"><i style="width:${Math.round(r.reqs / max * 100)}%;background:${SERIES_COLORS[i % SERIES_COLORS.length]}"></i></div><span class="muted" style="font-size:11px">${(r.reqs / tot * 100).toFixed(1)}%</span></td>
+          <td class="muted">${fmtCompact(r.tin + r.tout)}</td>
+        </tr>`).join('')}</table>`;
+      })() : '<p class="muted">暂无数据</p>'}
     </div>
   </div>`;
+  bindCharts();
   api('/accounts').then(accounts => {
     const groups = {};
     for (const a of accounts) {
@@ -1064,34 +1322,42 @@ async function renderUsage(m) {
     api('/usage?' + new URLSearchParams(Object.fromEntries(Object.entries({ ...usageFilter }).filter(([, v]) => v)))),
     api('/usage/chart?hours=' + usageChartHours),
   ]);
-  const maxDim = Math.max(1, chart.byModel[0]?.reqs || 1, chart.byProvider[0]?.reqs || 1);
-  const bar = (v, color = 'var(--accent)') => `<div class="pbar" style="max-width:none;width:100%"><i style="width:${Math.round(v / maxDim * 100)}%;background:${color}"></i></div>`;
-  const dimTable = (title, rows, cols) => !rows.length ? '' : `
-    <div style="flex:1;min-width:260px">
+  const statusData = chart.byStatus.map(r => ({ key: r.key, value: r.reqs, color: r.key === '失败' ? 'var(--red)' : 'var(--green)' }));
+  const statusTotal = statusData.reduce((a, d) => a + d.value, 0);
+  /** Top 榜：名称 + 请求数/占比 + 明细（tok/积分/耗时） + 名次着色份额条 */
+  const rankTable = (title, rows, subFmt) => !rows.length ? '' : (() => {
+    const tot = rows.reduce((a, r) => a + r.reqs, 0) || 1;
+    const max = rows[0].reqs || 1;
+    return `<div style="flex:1;min-width:300px">
       <h4 style="font-size:13px;margin-bottom:8px;color:var(--text-dim)">${title}</h4>
-      <table style="font-size:12.5px">${rows.map(r => `<tr>
-        <td class="mono" style="padding:4px 8px 4px 0;white-space:nowrap">${esc(r.key)}${r.key.includes('#') || /^\d+$/.test(r.key) ? badge('账号', 'gray') : ''}</td>
-        ${cols.map(c => `<td style="padding:4px 10px 4px 0;color:var(--muted)">${c(r)}</td>`).join('')}
-        <td style="width:34%">${bar(r.reqs)}</td>
+      <table style="font-size:12.5px">${rows.map((r, i) => `<tr>
+        <td class="mono" style="padding:4px 8px 4px 0;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.key)}">${esc(r.key)}${r.key.includes('#') || /^\d+$/.test(r.key) ? ' ' + badge('账号', 'gray') : ''}</td>
+        <td style="padding:4px 8px 4px 0;white-space:nowrap"><b>${r.reqs}</b> 次 <span class="muted">· ${(r.reqs / tot * 100).toFixed(1)}%</span></td>
+        <td style="padding:4px 8px 4px 0;white-space:nowrap;color:var(--muted)">${subFmt(r)}</td>
+        <td style="width:28%;padding:4px 0"><div class="pbar" style="max-width:none"><i style="width:${Math.round(r.reqs / max * 100)}%;background:${SERIES_COLORS[i % SERIES_COLORS.length]}"></i></div></td>
       </tr>`).join('')}</table>
     </div>`;
+  })();
   m.innerHTML = `
   ${pageHead('用量日志')}
   <div class="card">
-    <div class="toolbar" style="margin-bottom:10px">
+    <div class="toolbar" style="margin-bottom:2px">
       <h3 style="font-size:14px;margin:0">趋势</h3>
       <span class="spacer"></span>
       <select id="ucHours" style="width:130px">
         ${[[24, '最近 24 小时'], [48, '最近 48 小时'], [168, '最近 7 天'], [720, '最近 30 天']].map(([v, l]) => `<option value="${v}" ${usageChartHours === v ? 'selected' : ''}>${l}</option>`).join('')}
       </select>
     </div>
-    ${chartHtml(chart, 120)}
+    ${trendChartHtml(chart, 180)}
   </div>
   <div class="card" style="display:flex;gap:26px;flex-wrap:wrap">
-    ${dimTable('模型 Top（请求数）', chart.byModel, [r => `${r.reqs} 次`, r => `${((r.tin||0)/1000).toFixed(1)}k/${((r.tout||0)/1000).toFixed(1)}k`])}
-    ${dimTable('平台（请求/积分）', chart.byProvider, [r => `${r.reqs} 次`, r => `积分 ${Number(r.credits).toFixed(1)}`])}
-    ${dimTable('账号', chart.byAccount, [r => `${r.reqs} 次`, r => `积分 ${Number(r.credits).toFixed(1)}`])}
-    ${dimTable('结果', chart.byStatus, [r => `${r.reqs} 次`])}
+    ${rankTable('模型 Top（请求数）', chart.byModel, r => `输入 ${fmtCompact(r.tin)} / 输出 ${fmtCompact(r.tout)} tok · ${Math.round(r.lat || 0)}ms`)}
+    ${rankTable('平台（请求/积分）', chart.byProvider, r => `积分 ${Number(r.credits).toFixed(1)} · ${Math.round(r.lat || 0)}ms`)}
+    ${rankTable('账号', chart.byAccount, r => `积分 ${Number(r.credits).toFixed(1)} · ${Math.round(r.lat || 0)}ms`)}
+    <div style="flex:1;min-width:260px">
+      <h4 style="font-size:13px;margin-bottom:8px;color:var(--text-dim)">结果分布</h4>
+      ${statusData.length ? donutHtml(statusData, statusTotal, '总请求') : '<p class="muted">暂无数据</p>'}
+    </div>
   </div>
   <div class="toolbar">
     <select id="uProvider" style="width:150px"><option value="">全部平台</option>${providers.map(p => `<option value="${p.id}" ${usageFilter.provider_id === p.id ? 'selected' : ''}>${esc(p.label)}</option>`).join('')}</select>
@@ -1104,7 +1370,7 @@ async function renderUsage(m) {
   ${usage.rows.map(u => `<tr>
     <td class="muted mono">${fmtTime(u.ts)}</td><td>${esc(u.provider_id || '')}</td><td>#${u.account_id ?? '-'}</td>
     <td class="mono">${esc(u.public_model || '')}</td><td>${u.input_tokens}</td><td>${u.output_tokens}</td>
-    <td>${u.credits ? u.credits.toFixed(3) : '-'}</td><td>${u.latency_ms}ms</td>
+    <td>${u.credits ? u.credits.toFixed(3) : '-'}</td><td style="${u.latency_ms > 30000 ? 'color:var(--red)' : u.latency_ms > 10000 ? 'color:var(--yellow)' : ''}">${u.latency_ms}ms</td>
     <td>${u.status < 400 ? badge(u.status, 'green') : badge(u.status + (u.error ? ' ' + u.error.slice(0, 40) : ''), 'red')}</td>
   </tr>`).join('')}
   ${!usage.rows.length ? emptyRow(9, '📈', '暂无请求') : ''}
@@ -1113,6 +1379,7 @@ async function renderUsage(m) {
     <button class="small ghost" ${usageFilter.page <= 1 ? 'disabled' : ''} onclick="usageFilter.page--;renderUsage($('#main'))">上一页</button>
     <button class="small ghost" ${usageFilter.page * usage.size >= usage.total ? 'disabled' : ''} onclick="usageFilter.page++;renderUsage($('#main'))">下一页</button>
   </div></div>`;
+  bindCharts();
   $('#uProvider').onchange = e => { usageFilter.provider_id = e.target.value; usageFilter.page = 1; renderUsage(m); };
   $('#uStatus').onchange = e => { usageFilter.status = e.target.value; usageFilter.page = 1; renderUsage(m); };
   $('#ucHours').onchange = e => { usageChartHours = Number(e.target.value); renderUsage(m); };
