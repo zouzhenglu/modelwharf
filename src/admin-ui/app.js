@@ -722,9 +722,10 @@ async function saveModel(id) {
 }
 
 // ---------- virtual models (统一模型) ----------
-// 列表排序状态：key = name(对外名称)/targets(目标数)/enabled/note，dir = 1升序 -1降序
+// 列表排序状态：key = name(对外名称)/targets(目标数)/tags/enabled/note，dir = 1升序 -1降序
 let virtualSort = { key: 'name', dir: 1 };
 let virtualSearch = '';
+let virtualTagFilter = '';
 function virtualSortBy(key) {
   if (virtualSort.key === key) virtualSort.dir *= -1;
   else virtualSort = { key, dir: 1 };
@@ -738,6 +739,11 @@ function targetChainHtml(ts, health) {
     const tip = { ok: '该平台有可用账号', warn: '该平台账号均在冷却中', bad: '该平台账号失效/被禁', none: '该平台暂无账号' }[h];
     return `<span class="tchip" title="${tip} · 优先级 ${t.priority ?? (i + 1) * 10}"><i>${i + 1}</i><span class="tdot ${h}"></span>${esc(t.provider_id)}/${esc(t.public_name)}</span>`;
   }).join('')}</div>`;
+}
+/** 统一模型标签 chips（模型管理同款 tags 语义；点击 = 加入筛选） */
+function vtagChips(tags) {
+  return String(tags || '').split(',').map(s => s.trim()).filter(Boolean)
+    .map(t => `<span class="badge blue" style="cursor:pointer" title="点击筛选该标签" onclick="virtualSearch='${esc(t)}';renderVirtual($('#main'))">${esc(t)}</span>`).join(' ');
 }
 async function renderVirtual(m) {
   const [virtuals, targets, presets, accounts] = await Promise.all([
@@ -753,8 +759,8 @@ async function renderVirtual(m) {
     const st = a.status === 'active' ? 'ok' : a.status === 'cooling' ? 'warn' : 'bad';
     if (cur == null || rank[st] < rank[cur]) health[a.provider_id] = st; // 取最好状态
   }
-  // 搜索筛选（名称/目标平台/目标模型/备注）
-  const q = (virtualSearch || '').toLowerCase();
+  // 搜索筛选（名称/目标平台/目标模型/备注/标签）；标签筛选走 tagFilter（点 chip 传入）
+  const q = ((virtualSearch || '') + ' ' + (virtualTagFilter || '')).trim().toLowerCase();
   const rows = virtuals
     .map(v => {
       const ts = JSON.parse(v.targets || '[]').sort((a, b) => (a.priority ?? 100) - (b.priority ?? 100));
@@ -762,7 +768,8 @@ async function renderVirtual(m) {
     })
     .filter(v => !q || v.public_name.toLowerCase().includes(q)
       || v._ts.some(t => t.provider_id.toLowerCase().includes(q) || String(t.public_name).toLowerCase().includes(q))
-      || String(v.note || '').toLowerCase().includes(q));
+      || String(v.note || '').toLowerCase().includes(q)
+      || String(v.tags || '').toLowerCase().includes(q));
   // 排序：名称用 localeCompare，目标数/数字直接比，备注空值排最后
   const { key, dir } = virtualSort;
   rows.sort((a, b) => {
@@ -770,6 +777,7 @@ async function renderVirtual(m) {
     if (key === 'name') c = a.public_name.localeCompare(b.public_name, 'zh-CN');
     else if (key === 'targets') c = a._n - b._n;
     else if (key === 'enabled') c = (b.enabled ? 1 : 0) - (a.enabled ? 1 : 0);
+    else if (key === 'tags') c = String(a.tags || '').localeCompare(String(b.tags || ''), 'zh-CN');
     else c = String(a.note || '').localeCompare(String(b.note || ''), 'zh-CN');
     return c * dir;
   });
@@ -777,7 +785,8 @@ async function renderVirtual(m) {
   ${pageHead(`统一模型 <span class="muted" style="font-size:13px">(${virtuals.length}${q ? ` · 筛出 ${rows.length}` : ''})</span>`, '点击表头排序')}
   <div class="hint">统一模型把多个平台的真实模型聚合成一个对外名称：客户端请求它时，网关按目标顺序依次尝试，<b>失败自动切换下一个</b>。也可以用来改名（如对外叫 <span class="mono">gpt-4o</span>，实际走 DeepSeek/GLM）。与「模型管理」里的直接模型相互独立，都可通过 /v1/models 看到。目标前的圆点 = 该平台账号池健康（<span class="tdot ok" style="display:inline-block;vertical-align:middle"></span> 可用 · <span class="tdot warn" style="display:inline-block;vertical-align:middle"></span> 冷却 · <span class="tdot bad" style="display:inline-block;vertical-align:middle"></span> 失效 · <span class="tdot none" style="display:inline-block;vertical-align:middle"></span> 无账号）。</div>
   <div class="toolbar">
-    <input id="vSearch" class="searchbox" placeholder="搜索名称/平台/备注…" value="${esc(virtualSearch)}">
+    <input id="vSearch" class="searchbox" placeholder="搜索名称/平台/标签/备注…" value="${esc(virtualSearch)}">
+    ${virtualTagFilter ? `<span class="badge blue">标签: ${esc(virtualTagFilter)} <span style="cursor:pointer" title="清除标签筛选" onclick="virtualTagFilter='';renderVirtual($('#main'))">✕</span></span>` : ''}
     <span class="muted">快速创建（同名多平台聚合）：</span>
     <select id="vpSel" style="width:230px"><option value="">选择预设…</option>
       ${presets.filter(p => p.multiProvider).map(p => `<option value="${esc(p.base)}">${esc(p.base)}（${p.targets.length} 平台: ${esc(p.providers.join(','))}）</option>`).join('')}
@@ -791,22 +800,24 @@ async function renderVirtual(m) {
   <table><tr>
     ${sortTh('对外名称', 'name')}
     ${sortTh('目标链（上→下 = 尝试顺序）', 'targets')}
+    ${sortTh('标签', 'tags')}
     ${sortTh('启用', 'enabled')}
     ${sortTh('备注', 'note')}
     <th>操作</th></tr>
   ${rows.map(v => `<tr>
     <td class="mono"><b>${esc(v.public_name)}</b><div class="muted" style="font-size:11px">${v._n} 个目标</div></td>
     <td>${targetChainHtml(v._ts, health)}</td>
+    <td>${vtagChips(v.tags) || '<span class="muted">-</span>'}</td>
     <td>${switchHtml(v.enabled, `toggleVirtual('${esc(v.public_name)}', ${v.enabled ? 0 : 1})`)}</td>
-    <td class="muted" style="max-width:180px;overflow:hidden;text-overflow:ellipsis">${esc(v.note || '')}</td>
+    <td class="muted" style="max-width:160px;overflow:hidden;text-overflow:ellipsis">${esc(v.note || '')}</td>
     <td style="white-space:nowrap">
       <button class="small ghost" onclick="openVirtualForm('${esc(v.public_name)}')">编辑</button>
       <button class="small ghost danger" onclick="delVirtual('${esc(v.public_name)}')">删</button></td>
   </tr>`).join('')}
-  ${!rows.length ? emptyRow(5, '🔀', q ? '没有匹配的统一模型' : '暂无统一模型 — 用上方预设一键创建，或「自定义」') : ''}
+  ${!rows.length ? emptyRow(6, '🔀', q ? '没有匹配的统一模型' : '暂无统一模型 — 用上方预设一键创建，或「自定义」') : ''}
   </table></div>`;
   window._virtualTargets = byProvider;
-  $('#vSearch').onkeydown = e => { if (e.key === 'Enter') { virtualSearch = e.target.value; renderVirtual(m); } };
+  $('#vSearch').onkeydown = e => { if (e.key === 'Enter') { virtualTagFilter = ''; virtualSearch = e.target.value; renderVirtual(m); } };
   $('#vpCreate').onclick = async () => {
     const base = $('#vpSel').value;
     if (!base) return toast('先选一个预设', true);
@@ -842,6 +853,7 @@ async function openVirtualForm(name) {
       ${targets.map((t, i) => virtualTargetRow(i, t, byProvider)).join('')}
       </div>
       <button class="small ghost" onclick="addVirtualTargetRow()">＋ 添加目标</button></div>
+    <div class="field"><label>标签（逗号分隔，用于筛选）</label><input id="vfTags" value="${esc(v?.tags || '')}" placeholder="如 free,coding"></div>
     <div class="field"><label>备注</label><input id="vfNote" value="${esc(v?.note || '')}"></div>
     <div class="row"><span class="spacer"></span><button class="ghost" onclick="closeModal()">取消</button>
     <button onclick="saveVirtual('${esc(name || '')}')">保存</button></div>`, {});
@@ -883,7 +895,7 @@ async function saveVirtual(origName) {
     public_name: row.querySelector('.vtModel').value,
     priority: (i + 1) * 10,
   })).filter(t => t.provider_id && t.public_name);
-  const body = { public_name: $('#vfName').value.trim(), targets, note: $('#vfNote').value };
+  const body = { public_name: $('#vfName').value.trim(), targets, note: $('#vfNote').value, tags: $('#vfTags').value };
   if (!body.public_name) return toast('请填对外名称', true);
   if (!targets.length) return toast('至少需要一个有效目标', true);
   try {
