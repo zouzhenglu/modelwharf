@@ -169,6 +169,11 @@ function fmtMetric(v, metric) {
   if (metric === 'lat') return fmtCompact(Math.round(v)) + 'ms';
   return fmtCompact(v);
 }
+/** 耗时短格式：<1s 用 ms，>=1s 用秒（Top 榜明细行要短，避免行尾数字被截断） */
+function fmtDur(ms) {
+  ms = Math.round(Number(ms) || 0);
+  return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms + 'ms';
+}
 function niceMax(v) {
   if (v <= 0) return 1;
   const p = Math.pow(10, Math.floor(Math.log10(v)));
@@ -1360,9 +1365,9 @@ async function renderUsage(m) {
     ${trendChartHtml(chart, 180)}
   </div>
   <div class="card" style="display:flex;gap:26px;flex-wrap:wrap">
-    ${rankTable('模型 Top（请求数）', chart.byModel, r => `输入 ${fmtCompact(r.tin)} / 输出 ${fmtCompact(r.tout)} tok · ${Math.round(r.lat || 0)}ms`)}
-    ${rankTable('平台（请求/积分）', chart.byProvider, r => `积分 ${Number(r.credits).toFixed(1)} · ${Math.round(r.lat || 0)}ms`)}
-    ${rankTable('账号', chart.byAccount, r => `积分 ${Number(r.credits).toFixed(1)} · ${Math.round(r.lat || 0)}ms`)}
+    ${rankTable('模型 Top（请求数）', chart.byModel, r => `输入 ${fmtCompact(r.tin)} / 输出 ${fmtCompact(r.tout)} tok · ${fmtDur(r.lat)}`)}
+    ${rankTable('平台（请求/积分）', chart.byProvider, r => `积分 ${Number(r.credits).toFixed(1)} · ${fmtDur(r.lat)}`)}
+    ${rankTable('账号', chart.byAccount, r => `积分 ${Number(r.credits).toFixed(1)} · ${fmtDur(r.lat)}`)}
     <div style="flex:1;min-width:260px">
       <h4 style="font-size:13px;margin-bottom:8px;color:var(--text-dim)">结果分布</h4>
       ${statusData.length ? donutHtml(statusData, statusTotal, '总请求') : '<p class="muted">暂无数据</p>'}
