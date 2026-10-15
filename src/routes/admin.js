@@ -408,12 +408,20 @@ router.get('/usage', (req, res) => {
 function setHours0() { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); }
 router.get('/stats', (req, res) => {
   const dayStart = Math.floor(setHours0() / 1000);
-  const today = db.prepare('SELECT COUNT(*) reqs, COALESCE(SUM(input_tokens),0) tin, COALESCE(SUM(output_tokens),0) tout, COALESCE(SUM(credits),0) credits FROM usage WHERE ts>=?').get(dayStart);
+  const dayAgg = 'SELECT COUNT(*) reqs, COALESCE(SUM(input_tokens),0) tin, COALESCE(SUM(output_tokens),0) tout, COALESCE(SUM(credits),0) credits FROM usage WHERE ts>=? AND ts<?';
+  const errDay = 'SELECT COUNT(*) c FROM usage WHERE ts>=? AND ts<? AND status>=400';
+  const today = db.prepare(dayAgg).get(dayStart, dayStart + 86400);
+  const errToday = db.prepare(errDay).get(dayStart, dayStart + 86400).c;
+  const yesterday = db.prepare(dayAgg).get(dayStart - 86400, dayStart);
+  const errYesterday = db.prepare(errDay).get(dayStart - 86400, dayStart).c;
   const total = db.prepare('SELECT COUNT(*) reqs, COALESCE(SUM(credits),0) credits FROM usage').get();
-  const errToday = db.prepare('SELECT COUNT(*) c FROM usage WHERE ts>=? AND status>=400').get(dayStart).c;
   const byProvider = db.prepare('SELECT provider_id, COUNT(*) reqs, COALESCE(SUM(credits),0) credits FROM usage WHERE ts>=? GROUP BY provider_id').all(dayStart);
   const byModel = db.prepare('SELECT public_model, COUNT(*) reqs, COALESCE(SUM(input_tokens),0) tin, COALESCE(SUM(output_tokens),0) tout FROM usage WHERE ts>=? GROUP BY public_model ORDER BY reqs DESC LIMIT 20').all(dayStart);
-  res.json({ today: { ...today, errors: errToday }, total, byProvider, byModel });
+  res.json({
+    today: { ...today, errors: errToday },
+    yesterday: { ...yesterday, errors: errYesterday },
+    total, byProvider, byModel,
+  });
 });
 
 // chart data for usage page: hourly buckets + dimension breakdowns (model/provider/status)
@@ -428,24 +436,27 @@ router.get('/usage/chart', (req, res) => {
            COALESCE(SUM(input_tokens),0) AS tin,
            COALESCE(SUM(output_tokens),0) AS tout,
            SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS errors,
-           COALESCE(SUM(credits),0) AS credits
+           COALESCE(SUM(credits),0) AS credits,
+           COALESCE(AVG(latency_ms),0) AS lat,
+           COALESCE(MAX(latency_ms),0) AS latMax
     FROM usage WHERE ts >= ? GROUP BY bucket ORDER BY bucket`).all(since);
   const byBucket = Object.fromEntries(rows.map(r => [r.bucket, r]));
   const series = [];
   const nowBucket = Math.floor(Date.now() / 1000 / bucketSec) * bucketSec;
   for (let b = nowBucket - (Math.ceil(hours * 3600 / bucketSec) - 1) * bucketSec; b <= nowBucket; b += bucketSec) {
-    const r = byBucket[b] || { reqs: 0, tin: 0, tout: 0, errors: 0, credits: 0 };
+    const r = byBucket[b] || { reqs: 0, tin: 0, tout: 0, errors: 0, credits: 0, lat: 0, latMax: 0 };
     const d = new Date(b * 1000);
     series.push({
       bucket: b,
       label: bucketSec === 3600 ? `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}` : `${d.getMonth() + 1}/${d.getDate()}`,
       reqs: r.reqs, tin: r.tin, tout: r.tout, errors: r.errors, credits: r.credits,
+      lat: Math.round(r.lat), latMax: r.latMax,
     });
   }
-  const byModel = db.prepare(`SELECT COALESCE(public_model,'?') AS key, COUNT(*) reqs, COALESCE(SUM(input_tokens),0) tin, COALESCE(SUM(output_tokens),0) tout FROM usage WHERE ts>=? GROUP BY key ORDER BY reqs DESC LIMIT 10`).all(since);
-  const byProvider = db.prepare(`SELECT COALESCE(provider_id,'?') AS key, COUNT(*) reqs, COALESCE(SUM(credits),0) credits, COALESCE(SUM(input_tokens),0) tin, COALESCE(SUM(output_tokens),0) tout FROM usage WHERE ts>=? GROUP BY key ORDER BY reqs DESC LIMIT 10`).all(since);
-  const byAccount = db.prepare(`SELECT COALESCE(CAST(account_id AS TEXT),'-') AS key, COUNT(*) reqs, COALESCE(SUM(credits),0) credits FROM usage WHERE ts>=? GROUP BY key ORDER BY reqs DESC LIMIT 10`).all(since);
-  const byStatus = db.prepare(`SELECT CASE WHEN status>=400 THEN '失败' ELSE '成功' END AS key, COUNT(*) reqs FROM usage WHERE ts>=? GROUP BY key`).all(since);
+  const byModel = db.prepare(`SELECT COALESCE(public_model,'?') AS key, COUNT(*) reqs, COALESCE(SUM(input_tokens),0) tin, COALESCE(SUM(output_tokens),0) tout, COALESCE(AVG(latency_ms),0) lat FROM usage WHERE ts>=? GROUP BY key ORDER BY reqs DESC LIMIT 10`).all(since);
+  const byProvider = db.prepare(`SELECT COALESCE(provider_id,'?') AS key, COUNT(*) reqs, COALESCE(SUM(credits),0) credits, COALESCE(SUM(input_tokens),0) tin, COALESCE(SUM(output_tokens),0) tout, COALESCE(AVG(latency_ms),0) lat FROM usage WHERE ts>=? GROUP BY key ORDER BY reqs DESC LIMIT 10`).all(since);
+  const byAccount = db.prepare(`SELECT COALESCE(CAST(account_id AS TEXT),'-') AS key, COUNT(*) reqs, COALESCE(SUM(credits),0) credits, COALESCE(AVG(latency_ms),0) lat FROM usage WHERE ts>=? GROUP BY key ORDER BY reqs DESC LIMIT 10`).all(since);
+  const byStatus = db.prepare(`SELECT CASE WHEN status>=400 THEN '失败' ELSE '成功' END AS key, COUNT(*) reqs, COALESCE(SUM(credits),0) credits FROM usage WHERE ts>=? GROUP BY key`).all(since);
   res.json({ hours, bucketSec, series, byModel, byProvider, byAccount, byStatus });
 });
 

@@ -396,6 +396,10 @@ async function main() {
   await t('stats aggregate', async () => {
     const r = await call('GET', '/admin/api/stats', null, auth);
     assert.ok(r.json.today.reqs >= 2);
+    // 昨日对比数据（仪表盘「较昨日」用）
+    assert.equal(typeof r.json.yesterday.reqs, 'number');
+    assert.equal(typeof r.json.yesterday.errors, 'number');
+    assert.equal(typeof r.json.yesterday.credits, 'number');
   });
 
   console.log('== mcp gateway ==');
@@ -562,6 +566,16 @@ async function main() {
     const r = await call('GET', '/admin/api/usage/chart?hours=24', null, auth);
     assert.equal(r.status, 200);
     assert.equal(r.json.series.length, 24);
+  });
+  await t('chart series carries latency + breakdown lat', async () => {
+    const r = await call('GET', '/admin/api/usage/chart?hours=24', null, auth);
+    const s = r.json.series[0];
+    for (const k of ['reqs', 'tin', 'tout', 'errors', 'credits', 'lat', 'latMax']) {
+      assert.equal(typeof s[k], 'number', `series.${k} missing`);
+    }
+    if (r.json.byModel.length) assert.equal(typeof r.json.byModel[0].lat, 'number', 'byModel.lat missing');
+    if (r.json.byProvider.length) assert.equal(typeof r.json.byProvider[0].lat, 'number', 'byProvider.lat missing');
+    if (r.json.byStatus.length) assert.equal(typeof r.json.byStatus[0].credits, 'number', 'byStatus.credits missing');
   });
 
   console.log('== enabled filter fix ==');
