@@ -1,4 +1,4 @@
-/* dsh-free-api admin panel */
+/* dsh-free-api admin console */
 'use strict';
 let TOKEN = localStorage.getItem('dsh_token') || '';
 let PAGE = 'dashboard';
@@ -21,7 +21,8 @@ async function api(path, opts = {}) {
 function toast(msg, isErr = false) {
   const t = $('#toast');
   t.textContent = msg; t.className = 'toast' + (isErr ? ' err' : ''); t.style.display = 'block';
-  setTimeout(() => t.style.display = 'none', 2600);
+  clearTimeout(t._hide);
+  t._hide = setTimeout(() => t.style.display = 'none', 2600);
 }
 function fmtTime(ts) { return ts ? new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false }) : '-'; }
 function badge(text, cls) { return `<span class="badge ${cls}">${esc(text)}</span>`; }
@@ -30,6 +31,15 @@ function statusBadge(s) {
   return badge(s || 'active', map[s] || 'gray');
 }
 function switchHtml(on, onclick) { return `<div class="switch ${on ? 'on' : ''}" onclick="${onclick}"></div>`; }
+/** 页头：标题 + 可选副标题 + 右侧动作区 */
+function pageHead(title, sub, actionsHtml) {
+  return `<div class="page-head"><h2>${title}</h2>${sub ? `<span class="sub">${sub}</span>` : ''}
+    <span class="spacer"></span>${actionsHtml || ''}</div>`;
+}
+/** 统一空状态 */
+function emptyRow(cols, ico, text) {
+  return `<tr><td colspan="${cols}"><div class="empty"><span class="ico">${ico}</span>${text}</div></td></tr>`;
+}
 
 async function doLogin() {
   try {
@@ -75,13 +85,13 @@ async function renderPlatforms(m) {
   const groups = groupProviders(providers);
   const supportsOnline = p => p.supports_online;
   m.innerHTML = `
-  <h2>平台 <span class="muted">(${providers.length})</span></h2>
-  <p class="muted" style="margin-bottom:12px">
-    <b>获取全部模型</b>：把上游报给该账号的模型同步进来（增量补充，最全）。　
-    <b>恢复在线模型</b>：只保留上游<b>当前实际可用</b>的目录（与官方客户端一致，会替换现有列表；支持在线目录的平台显示该按钮）。
+  ${pageHead(`平台 <span class="muted" style="font-size:13px">(${providers.length})</span>`)}
+  <p class="muted" style="margin-bottom:14px;line-height:1.8">
+    <b style="color:var(--text-dim)">获取全部模型</b>：把上游报给该账号的模型同步进来（增量补充，最全）。　
+    <b style="color:var(--text-dim)">恢复在线模型</b>：只保留上游<b style="color:var(--text-dim)">当前实际可用</b>的目录（与官方客户端一致，会替换现有列表；支持在线目录的平台显示该按钮）。
   </p>
   ${groups.map(g => `
-  <div class="card"><h2 style="font-size:14px">${esc(g.name)} <span class="muted">(${g.providers.length})</span></h2>
+  <div class="card"><h3 style="font-size:14px;margin-bottom:10px">${esc(g.name)} <span class="muted">(${g.providers.length})</span></h3>
     <table><tr><th>平台</th><th>状态</th><th>账号</th><th>模型</th><th>操作</th></tr>
     ${g.providers.map(p => `<tr>
       <td><b>${esc(p.label)}</b> <span class="muted mono">${esc(p.id)}</span></td>
@@ -118,34 +128,40 @@ function providerOptgroups(providers, selectedId, skipOther) {
     `<optgroup label="${esc(g.name)}">${g.providers.map(p =>
       `<option value="${p.id}" ${selectedId === p.id ? 'selected' : ''}>${esc(p.label)}</option>`).join('')}</optgroup>`).join('');
 }
+/** 24h 趋势柱状图（仪表盘/用量页共用） */
+function chartHtml(chart, height = 120) {
+  const maxReqs = Math.max(1, ...chart.series.map(s => s.reqs));
+  const step = Math.ceil(chart.series.length / 12);
+  return `
+  <div style="display:flex;align-items:flex-end;gap:3px;height:${height}px;padding:0 4px">
+    ${chart.series.map(s => `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%" title="${s.label} · ${s.reqs} 请求 · 失败 ${s.errors}">
+      <div style="width:70%;background:${s.errors ? 'linear-gradient(180deg,var(--red),var(--accent))' : 'linear-gradient(180deg,var(--accent),rgba(91,157,255,.35))'};border-radius:4px 4px 0 0;height:${Math.round(s.reqs / maxReqs * 92)}%;min-height:${s.reqs ? '4px' : '0'};box-shadow:0 0 6px rgba(91,157,255,.25)"></div>
+    </div>`).join('')}
+  </div>
+  <div style="display:flex;gap:3px;padding:6px 4px 0">
+    ${chart.series.filter((s, i) => i % step === 0).map(s => `<span class="muted mono" style="flex:1;font-size:10px;text-align:center">${s.label}</span>`).join('')}
+  </div>`;
+}
 async function renderDashboard(m) {
   const [stats, chart] = await Promise.all([api('/stats'), api('/usage/chart?hours=24')]);
-  const maxReqs = Math.max(1, ...chart.series.map(s => s.reqs));
   m.innerHTML = `
-  <h2>仪表盘</h2>
+  ${pageHead('仪表盘', '网关运行总览')}
   <div class="statgrid">
-    <div class="stat"><div class="l">今日请求</div><div class="v">${stats.today.reqs}</div><div class="l" style="color:${stats.today.errors ? 'var(--red)' : 'var(--green)'}">失败 ${stats.today.errors}</div></div>
-    <div class="stat"><div class="l">今日 Token</div><div class="v">${(stats.today.tin/1000).toFixed(1)}k / ${(stats.today.tout/1000).toFixed(1)}k</div><div class="l">输入 / 输出</div></div>
+    <div class="stat"><div class="l">今日请求</div><div class="v">${stats.today.reqs}</div><div class="d" style="color:${stats.today.errors ? 'var(--red)' : 'var(--green)'}">失败 ${stats.today.errors}</div></div>
+    <div class="stat"><div class="l">今日 Token</div><div class="v">${(stats.today.tin/1000).toFixed(1)}k <span class="muted" style="font-size:14px">/</span> ${(stats.today.tout/1000).toFixed(1)}k</div><div class="d">输入 / 输出</div></div>
     <div class="stat"><div class="l">今日积分消耗</div><div class="v">${stats.today.credits.toFixed(2)}</div></div>
-    <div class="stat"><div class="l">累计请求</div><div class="v">${stats.total.reqs}</div><div class="l">累计积分 ${stats.total.credits.toFixed(1)}</div></div>
+    <div class="stat"><div class="l">累计请求</div><div class="v">${stats.total.reqs}</div><div class="d">累计积分 ${stats.total.credits.toFixed(1)}</div></div>
   </div>
   <div class="card">
-    <div class="toolbar" style="margin-bottom:8px"><h3 style="font-size:14px">最近 24 小时趋势</h3><span class="spacer"></span>
+    <div class="toolbar" style="margin-bottom:10px"><h3 style="font-size:14px;margin:0">最近 24 小时趋势</h3><span class="spacer"></span>
       <a href="javascript:go('usage')" style="font-size:13px">查看完整用量 →</a></div>
-    <div style="display:flex;align-items:flex-end;gap:3px;height:110px;padding:0 4px">
-      ${chart.series.map(s => `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%" title="${s.label} · ${s.reqs} 请求 · 失败 ${s.errors}">
-        <div style="width:70%;background:${s.errors ? 'linear-gradient(180deg,var(--red),var(--accent))' : 'var(--accent)'};border-radius:3px 3px 0 0;height:${Math.round(s.reqs / maxReqs * 92)}%;min-height:${s.reqs ? '3px' : '0'}"></div>
-      </div>`).join('')}
-    </div>
-    <div style="display:flex;gap:3px;padding:4px 4px 0">
-      ${chart.series.filter((s, i) => i % Math.ceil(chart.series.length / 12) === 0).map(s => `<span class="muted mono" style="flex:1;font-size:10px;text-align:center">${s.label}</span>`).join('')}
-    </div>
+    ${chartHtml(chart, 110)}
   </div>
   <div style="display:flex;gap:16px;flex-wrap:wrap">
-    <div class="card" style="flex:1;min-width:300px"><h2 style="font-size:14px">账号健康 <a href="javascript:go('accounts')" style="font-size:12px;font-weight:400">管理 →</a></h2>
+    <div class="card" style="flex:1;min-width:300px;margin:0"><h3 style="font-size:14px">账号健康 <a href="javascript:go('accounts')" style="font-size:12px;font-weight:400">管理 →</a></h3>
       <div id="dashAccounts" class="muted">加载中…</div>
     </div>
-    <div class="card" style="flex:1;min-width:300px"><h2 style="font-size:14px">今日模型 Top <a href="javascript:go('usage')" style="font-size:12px;font-weight:400">全部 →</a></h2>
+    <div class="card" style="flex:1;min-width:300px;margin:0"><h3 style="font-size:14px">今日模型 Top <a href="javascript:go('usage')" style="font-size:12px;font-weight:400">全部 →</a></h3>
       ${stats.byModel.length ? `<table style="font-size:13px"><tr><th>模型</th><th>请求</th><th>tok</th></tr>
       ${stats.byModel.slice(0, 8).map(r => `<tr><td class="mono">${esc(r.public_model)}</td><td>${r.reqs}</td><td class="muted">${((r.tin+r.tout)/1000).toFixed(1)}k</td></tr>`).join('')}</table>` : '<p class="muted">暂无数据</p>'}
     </div>
@@ -156,9 +172,9 @@ async function renderDashboard(m) {
       (groups[a.provider_id] = groups[a.provider_id] || []).push(a);
     }
     $('#dashAccounts').innerHTML = Object.entries(groups).map(([pid, list]) => `
-      <div style="margin-bottom:6px"><b class="mono" style="font-size:12.5px">${esc(pid)}</b>
+      <div style="margin-bottom:8px"><b class="mono" style="font-size:12.5px">${esc(pid)}</b>
       ${list.map(a => `<span title="${esc(a.status_message || '')}" style="margin-left:6px">${statusBadge(a.status)} <span style="font-size:12.5px">${esc(a.name)}</span></span>`).join('')}
-      </div>`).join('') || '暂无账号';
+      </div>`).join('') || '<div class="empty"><span class="ico">👥</span>暂无账号</div>';
   }).catch(() => {});
 }
 
@@ -211,7 +227,7 @@ async function renderAccounts(m) {
     api('/accounts?' + new URLSearchParams(Object.fromEntries(Object.entries(acctFilter).filter(([, v]) => v)))),
   ]);
   m.innerHTML = `
-  <h2>平台账号 <span class="muted">(${accounts.length})</span></h2>
+  ${pageHead(`平台账号 <span class="muted" style="font-size:13px">(${accounts.length})</span>`)}
   <div class="toolbar">
     <select id="fProvider" style="width:170px"><option value="">全部平台</option>
       ${providerOptgroups(providers, acctFilter.provider_id, true)}
@@ -225,9 +241,9 @@ async function renderAccounts(m) {
     <button class="ghost" onclick="syncAllInfo()">同步积分</button>
     <button class="ghost" onclick="checkAllAccounts()">一键检测</button>
     <button class="ghost" onclick="importLocalAll()">扫描本机登录</button>
-    <button onclick="openAccountForm()">+ 添加账号</button>
+    <button onclick="openAccountForm()">＋ 添加账号</button>
   </div>
-  <div class="card" style="padding:6px 12px">
+  <div class="table-wrap">
   <table><tr><th>平台</th><th>名称 / 身份</th><th>状态</th><th>积分与信息</th>
     <th title="数字越小越优先被轮询使用。同平台多账号时，先用优先级小的，失败/冷却自动换下一个">优先级 ⓘ</th>
     <th title="该账号同时处理的最大请求数。达到上限后请求会分流到其他账号，避免单账号被上游限流">并发 ⓘ</th>
@@ -249,11 +265,11 @@ async function renderAccounts(m) {
       <button class="small ghost" title="为该账号执行每日签到领积分（已签过会提示，不重复领取）" onclick="checkinAccount(${a.id})">签到</button>
       <button class="small ghost" title="${online ? '只取上游当前实际可用的模型目录（与官方客户端显示一致，会替换现有列表，自定义条目会被移除）' : '从上游 /v1/models 在线目录同步该账号模型（增量补充）'}" onclick="restoreAccountModels(${a.id}, ${online})">恢复在线目录</button>
       <button class="small ghost" onclick="openAccountForm(${a.id})">编辑</button>
-      <button class="small danger" onclick="delAccount(${a.id})">删</button>
+      <button class="small ghost danger" onclick="delAccount(${a.id})">删</button>
     </td></tr>`;
     }).join('');
   })()}
-  ${!accounts.length ? '<tr><td colspan="10" class="muted" style="text-align:center;padding:24px">暂无账号，点右上角添加，或用「导入本机登录」自动发现</td></tr>' : ''}
+  ${!accounts.length ? emptyRow(10, '👥', '暂无账号，点右上角添加，或用「扫描本机登录」自动发现') : ''}
   </table></div>`;
   $('#fProvider').onchange = e => { acctFilter.provider_id = e.target.value; renderAccounts(m); };
   $('#fStatus').onchange = e => { acctFilter.status = e.target.value; renderAccounts(m); };
@@ -280,7 +296,7 @@ async function renderCheckin(m) {
   const lastRun = st.lastRun ? new Date(st.lastRun.at).toLocaleString('zh-CN', { hour12: false }) : '尚未运行';
   const pending = supported.filter(a => a.enabled && !a.done).length;
   m.innerHTML = `
-  <h2>每日签到 <span class="muted" style="font-size:12px">— 自动为各平台账号领取签到积分</span></h2>
+  ${pageHead('每日签到', '自动为各平台账号领取签到积分', `<a href="javascript:go('accounts')" style="font-size:13px">管理账号 →</a>`)}
   <div class="hint">
     <b>定时任务</b>：每天到达设定时刻自动为全部启用账号签到；服务白天启动时若当天还没签，会在启动后 20 秒自动补签。
     同一账号同一天只成功领一次（幂等，重复点不会重复拿积分）。
@@ -288,19 +304,17 @@ async function renderCheckin(m) {
     ${st.running ? '<b>签到正在进行中…</b>' : ''}
   </div>
   <div class="statgrid">
-    <div class="stat"><div class="l">今日已签</div><div class="v">${doneCount} / ${supported.length}</div><div class="l">${pending ? `${pending} 个待核对` : '全部核对完毕'}</div></div>
-    <div class="stat"><div class="l">上次运行</div><div class="v" style="font-size:15px">${esc(lastRun)}</div>
-      <div class="l">${st.lastRun ? `成功领取 ${st.lastRun.claimed} · 已签 ${st.lastRun.already} · 失败 ${st.lastRun.failed}` : '当天未运行过'}</div></div>
-    <div class="stat"><div class="l">定时设置</div><div class="v" style="font-size:15px">${cfg.enabled ? `每天 ${cfg.hour}:00` : '已关闭'}</div>
-      <div class="l"><a href="javascript:go('settings')">修改 →</a></div></div>
+    <div class="stat"><div class="l">今日已签</div><div class="v">${doneCount} <span class="muted" style="font-size:15px">/ ${supported.length}</span></div><div class="d">${pending ? `${pending} 个待核对` : '全部核对完毕'}</div></div>
+    <div class="stat"><div class="l">上次运行</div><div class="v" style="font-size:16px">${esc(lastRun)}</div>
+      <div class="d">${st.lastRun ? `成功领取 ${st.lastRun.claimed} · 已签 ${st.lastRun.already} · 失败 ${st.lastRun.failed}` : '当天未运行过'}</div></div>
+    <div class="stat"><div class="l">定时设置</div><div class="v" style="font-size:16px">${cfg.enabled ? `每天 ${cfg.hour}:00` : '已关闭'}</div>
+      <div class="d"><a href="javascript:go('settings')">修改 →</a></div></div>
   </div>
   <div class="toolbar">
     <button onclick="checkinAllAccounts()">立即签到全部</button>
-    <span class="muted" style="font-size:12px">已确认签到的账号会跳过；要重新核对某个账号，点它行内的「签到」</span>
-    <span class="spacer"></span>
-    <a href="javascript:go('accounts')" style="font-size:13px">管理账号 →</a>
+    <span class="muted">已确认签到的账号会跳过；要重新核对某个账号，点它行内的「签到」</span>
   </div>
-  <div class="card" style="padding:6px 12px">
+  <div class="table-wrap">
   <table><tr><th>平台</th><th>账号</th><th>今日状态</th><th>说明</th><th>操作</th></tr>
   ${st.accounts.map(a => {
     const plat = CHECKIN_PROVIDER_LABEL[a.provider_id] || a.provider_id;
@@ -318,11 +332,11 @@ async function renderCheckin(m) {
       <td>${a.supported ? `<button class="small ghost" onclick="checkinAccount(${a.id})">签到</button>` : ''}</td>
     </tr>`;
   }).join('')}
-  ${!st.accounts.length ? '<tr><td colspan="5" class="muted" style="text-align:center;padding:24px">暂无账号，先到「平台账号」页添加</td></tr>' : ''}
+  ${!st.accounts.length ? emptyRow(5, '📅', '暂无账号，先到「平台账号」页添加') : ''}
   </table></div>
   <div class="card">
-    <h3 style="font-size:14px;margin-bottom:8px">最近签到记录</h3>
-    ${st.recent.length ? `<table style="font-size:12px"><tr><th>时间</th><th>平台</th><th>账号</th><th>结果</th><th>说明</th></tr>
+    <h3 style="font-size:14px;margin-bottom:10px">最近签到记录</h3>
+    ${st.recent.length ? `<table style="font-size:12.5px"><tr><th>时间</th><th>平台</th><th>账号</th><th>结果</th><th>说明</th></tr>
     ${st.recent.slice(0, 20).map(r => `<tr>
       <td class="muted mono">${fmtTime(r.ts)}</td>
       <td>${esc(CHECKIN_PROVIDER_LABEL[r.provider_id] || r.provider_id || '-')}</td>
@@ -374,13 +388,17 @@ function summarizeExtra(extra) {
 /** 积分/信息列：结构化展示（进度条 + 明细） */
 function creditCellHtml(extra) {
   if (!extra || typeof extra !== 'object') return '<span class="muted">同步后显示</span>';
+  // 兼容历史嵌套数据（workbuddy 签到曾把 {credits,quota} 对象整体塞进 extra.credits）
+  if (extra.credits && typeof extra.credits === 'object') {
+    extra = { ...extra, credits: extra.credits.credits, quota: extra.credits.quota ?? extra.quota };
+  }
   const parts = [];
   if (extra.credits != null && extra.quota != null && extra.quota > 0) {
     const pct = Math.min(100, Math.round(extra.credits / extra.quota * 100));
     const color = pct > 40 ? 'var(--green)' : pct > 10 ? 'var(--yellow)' : 'var(--red)';
     parts.push(`<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">
       <b style="font-size:13px">${extra.credits}</b><span class="muted" style="font-size:11px">/ ${extra.quota}</span>
-      <div style="flex:1;max-width:90px;height:6px;background:var(--border);border-radius:3px;overflow:hidden"><div style="width:${pct}%;height:100%;background:${color}"></div></div>
+      <div class="pbar" style="max-width:90px"><i style="width:${pct}%;background:${color}"></i></div>
       <span class="muted" style="font-size:11px">${pct}%</span></div>`);
     if (extra.baseQuota || extra.addOnQuota) {
       parts.push(`<div class="muted" style="font-size:11px">${extra.baseQuota ? '基础 ' + extra.baseQuota : ''}${extra.baseQuota && extra.addOnQuota ? ' · ' : ''}${extra.addOnQuota ? '附加 ' + extra.addOnQuota : ''}</div>`);
@@ -484,9 +502,9 @@ function mFormAccount(acct, providers, p) {
     <div class="field"><label>平台</label>
       <select id="afProvider" ${acct ? 'disabled' : ''}>${providers.map(x => `<option value="${x.id}" ${p?.id === x.id ? 'selected' : ''}>${esc(x.label)} (${x.id})</option>`).join('')}</select></div>
     ${supportsOAuth ? `
-    <div class="card" style="background:var(--panel2);padding:12px 16px;margin-bottom:12px">
+    <div class="card" style="background:var(--bg-soft);padding:14px 18px;margin-bottom:14px">
       <b style="font-size:13px">推荐：网页授权登录</b>
-      <p class="muted" style="font-size:12px;margin:4px 0 8px">点击后自动打开 ${esc(p.label)} 授权页，登录成功后账号自动添加（无需手动填 token）。<b>轮询最长 10 分钟</b>：超时或你点取消即停止，服务器端不留任何后台轮询——登录成功与否都由这次点击驱动。</p>
+      <p class="muted" style="font-size:12px;margin:4px 0 10px">点击后自动打开 ${esc(p.label)} 授权页，登录成功后账号自动添加（无需手动填 token）。<b>轮询最长 10 分钟</b>：超时或你点取消即停止，服务器端不留任何后台轮询——登录成功与否都由这次点击驱动。</p>
       <button id="afOAuthBtn" onclick="startOAuthLogin('${p.id}')">🌐 打开授权页面登录</button>
       <span id="afOAuthStatus" class="muted" style="margin-left:10px;font-size:12px"></span>
     </div>` : ''}
@@ -567,7 +585,7 @@ async function renderModels(m) {
   const providerOpts = providerOptgroups(providers, modelFilter.provider_id, true);
   const providerOptsAll = providerOptgroups(providers, modelFilter.provider_id, false);
   m.innerHTML = `
-  <h2>模型管理 <span class="muted">(${models.length})</span></h2>
+  ${pageHead(`模型管理 <span class="muted" style="font-size:13px">(${models.length})</span>`)}
   <div class="toolbar">
     <select id="mfProvider" style="width:170px"><option value="">全部平台</option>${providerOpts}</select>
     <input id="mfSearch" class="searchbox" placeholder="搜索模型名/标签…" value="${esc(modelFilter.search)}">
@@ -576,20 +594,20 @@ async function renderModels(m) {
     <span class="spacer"></span>
     <select id="mfSyncSel" style="width:180px" title="把所选平台上该账号可用的模型拉取进网关（增量）"><option value="">同步模型：选择平台…</option><option value="__all">全部平台（逐个拉取）</option>${providerOptsAll}</select>
     <button class="ghost" id="mfSyncBtn" title="把所选平台账号在上游可用的模型同步进网关（增量，不删除已有）">开始同步</button>
-    <button onclick="openModelForm()">+ 手动添加</button>
+    <button onclick="openModelForm()">＋ 手动添加</button>
   </div>
-  <div class="toolbar" style="background:var(--panel2);border-radius:8px;padding:8px 12px">
+  <div class="toolbar" style="background:var(--bg-soft);border:1px solid var(--border);border-radius:var(--radius-sm);padding:9px 14px">
     <span class="muted">批量：</span>
-    <label class="row" style="gap:4px;font-size:13px"><input type="checkbox" id="mfCheckAll" style="width:auto"> 全选本页</label>
-    <button class="small" onclick="batchModels('enable')">启用选中</button>
+    <label class="row" style="gap:5px;font-size:13px"><input type="checkbox" id="mfCheckAll" style="width:auto"> 全选本页</label>
+    <button class="small ghost" onclick="batchModels('enable')">启用选中</button>
     <button class="small ghost" onclick="batchModels('disable')">禁用选中</button>
-    <button class="small danger" onclick="batchModels('delete')">删除选中</button>
-    <span class="muted">|</span>
+    <button class="small ghost danger" onclick="batchModels('delete')">删除选中</button>
+    <span class="divider"></span>
     <button class="small ghost" onclick="batchScope('enable')">启用当前筛选</button>
     <button class="small ghost" onclick="batchScope('disable')">禁用当前筛选</button>
     <button class="small ghost" onclick="batchDevVariants()">隐藏 __dev 变体</button>
   </div>
-  <div class="card" style="padding:6px 12px">
+  <div class="table-wrap">
   <table><tr><th style="width:26px"></th><th>对外名称</th><th>平台</th><th>上游模型</th><th>倍率</th><th>免费</th><th>可用账号</th><th>标签</th><th>启用</th><th>操作</th></tr>
   ${models.map(md => `<tr>
     <td><input type="checkbox" class="mfCheck" value="${md.id}" style="width:auto"></td>
@@ -602,9 +620,9 @@ async function renderModels(m) {
     <td class="muted">${esc(md.tags || '')}</td>
     <td>${switchHtml(md.enabled, `toggleModel(${md.id})`)}</td>
     <td><button class="small ghost" onclick="openModelForm(${md.id})">编辑</button>
-        <button class="small danger" onclick="delModel(${md.id})">删</button></td>
+        <button class="small ghost danger" onclick="delModel(${md.id})">删</button></td>
   </tr>`).join('')}
-  ${!models.length ? '<tr><td colspan="10" class="muted" style="text-align:center;padding:24px">暂无模型 — 添加账号后在上方选择平台「开始同步」，或手动添加</td></tr>' : ''}
+  ${!models.length ? emptyRow(10, '🧩', '暂无模型 — 添加账号后在上方选择平台「开始同步」，或手动添加') : ''}
   </table></div>`;
   $('#mfProvider').onchange = e => { modelFilter.provider_id = e.target.value; renderModels(m); };
   $('#mfEnabled').onchange = e => { modelFilter.enabled = e.target.value; renderModels(m); };
@@ -687,8 +705,8 @@ async function renderVirtual(m) {
   const byProvider = {};
   for (const t of targets) (byProvider[t.provider_id] = byProvider[t.provider_id] || []).push(t.public_name);
   m.innerHTML = `
-  <h2>统一模型 <span class="muted">(${virtuals.length})</span></h2>
-  <p class="muted" style="margin-bottom:12px">统一模型把多个平台的真实模型聚合成一个对外名称：客户端请求它时，网关按目标顺序依次尝试，<b>失败自动切换下一个</b>。也可以用来改名（如对外叫 <span class="mono">gpt-4o</span>，实际走 DeepSeek/GLM）。与「模型管理」里的直接模型相互独立，都可通过 /v1/models 看到。</p>
+  ${pageHead(`统一模型 <span class="muted" style="font-size:13px">(${virtuals.length})</span>`)}
+  <div class="hint">统一模型把多个平台的真实模型聚合成一个对外名称：客户端请求它时，网关按目标顺序依次尝试，<b>失败自动切换下一个</b>。也可以用来改名（如对外叫 <span class="mono">gpt-4o</span>，实际走 DeepSeek/GLM）。与「模型管理」里的直接模型相互独立，都可通过 /v1/models 看到。</div>
   <div class="toolbar">
     <span class="muted">快速创建（同名多平台聚合）：</span>
     <select id="vpSel" style="width:260px"><option value="">选择预设…</option>
@@ -697,9 +715,9 @@ async function renderVirtual(m) {
     <button class="ghost" id="vpCreate" title="按预设聚合：每个平台一个目标；具体用哪个账号由该平台的账号池按优先级/轮询决定，无需逐账号配置">一键创建</button>
     <button class="ghost" id="vpCreateAll" title="把下方列表里所有「同名且 ≥2 平台」的预设一次性全部创建为统一模型（已存在的跳过）">⚡ 一键创建全部（${presets.filter(p => p.multiProvider).length}）</button>
     <span class="spacer"></span>
-    <button onclick="openVirtualForm()">+ 自定义</button>
+    <button onclick="openVirtualForm()">＋ 自定义</button>
   </div>
-  <div class="card" style="padding:6px 12px">
+  <div class="table-wrap">
   <table><tr><th>对外名称</th><th>目标链（按优先级）</th><th>启用</th><th>备注</th><th>操作</th></tr>
   ${virtuals.map(v => {
     const ts = JSON.parse(v.targets || '[]').sort((a, b) => (a.priority ?? 100) - (b.priority ?? 100));
@@ -709,10 +727,10 @@ async function renderVirtual(m) {
     <td>${switchHtml(v.enabled, `toggleVirtual('${esc(v.public_name)}', ${v.enabled ? 0 : 1})`)}</td>
     <td class="muted">${esc(v.note || '')}</td>
     <td><button class="small ghost" onclick="openVirtualForm('${esc(v.public_name)}')">编辑</button>
-        <button class="small danger" onclick="delVirtual('${esc(v.public_name)}')">删</button></td>
+        <button class="small ghost danger" onclick="delVirtual('${esc(v.public_name)}')">删</button></td>
   </tr>`;
   }).join('')}
-  ${!virtuals.length ? '<tr><td colspan="5" class="muted" style="text-align:center;padding:24px">暂无统一模型 — 用上方预设一键创建，或「自定义」</td></tr>' : ''}
+  ${!virtuals.length ? emptyRow(5, '🔀', '暂无统一模型 — 用上方预设一键创建，或「自定义」') : ''}
   </table></div>`;
   window._virtualTargets = byProvider;
   $('#vpCreate').onclick = async () => {
@@ -749,7 +767,7 @@ async function openVirtualForm(name) {
       <div id="vfTargets">
       ${targets.map((t, i) => virtualTargetRow(i, t, byProvider)).join('')}
       </div>
-      <button class="small ghost" onclick="addVirtualTargetRow()">+ 添加目标</button></div>
+      <button class="small ghost" onclick="addVirtualTargetRow()">＋ 添加目标</button></div>
     <div class="field"><label>备注</label><input id="vfNote" value="${esc(v?.note || '')}"></div>
     <div class="row"><span class="spacer"></span><button class="ghost" onclick="closeModal()">取消</button>
     <button onclick="saveVirtual('${esc(name || '')}')">保存</button></div>`, {});
@@ -806,12 +824,12 @@ let keySearch = '';
 async function renderApikeys(m) {
   const keys = await api('/apikeys?' + (keySearch ? 'search=' + encodeURIComponent(keySearch) : ''));
   m.innerHTML = `
-  <h2>API Keys <span class="muted">(${keys.length})</span> <span class="muted" style="font-size:12px">— harness 工具用这些 key 调用本网关</span></h2>
+  ${pageHead(`API Keys <span class="muted" style="font-size:13px">(${keys.length})</span>`, 'harness 工具用这些 key 调用本网关')}
   <div class="toolbar">
     <input id="kSearch" class="searchbox" placeholder="搜索…" value="${esc(keySearch)}">
-    <span class="spacer"></span><button onclick="openKeyForm()">+ 生成 Key</button>
+    <span class="spacer"></span><button onclick="openKeyForm()">＋ 生成 Key</button>
   </div>
-  <div class="card" style="padding:6px 12px">
+  <div class="table-wrap">
   <table><tr><th>名称</th><th>Key</th><th>允许模型</th><th>RPM</th><th>日限(积分)</th><th>最近使用</th><th>启用</th><th>操作</th></tr>
   ${keys.map(k => `<tr>
     <td><b>${esc(k.name || '(未命名)')}</b></td>
@@ -821,9 +839,9 @@ async function renderApikeys(m) {
     <td class="muted">${fmtTime(k.last_used_at)}</td>
     <td>${switchHtml(k.enabled, `toggleKey(${k.id}, ${k.enabled ? 0 : 1})`)}</td>
     <td><button class="small ghost" onclick="openKeyForm(${k.id})">编辑</button>
-        <button class="small danger" onclick="delKey(${k.id})">删</button></td>
+        <button class="small ghost danger" onclick="delKey(${k.id})">删</button></td>
   </tr>`).join('')}
-  ${!keys.length ? '<tr><td colspan="8" class="muted" style="text-align:center;padding:24px">暂无 key — 不创建任何 key 时网关为开放模式（仅建议本机使用）</td></tr>' : ''}
+  ${!keys.length ? emptyRow(8, '🔑', '暂无 key — 不创建任何 key 时网关为开放模式（仅建议本机使用）') : ''}
   </table></div>`;
   $('#kSearch').onkeydown = e => { if (e.key === 'Enter') { keySearch = e.target.value; renderApikeys(m); } };
 }
@@ -843,11 +861,11 @@ async function openKeyForm(id) {
   openModal(k ? '编辑 Key' : '生成 Key', `
     <div class="field"><label>名称</label><input id="kfName" value="${esc(k?.name || '')}" placeholder="如 my-trae-client"></div>
     <div class="field"><label>允许的模型</label>
-      <label class="row" style="gap:6px;font-size:13px;margin-bottom:6px"><input type="checkbox" id="kfAll" style="width:auto" ${isAll ? 'checked' : ''} onchange="kfToggleAll(this)"> 全部模型（不限制）</label>
+      <label class="row" style="gap:6px;font-size:13px;margin-bottom:8px"><input type="checkbox" id="kfAll" style="width:auto" ${isAll ? 'checked' : ''} onchange="kfToggleAll(this)"> 全部模型（不限制）</label>
       <div id="kfPicker" style="${isAll ? 'display:none' : ''}">
-        <input id="kfSearch" placeholder="输入筛选（如 glm、kimi、qoder…）" oninput="kfRenderList()" style="margin-bottom:6px">
-        <div id="kfList" style="max-height:220px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px"></div>
-        <p class="muted" style="margin-top:4px" id="kfCount"></p>
+        <input id="kfSearch" placeholder="输入筛选（如 glm、kimi、qoder…）" oninput="kfRenderList()" style="margin-bottom:8px">
+        <div id="kfList" style="max-height:220px;overflow:auto;border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px;background:var(--bg-soft)"></div>
+        <p class="muted" style="margin-top:6px" id="kfCount"></p>
       </div></div>
     <div class="row">
       <div class="field" style="width:130px"><label>RPM 限制(0=∞)</label><input id="kfRpm" type="number" value="${k?.rpm_limit ?? 0}"></div>
@@ -867,7 +885,7 @@ function kfRenderList() {
   const { allNames, selected } = window._keyModels;
   const filtered = allNames.filter(m => !q || m.name.toLowerCase().includes(q) || m.tag.toLowerCase().includes(q));
   $('#kfList').innerHTML = filtered.map(m => `
-    <label class="row" style="gap:6px;font-size:13px;padding:2px 4px;cursor:pointer">
+    <label class="row" style="gap:6px;font-size:13px;padding:3px 6px;cursor:pointer;border-radius:4px">
       <input type="checkbox" style="width:auto" ${selected.has(m.name) ? 'checked' : ''} onchange="kfPick('${esc(m.name)}', this.checked)">
       <span class="mono">${esc(m.name)}</span> ${m.tag === '统一' ? '<span class="badge purple">统一</span>' : `<span class="badge gray">${esc(m.tag)}</span>`}
     </label>`).join('') || '<p class="muted" style="padding:6px">无匹配模型</p>';
@@ -890,11 +908,11 @@ async function saveKey(id) {
 }
 function showKeyOnce(key) {
   openModal('✅ Key 已生成（仅显示一次）', `
-    <p style="margin-bottom:8px">请立即复制保存：</p>
+    <p style="margin-bottom:10px">请立即复制保存：</p>
     <pre class="mono" id="keyShow">${esc(key)}</pre>
-    <div class="row" style="margin-top:12px"><span class="spacer"></span>
+    <div class="row" style="margin-top:14px"><span class="spacer"></span>
     <button onclick="navigator.clipboard.writeText('${key}');toast('已复制')">复制</button>
-    <button onclick="closeModal()">完成</button></div>`, {});
+    <button class="ghost" onclick="closeModal()">完成</button></div>`, {});
 }
 
 // ---------- usage ----------
@@ -906,39 +924,30 @@ async function renderUsage(m) {
     api('/usage?' + new URLSearchParams(Object.fromEntries(Object.entries({ ...usageFilter }).filter(([, v]) => v)))),
     api('/usage/chart?hours=' + usageChartHours),
   ]);
-  const maxReqs = Math.max(1, ...chart.series.map(s => s.reqs));
   const maxDim = Math.max(1, chart.byModel[0]?.reqs || 1, chart.byProvider[0]?.reqs || 1);
-  const bar = (v, total, color = 'var(--accent)') => `<div style="background:${color};height:8px;border-radius:4px;width:${Math.round(v / Math.max(1, total) * 100)}%"></div>`;
+  const bar = (v, color = 'var(--accent)') => `<div class="pbar" style="max-width:none;width:100%"><i style="width:${Math.round(v / maxDim * 100)}%;background:${color}"></i></div>`;
   const dimTable = (title, rows, cols) => !rows.length ? '' : `
     <div style="flex:1;min-width:260px">
-      <h4 style="font-size:13px;margin-bottom:8px;color:var(--muted)">${title}</h4>
+      <h4 style="font-size:13px;margin-bottom:8px;color:var(--text-dim)">${title}</h4>
       <table style="font-size:12.5px">${rows.map(r => `<tr>
-        <td class="mono" style="padding:3px 8px 3px 0;white-space:nowrap">${esc(r.key)}${r.key.includes('#') || /^\d+$/.test(r.key) ? badge('账号', 'gray') : ''}</td>
-        ${cols.map(c => `<td style="padding:3px 10px 3px 0;color:var(--muted)">${c(r)}</td>`).join('')}
-        <td style="width:36%">${bar(r.reqs, maxDim)}</td>
+        <td class="mono" style="padding:4px 8px 4px 0;white-space:nowrap">${esc(r.key)}${r.key.includes('#') || /^\d+$/.test(r.key) ? badge('账号', 'gray') : ''}</td>
+        ${cols.map(c => `<td style="padding:4px 10px 4px 0;color:var(--muted)">${c(r)}</td>`).join('')}
+        <td style="width:34%">${bar(r.reqs)}</td>
       </tr>`).join('')}</table>
     </div>`;
   m.innerHTML = `
-  <h2>用量日志</h2>
+  ${pageHead('用量日志')}
   <div class="card">
     <div class="toolbar" style="margin-bottom:10px">
-      <h3 style="font-size:14px">趋势</h3>
+      <h3 style="font-size:14px;margin:0">趋势</h3>
       <span class="spacer"></span>
       <select id="ucHours" style="width:130px">
         ${[[24, '最近 24 小时'], [48, '最近 48 小时'], [168, '最近 7 天'], [720, '最近 30 天']].map(([v, l]) => `<option value="${v}" ${usageChartHours === v ? 'selected' : ''}>${l}</option>`).join('')}
       </select>
     </div>
-    <div style="display:flex;align-items:flex-end;gap:3px;height:120px;padding:0 4px">
-      ${chart.series.map(s => `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%" title="${s.label} · ${s.reqs} 请求 · 失败 ${s.errors} · in ${s.tin}/out ${s.tout} tok · 积分 ${Number(s.credits).toFixed(2)}">
-        <span class="mono muted" style="font-size:9px;margin-bottom:2px">${s.reqs || ''}</span>
-        <div style="width:70%;background:${s.errors ? 'linear-gradient(180deg,var(--red),var(--accent))' : 'var(--accent)'};border-radius:3px 3px 0 0;height:${Math.round(s.reqs / maxReqs * 92)}%;min-height:${s.reqs ? '3px' : '0'}"></div>
-      </div>`).join('')}
-    </div>
-    <div style="display:flex;gap:3px;padding:4px 4px 0">
-      ${chart.series.filter((s, i) => i % Math.ceil(chart.series.length / 12) === 0).map(s => `<span class="muted mono" style="flex:1;font-size:10px;text-align:center">${s.label}</span>`).join('')}
-    </div>
+    ${chartHtml(chart, 120)}
   </div>
-  <div class="card" style="display:flex;gap:24px;flex-wrap:wrap">
+  <div class="card" style="display:flex;gap:26px;flex-wrap:wrap">
     ${dimTable('模型 Top（请求数）', chart.byModel, [r => `${r.reqs} 次`, r => `${((r.tin||0)/1000).toFixed(1)}k/${((r.tout||0)/1000).toFixed(1)}k`])}
     ${dimTable('平台（请求/积分）', chart.byProvider, [r => `${r.reqs} 次`, r => `积分 ${Number(r.credits).toFixed(1)}`])}
     ${dimTable('账号', chart.byAccount, [r => `${r.reqs} 次`, r => `积分 ${Number(r.credits).toFixed(1)}`])}
@@ -950,7 +959,7 @@ async function renderUsage(m) {
     <select id="uStatus" style="width:110px"><option value="">全部</option><option value="ok" ${usageFilter.status === 'ok' ? 'selected' : ''}>成功</option><option value="error" ${usageFilter.status === 'error' ? 'selected' : ''}>失败</option></select>
     <span class="spacer"></span><span class="muted">明细（最近在前）</span>
   </div>
-  <div class="card" style="padding:6px 12px">
+  <div class="table-wrap">
   <table><tr><th>时间</th><th>平台</th><th>账号</th><th>模型</th><th>输入</th><th>输出</th><th>积分</th><th>耗时</th><th>状态</th></tr>
   ${usage.rows.map(u => `<tr>
     <td class="muted mono">${fmtTime(u.ts)}</td><td>${esc(u.provider_id || '')}</td><td>#${u.account_id ?? '-'}</td>
@@ -958,9 +967,9 @@ async function renderUsage(m) {
     <td>${u.credits ? u.credits.toFixed(3) : '-'}</td><td>${u.latency_ms}ms</td>
     <td>${u.status < 400 ? badge(u.status, 'green') : badge(u.status + (u.error ? ' ' + u.error.slice(0, 40) : ''), 'red')}</td>
   </tr>`).join('')}
-  ${!usage.rows.length ? '<tr><td colspan="9" class="muted" style="text-align:center;padding:24px">暂无请求</td></tr>' : ''}
+  ${!usage.rows.length ? emptyRow(9, '📈', '暂无请求') : ''}
   </table>
-  <div class="pager">共 ${usage.total} 条
+  <div class="pager" style="padding:0 14px 14px">共 ${usage.total} 条
     <button class="small ghost" ${usageFilter.page <= 1 ? 'disabled' : ''} onclick="usageFilter.page--;renderUsage($('#main'))">上一页</button>
     <button class="small ghost" ${usageFilter.page * usage.size >= usage.total ? 'disabled' : ''} onclick="usageFilter.page++;renderUsage($('#main'))">下一页</button>
   </div></div>`;
@@ -974,10 +983,10 @@ async function renderUsage(m) {
 async function renderMcp(m) {
   const servers = await api('/mcp');
   m.innerHTML = `
-  <h2>MCP 服务 <span class="muted">(${servers.length})</span></h2>
-  <p class="muted" style="margin-bottom:12px">客户端 MCP 配置：JSON-RPC over HTTP，端点 <span class="mono badge blue">http://localhost:8317/mcp</span>。添加的 MCP 服务器的工具会聚合在此端点暴露（工具名 <span class="mono">服务id__工具名</span>）。</p>
-  <div class="toolbar"><span class="spacer"></span><button onclick="openMcpForm()">+ 添加 MCP 服务</button></div>
-  <div class="card" style="padding:6px 12px">
+  ${pageHead(`MCP 服务 <span class="muted" style="font-size:13px">(${servers.length})</span>`)}
+  <div class="hint">客户端 MCP 配置：JSON-RPC over HTTP，端点 <span class="mono badge blue">http://localhost:8317/mcp</span>。添加的 MCP 服务器的工具会聚合在此端点暴露（工具名 <span class="mono">服务id__工具名</span>）。</div>
+  <div class="toolbar"><span class="spacer"></span><button onclick="openMcpForm()">＋ 添加 MCP 服务</button></div>
+  <div class="table-wrap">
   <table><tr><th>ID</th><th>传输</th><th>目标</th><th>工具过滤</th><th>启用</th><th>操作</th></tr>
   ${servers.map(s => `<tr>
     <td class="mono"><b>${esc(s.id)}</b></td>
@@ -987,9 +996,9 @@ async function renderMcp(m) {
     <td>${switchHtml(s.enabled, `toggleMcp('${esc(s.id)}', ${s.enabled ? 0 : 1})`)}</td>
     <td><button class="small ghost" onclick="listMcpTools('${esc(s.id)}')">列出工具</button>
         <button class="small ghost" onclick="openMcpForm('${esc(s.id)}')">编辑</button>
-        <button class="small danger" onclick="delMcp('${esc(s.id)}')">删</button></td>
+        <button class="small ghost danger" onclick="delMcp('${esc(s.id)}')">删</button></td>
   </tr>`).join('')}
-  ${!servers.length ? '<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">暂无 MCP 服务 — 可接入本地 npx 服务器或远程 http MCP</td></tr>' : ''}
+  ${!servers.length ? emptyRow(6, '🔌', '暂无 MCP 服务 — 可接入本地 npx 服务器或远程 http MCP') : ''}
   </table></div>`;
 }
 async function toggleMcp(id, enabled) { await api('/mcp/' + encodeURIComponent(id), { method: 'PUT', body: { enabled } }); renderMcp($('#main')); }
@@ -1033,7 +1042,6 @@ async function saveMcp(id) {
   } catch (e) { toast(e.message, true); }
 }
 
-// ---------- playground ----------
 // ---------- playground (测试台) ----------
 // 后端 /admin/api/test/chat 支持 forceAccountId —— 直接指定账号测试，绕过轮询
 async function renderPlayground(m) {
@@ -1045,9 +1053,9 @@ async function renderPlayground(m) {
   for (const md of enabledModels) (byProvider[md.provider_id] = byProvider[md.provider_id] || []).push(md);
   window._pg = { accounts, models: byProvider, virtuals };
   m.innerHTML = `
-  <h2>测试台 <span class="muted" style="font-size:12px">— 模拟 harness 工具接入；每次请求的完整内容在「请求详情」可见</span></h2>
+  ${pageHead('测试台', '模拟 harness 工具接入；每次请求的完整内容在「请求详情」可见')}
   <div class="card">
-    <div class="row" style="margin-bottom:8px;flex-wrap:wrap">
+    <div class="row" style="margin-bottom:10px;flex-wrap:wrap">
       <select id="pgProvider" style="width:170px" onchange="pgProviderChange()">
         <option value="">选择平台…</option>
         <option value="__virtual">统一模型</option>
@@ -1063,29 +1071,29 @@ async function renderPlayground(m) {
       <span class="spacer"></span>
       <button id="pgSend" onclick="pgSend()" style="flex-shrink:0">发送</button>
     </div>
-    <details style="margin-bottom:8px">
+    <details style="margin-bottom:10px">
       <summary style="cursor:pointer;color:var(--muted);font-size:13px">请求参数（可修改，随请求发送）</summary>
-      <div class="row" style="gap:10px;flex-wrap:wrap;margin-top:8px">
+      <div class="row" style="gap:10px;flex-wrap:wrap;margin-top:10px">
         <div class="field" style="width:130px;margin:0"><label>temperature</label><input id="pgTemp" type="number" step="0.1" min="0" max="2" value="0.7"></div>
         <div class="field" style="width:130px;margin:0"><label>top_p</label><input id="pgTopP" type="number" step="0.1" min="0" max="1" value="1"></div>
         <div class="field" style="width:150px;margin:0"><label>max_tokens（空=默认）</label><input id="pgMaxTok" type="number" min="1" placeholder="默认"></div>
         <div class="field" style="width:170px;margin:0"><label>思考深度 reasoning</label>
           <select id="pgReasoning"><option value="">默认（不发）</option><option value="think">开 (-think)</option><option value="think-high">高 (-think-high)</option><option value="xhigh">最高 (-xhigh)</option><option value="nothink">关 (-nothink)</option></select></div>
-        <div style="flex:1;min-width:220px"><label style="font-size:12px;color:var(--muted)">system 提示词（可选）</label>
+        <div style="flex:1;min-width:220px"><label style="font-size:12px;color:var(--text-dim)">system 提示词（可选）</label>
         <input id="pgSystem" placeholder="如：你是一个简洁的助手" style="margin-top:2px"></div>
       </div>
     </details>
-    <div class="row" style="margin-bottom:8px;gap:12px;flex-wrap:wrap;font-size:13px">
-      <label class="row" style="gap:4px" title="流式：服务器边生成边推（SSE/NDJSON），harness 工具大多用这个；非流式：等全部生成完一次性返回 JSON">
+    <div class="row" style="margin-bottom:10px;gap:14px;flex-wrap:wrap;font-size:13px">
+      <label class="row" style="gap:5px" title="流式：服务器边生成边推（SSE/NDJSON），harness 工具大多用这个；非流式：等全部生成完一次性返回 JSON">
         <input type="checkbox" id="pgStream" style="width:auto" checked> 流式</label>
-      <label class="row" style="gap:4px"><input type="checkbox" id="pgShowRaw" style="width:auto" onchange="pgRenderOut()"> 显示原始事件</label>
-      <label class="row" style="gap:4px"><input type="checkbox" id="pgDetails" style="width:auto" checked onchange="pgRenderOut()"> 请求详情</label>
+      <label class="row" style="gap:5px"><input type="checkbox" id="pgShowRaw" style="width:auto" onchange="pgRenderOut()"> 显示原始事件</label>
+      <label class="row" style="gap:5px"><input type="checkbox" id="pgDetails" style="width:auto" checked onchange="pgRenderOut()"> 请求详情</label>
       <span class="spacer"></span>
       <span id="pgEndpoint" class="muted mono" style="font-size:12px"></span>
     </div>
     <textarea id="pgPrompt" rows="4" style="resize:vertical" placeholder="输入测试消息…">你好，请用一句话介绍你自己。</textarea>
   </div>
-  <div class="card" id="pgOut" style="min-height:120px"><p class="muted">配置上方并点「发送」— 结果与请求详情显示在这里（布局固定，不会跳动）</p></div>`;
+  <div class="card" id="pgOut" style="min-height:120px"><div class="empty"><span class="ico">🧪</span>配置上方并点「发送」— 结果与请求详情显示在这里（布局固定，不会跳动）</div></div>`;
   pgProviderChange();
 }
 function pgProviderChange() {
@@ -1119,13 +1127,13 @@ function pgRenderOut() {
   const out = $('#pgOut');
   let html = '';
   if ($('#pgDetails').checked) {
-    html += `<details open style="margin-bottom:12px"><summary style="cursor:pointer;color:var(--muted);font-size:13px">请求详情（模拟 harness 发送的完整请求）</summary>
-    <pre class="mono" style="margin-top:8px;max-height:260px">${esc(st.requestPreview)}</pre></details>`;
+    html += `<details open style="margin-bottom:14px"><summary style="cursor:pointer;color:var(--muted);font-size:13px">请求详情（模拟 harness 发送的完整请求）</summary>
+    <pre class="mono" style="margin-top:10px;max-height:260px">${esc(st.requestPreview)}</pre></details>`;
   }
   html += st.statusHtml;
   if ($('#pgShowRaw').checked && st.rawEvents?.length) {
-    html += `<details style="margin-top:12px"><summary style="cursor:pointer;color:var(--muted);font-size:13px">原始流事件 (${st.rawEvents.length} 条)</summary>
-    <pre class="mono" style="margin-top:8px;max-height:300px">${esc(st.rawEvents.join('\n').slice(0, 20000))}</pre></details>`;
+    html += `<details style="margin-top:14px"><summary style="cursor:pointer;color:var(--muted);font-size:13px">原始流事件 (${st.rawEvents.length} 条)</summary>
+    <pre class="mono" style="margin-top:10px;max-height:300px">${esc(st.rawEvents.join('\n').slice(0, 20000))}</pre></details>`;
   }
   out.innerHTML = html;
   const pre = out.querySelector('#pgLive');
@@ -1179,7 +1187,7 @@ async function pgSend() {
       const dec = new TextDecoder();
       let buf = '', usageLine = '';
       const st = window._pgState;
-      st.statusHtml = `<pre class="mono" id="pgLive" style="white-space:pre-wrap;max-height:420px;overflow:auto;min-height:60px"></pre><p class="muted" id="pgMeta" style="margin-top:8px">接收中…</p>`;
+      st.statusHtml = `<pre class="mono" id="pgLive" style="white-space:pre-wrap;max-height:420px;overflow:auto;min-height:60px"></pre><p class="muted" id="pgMeta" style="margin-top:10px">接收中…</p>`;
       pgRenderOut();
       while (true) {
         const { done, value } = await reader.read();
@@ -1219,7 +1227,7 @@ async function pgSend() {
         const pre = $('#pgLive');
         if (pre) pre.textContent = st.liveText || '(等待响应…)';
       }
-      st.statusHtml = `<pre class="mono" style="white-space:pre-wrap;max-height:420px;overflow:auto">${esc(st.liveText) || '<span class="muted">(空响应)</span>'}</pre><p class="muted" style="margin-top:8px">${esc(usageLine || '流结束')} · ${{ chat: 'chat SSE/NDJSON', responses: 'Responses 事件流', anthropic: 'Anthropic content blocks' }[protocol]}</p>`;
+      st.statusHtml = `<pre class="mono" style="white-space:pre-wrap;max-height:420px;overflow:auto">${esc(st.liveText) || '<span class="muted">(空响应)</span>'}</pre><p class="muted" style="margin-top:10px">${esc(usageLine || '流结束')} · ${{ chat: 'chat SSE/NDJSON', responses: 'Responses 事件流', anthropic: 'Anthropic content blocks' }[protocol]}</p>`;
       pgRenderOut();
     } else {
       const r = await api('/test/chat', { method: 'POST', body: { model, messages, forceAccountId: accountId ? Number(accountId) : null, params, protocol, system } });
@@ -1227,19 +1235,19 @@ async function pgSend() {
       if (protocol === 'responses' && r.ok) {
         st.liveText = r.response?.output_text || '';
         st.statusHtml = `<pre class="mono" style="white-space:pre-wrap;max-height:420px;overflow:auto">${esc(st.liveText)}</pre>
-          <p class="muted" style="margin-top:8px">${r.latency_ms}ms · status=${r.response?.status} · 输入 ${r.response?.usage?.input_tokens} tok / 输出 ${r.response?.usage?.output_tokens} tok</p>
-          <details style="margin-top:8px"><summary style="cursor:pointer;color:var(--muted);font-size:13px">完整 response 对象（ChatGPT Responses 格式）</summary>
-          <pre class="mono" style="margin-top:8px;max-height:300px">${esc(JSON.stringify(r.response, null, 2))}</pre></details>`;
+          <p class="muted" style="margin-top:10px">${r.latency_ms}ms · status=${r.response?.status} · 输入 ${r.response?.usage?.input_tokens} tok / 输出 ${r.response?.usage?.output_tokens} tok</p>
+          <details style="margin-top:10px"><summary style="cursor:pointer;color:var(--muted);font-size:13px">完整 response 对象（ChatGPT Responses 格式）</summary>
+          <pre class="mono" style="margin-top:10px;max-height:300px">${esc(JSON.stringify(r.response, null, 2))}</pre></details>`;
       } else if (protocol === 'anthropic' && r.ok) {
-        const m = r.message || {};
-        st.liveText = (m.content || []).map(b => b.type === 'thinking' ? '[思考] ' + b.thinking : b.text).join('\n\n');
-        st.statusHtml = `<pre class="mono" style="white-space:pre-wrap;max-height:420px;overflow:auto">${esc((m.content || []).map(b => b.type === 'thinking' ? '〔思考〕' + b.thinking : b.text).join('\n\n──\n\n'))}</pre>
-          <p class="muted" style="margin-top:8px">${r.latency_ms}ms · stop=${m.stop_reason} · 输入 ${m.usage?.input_tokens} tok / 输出 ${m.usage?.output_tokens} tok · content 块: ${(m.content || []).map(b => b.type).join(', ') || '-'}</p>
-          <details style="margin-top:8px"><summary style="cursor:pointer;color:var(--muted);font-size:13px">完整 message 对象（Anthropic Messages 格式）</summary>
-          <pre class="mono" style="margin-top:8px;max-height:300px">${esc(JSON.stringify(m, null, 2))}</pre></details>`;
+        const msg = r.message || {};
+        st.liveText = (msg.content || []).map(b => b.type === 'thinking' ? '[思考] ' + b.thinking : b.text).join('\n\n');
+        st.statusHtml = `<pre class="mono" style="white-space:pre-wrap;max-height:420px;overflow:auto">${esc((msg.content || []).map(b => b.type === 'thinking' ? '〔思考〕' + b.thinking : b.text).join('\n\n──\n\n'))}</pre>
+          <p class="muted" style="margin-top:10px">${r.latency_ms}ms · stop=${msg.stop_reason} · 输入 ${msg.usage?.input_tokens} tok / 输出 ${msg.usage?.output_tokens} tok · content 块: ${(msg.content || []).map(b => b.type).join(', ') || '-'}</p>
+          <details style="margin-top:10px"><summary style="cursor:pointer;color:var(--muted);font-size:13px">完整 message 对象（Anthropic Messages 格式）</summary>
+          <pre class="mono" style="margin-top:10px;max-height:300px">${esc(JSON.stringify(msg, null, 2))}</pre></details>`;
       } else if (r.ok) {
         st.liveText = r.text;
-        st.statusHtml = `<pre class="mono" style="white-space:pre-wrap;max-height:420px;overflow:auto">${esc(r.text)}</pre><p class="muted" style="margin-top:8px">${r.latency_ms}ms · 输入 ${r.usage.input_tokens} tok / 输出 ${r.usage.output_tokens} tok · 积分 ${(r.usage.credits || 0).toFixed(3)}</p>`;
+        st.statusHtml = `<pre class="mono" style="white-space:pre-wrap;max-height:420px;overflow:auto">${esc(r.text)}</pre><p class="muted" style="margin-top:10px">${r.latency_ms}ms · 输入 ${r.usage.input_tokens} tok / 输出 ${r.usage.output_tokens} tok · 积分 ${(r.usage.credits || 0).toFixed(3)}</p>`;
       } else {
         st.statusHtml = `<pre style="color:var(--red);white-space:pre-wrap">${esc(r.error)}${r.status ? ' (HTTP ' + r.status + ')' : ''}</pre>`;
       }
@@ -1296,7 +1304,7 @@ claude`;
 要求：不要硬编码密钥到代码仓库，从环境变量读取（如 \`OPENAI_BASE_URL\`/\`OPENAI_API_KEY\`）。`;
 
   m.innerHTML = `
-  <h2>文档教程 <span class="muted" style="font-size:12px">— 给人看的接入指南 + 给 AI 看的对接说明</span></h2>
+  ${pageHead('文档教程', '给人看的接入指南 + 给 AI 看的对接说明')}
   <div class="docgrid">
     <div class="doccard">
       <h4>① 概念：这套网关是什么</h4>
@@ -1314,12 +1322,12 @@ claude`;
         <li>「模型管理」页 → 选平台点「开始同步」拉取模型；「统一模型」页可一键聚合</li>
         <li>「API Keys」页 → 生成一个 key，然后在工具里填：</li>
       </ol>
-      <div class="kv" style="margin-top:8px">
+      <div class="kv" style="margin-top:10px">
         <span class="muted">OpenAI 工具</span><span class="mono">${d.base}/v1</span>
         <span class="muted">Claude Code</span><span class="mono">ANTHROPIC_BASE_URL=${d.base}</span>
         <span class="muted">MCP 客户端</span><span class="mono">${d.base}/mcp</span>
       </div>
-      <p class="muted" style="margin-top:6px;font-size:12px">${keyHint}</p>
+      <p class="muted" style="margin-top:8px;font-size:12px">${keyHint}</p>
     </div>
     <div class="doccard">
       <h4>③ 快速验证（curl）</h4>
@@ -1337,21 +1345,21 @@ claude`;
       <h4>Claude Code（Windows CMD）</h4>
       <div class="copypre"><pre class="mono" id="docCC">${esc(ccEx)}</pre>
       <button class="small ghost copybtn" onclick="copyDoc('docCC')">复制</button></div>
-      <p class="muted" style="margin-top:6px;font-size:12px">其他工具同理：凡支持自定义 OpenAI base_url 的（Cline / Cursor / LobeChat / Dify…），base 填 <span class="mono">${d.base}/v1</span>，key 填网关 key。</p>
+      <p class="muted" style="margin-top:8px;font-size:12px">其他工具同理：凡支持自定义 OpenAI base_url 的（Cline / Cursor / LobeChat / Dify…），base 填 <span class="mono">${d.base}/v1</span>，key 填网关 key。</p>
     </div>
   </div>
   <div class="card">
-    <h4 style="font-size:13.5px;margin-bottom:6px">④ 教 AI 怎么对接（把下面这段发给任何 AI 助手，它就知道怎么接）</h4>
+    <h4 style="font-size:13.5px;margin-bottom:8px">④ 教 AI 怎么对接（把下面这段发给任何 AI 助手，它就知道怎么接）</h4>
     <div class="copypre"><pre class="mono" id="docAI" style="white-space:pre-wrap;max-height:340px">${esc(aiPrompt)}</pre>
     <button class="small ghost copybtn" onclick="copyDoc('docAI')">复制</button></div>
-    <div class="aiex" style="margin-top:12px">
+    <div class="aiex" style="margin-top:14px">
       <b>更省事的用法：</b>本页信息已做成 AI 可读端点 —— 让 AI 自己请求
       <span class="mono">${d.base}/docs/api.md</span>（无需登录），它会拿到完整对接说明和实时模型列表。
       例如对本 AI 说：「打开 ${d.base}/docs/api.md 按里面的说明把网关接入你正在写的工具」。
     </div>
   </div>
   <div class="card">
-    <h4 style="font-size:13.5px;margin-bottom:8px">⑤ 常见问题</h4>
+    <h4 style="font-size:13.5px;margin-bottom:10px">⑤ 常见问题</h4>
     <table>
       <tr><td style="width:220px"><b>401 Invalid API key</b></td><td class="muted">key 没填对或被停用；「API Keys」页检查。一个 key 都没有时网关是开放模式（无需 key）。</td></tr>
       <tr><td><b>403 model not allowed</b></td><td class="muted">该 key 的「允许模型」白名单没包含这个模型；编辑 key 改成「全部模型」或加上它。</td></tr>
@@ -1374,10 +1382,10 @@ function copyDoc(id) {
 async function renderSettings(m) {
   const [s, ar, ck] = await Promise.all([api('/settings'), api('/settings/auto-refresh'), api('/settings/checkin')]);
   m.innerHTML = `
-  <h2>设置</h2>
+  ${pageHead('设置')}
   <div class="card">
-    <h3 style="font-size:14px;margin-bottom:10px">自动签到 <span class="muted" style="font-size:12px">— 每天定时为全部启用账号领取平台签到积分（Trae / WorkBuddy / Qoder / 千问办公）</span></h3>
-    <div class="row" style="max-width:520px;flex-wrap:wrap">
+    <h3 style="font-size:14px;margin-bottom:12px">自动签到 <span class="muted" style="font-size:12px;font-weight:400">— 每天定时为全部启用账号领取平台签到积分（Trae / WorkBuddy / Qoder / 千问办公）</span></h3>
+    <div class="row" style="max-width:540px;flex-wrap:wrap">
       <select id="stCheckinEnabled" style="width:160px">
         <option value="1" ${ck.enabled ? 'selected' : ''}>开启</option>
         <option value="0" ${!ck.enabled ? 'selected' : ''}>关闭</option>
@@ -1390,8 +1398,8 @@ async function renderSettings(m) {
     </div>
   </div>
   <div class="card">
-    <h3 style="font-size:14px;margin-bottom:10px">模型自动刷新 <span class="muted" style="font-size:12px">— 各公司模型更新很快，定时同步保持模型列表最新</span></h3>
-    <div class="row" style="max-width:400px">
+    <h3 style="font-size:14px;margin-bottom:12px">模型自动刷新 <span class="muted" style="font-size:12px;font-weight:400">— 各公司模型更新很快，定时同步保持模型列表最新</span></h3>
+    <div class="row" style="max-width:420px">
       <select id="stAutoRefresh" style="width:200px">
         <option value="0" ${ar.minutes === 0 ? 'selected' : ''}>关闭（手动同步）</option>
         ${[15, 30, 60, 120, 360, 720].map(v => `<option value="${v}" ${ar.minutes === v ? 'selected' : ''}>每 ${v < 60 ? v + ' 分钟' : (v / 60) + ' 小时'}</option>`).join('')}
@@ -1400,14 +1408,14 @@ async function renderSettings(m) {
     </div>
   </div>
   <div class="card">
-    <h3 style="font-size:14px;margin-bottom:10px">修改管理密码</h3>
-    <div class="row" style="max-width:400px">
+    <h3 style="font-size:14px;margin-bottom:12px">修改管理密码</h3>
+    <div class="row" style="max-width:420px">
       <input type="password" id="stPw" placeholder="新密码">
       <button onclick="savePw()">保存</button>
     </div>
   </div>
   <div class="card">
-    <h3 style="font-size:14px;margin-bottom:10px">接入信息</h3>
+    <h3 style="font-size:14px;margin-bottom:12px">接入信息</h3>
     <div class="kv">
       <span class="muted">OpenAI 端点</span><span class="mono">http://localhost:8317/v1/chat/completions</span>
       <span class="muted">Responses 端点</span><span class="mono">http://localhost:8317/v1/responses（Codex 等）</span>
@@ -1417,12 +1425,12 @@ async function renderSettings(m) {
       <span class="muted">思考控制</span><span class="mono">模型名后缀 -think / -think-high / -xhigh / -nothink</span>
       <span class="muted">网关状态</span><span>${s.gatewayOpen ? badge('开放模式（未设置任何 key）','yellow') : badge('需要 API Key','green')}</span>
     </div>
-    <p class="muted" style="margin-top:8px">环境变量：DSH_PORT / DSH_ADMIN_PASSWORD / DSH_API_KEYS（逗号分隔）/ DSH_DATA_DIR</p>
+    <p class="muted" style="margin-top:10px">环境变量：DSH_PORT / DSH_ADMIN_PASSWORD / DSH_API_KEYS（逗号分隔）/ DSH_DATA_DIR</p>
   </div>
   <div class="card">
-    <h3 style="font-size:14px;margin-bottom:10px">最近日志</h3>
+    <h3 style="font-size:14px;margin-bottom:12px">最近日志</h3>
     <pre id="logPre" style="max-height:300px">加载中…</pre>
-    <button class="small ghost" style="margin-top:8px" onclick="loadLogs()">刷新</button>
+    <button class="small ghost" style="margin-top:10px" onclick="loadLogs()">刷新</button>
   </div>`;
   loadLogs();
 }
