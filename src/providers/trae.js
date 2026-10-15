@@ -64,6 +64,22 @@ function hosts(account) {
   return region === 'intl' ? INTL : CN;
 }
 
+/**
+ * 签到后回查积分余额：POST /trae/api/v2/pay/ide_user_ent_usage。
+ * 额度在 usage_summary（total_amount - consumed_amount），不在 credits_remain 字段。
+ */
+async function refreshCredits(account) {
+  const r = await httpJson(`${hosts(account).ug}/trae/api/v2/pay/ide_user_ent_usage`, {
+    method: 'POST', headers: ideHeaders(account, { Accept: 'application/json' }), body: {}, timeoutMs: 15000,
+  });
+  if (r.status !== 200) throw new Error(`ent_usage ${r.status}`);
+  const d = r.json?.data || r.json || {};
+  const sum = d.usage_summary || {};
+  const total = Number(sum.total_amount ?? 0), used = Number(sum.consumed_amount ?? 0);
+  if (!total && !d.user_entitlement_pack_list?.length) return null;
+  return Math.max(0, Math.round((total - used) * 100) / 100);
+}
+
 function ideHeaders(account, extra = {}) {
   const c = account.credentials;
   return {
@@ -226,6 +242,50 @@ module.exports = {
       ok: true,
       message: `${d.credits != null ? `剩余积分 ${d.credits}` : '有效'}${uname ? ` · ${uname}` : ''}${uid ? ` (uid ${uid})` : ''}`,
       extra: { credits: d.credits, checkedIn: d.checked_in, uid, username: uname },
+    };
+  },
+
+  /**
+   * 每日签到：POST checkin_credits/status 查状态 → 未签则 POST claim。
+   * 签到接口与积分查询同域（api.trae.cn，intl 为 api.trae.ai），头同 ideHeaders。
+   * status 返回 {checked_in, credits, enable}（credits=签到可得额度，非余额）；
+   * claim 返回 {code, message}，code!=0 即业务失败——文案含"已签到"或 HTTP 4xx
+   * 带该文案时按幂等成功处理（core 的 alreadyCheckinSignal 拿 raw 兜底复查）。
+   * 顺带回查一次积分余额（ide_user_ent_usage 的 usage_summary）更新档案。
+   */
+  async checkin(account) {
+    await ensureToken(account);
+    const ug = hosts(account).ug;
+    const st = await httpJson(`${ug}/trae/api/v2/ug/checkin_credits/status`, {
+      method: 'POST', headers: ideHeaders(account, { Accept: 'application/json' }), body: {}, timeoutMs: 15000,
+    });
+    if (st.status === 401 || st.status === 403) return { ok: false, message: `auth ${st.status}` };
+    if (st.status !== 200) return { ok: false, message: `签到状态查询失败 HTTP ${st.status}` };
+    const s = st.json?.data || st.json || {};
+    const checkedIn = !!(s.checked_in ?? s.did_checked_in);
+    if (checkedIn) {
+      const credits = await refreshCredits(account).catch(() => null);
+      return { ok: true, already: true, message: '今日已签到', gained: 0, extra: credits ? { credits } : undefined };
+    }
+    if (s.enable === false) return { ok: null, message: '签到活动未开放' };
+    const claim = await httpJson(`${ug}/trae/api/v2/ug/checkin_credits/claim`, {
+      method: 'POST', headers: ideHeaders(account, { Accept: 'application/json' }), body: { req_source: 2 }, timeoutMs: 15000,
+    });
+    const d = claim.json?.data || claim.json || {};
+    const msgText = String(d.message || claim.text || '');
+    if (/已签到|已经签到/i.test(msgText)) {
+      const credits = await refreshCredits(account).catch(() => null);
+      return { ok: true, already: true, message: '今日已签到', gained: 0, extra: credits ? { credits } : undefined };
+    }
+    if (claim.status !== 200) return { ok: false, message: `签到请求失败 HTTP ${claim.status}`, raw: { status: claim.status, json: claim.json, text: String(claim.text || '').slice(0, 300) } };
+    const code = Number(d.code ?? 0) || 0;
+    if (code !== 0) return { ok: false, message: d.message || `上游返回 code ${code}`, raw: { status: claim.status, json: claim.json, text: String(claim.text || '').slice(0, 300) } };
+    const gained = d.credits != null ? Number(d.credits) : (Number(s.credits) || 0);
+    const credits = await refreshCredits(account).catch(() => null);
+    return {
+      ok: true, gained,
+      message: `签到成功 +${gained}`,
+      extra: credits ? { credits } : undefined,
     };
   },
 

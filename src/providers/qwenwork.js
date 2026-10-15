@@ -330,6 +330,104 @@ module.exports = {
     };
   },
 
+  /**
+   * 每日签到：千问办公与 Qoder 同属 COSY 协议族，活动平台端点探测同款
+   * /sash 路径（官方每日积分是 00:00 UTC+8 自动重置进 daily_credits 池，
+   * 活动平台可能发额外 Credits）。Cosy-ClientType 用 QoderWork 的 6。
+   * 探测不到（404 等）按「无活动接口」跳过，不报错——每日额度本来就自动到账。
+   */
+  async checkin(account) {
+    const c = await fetchUserInfo(account);
+    const token = await ensureToken(account);
+    const H = {
+      Accept: 'application/json', 'Content-Type': 'application/json',
+      'User-Agent': USER_AGENT, 'cosy-clienttype': CLIENT_TYPE,
+      'cosy-version': COSY_VERSION, Authorization: `Bearer ${token}`,
+    };
+    const camp = await httpJson(`${GATEWAY}/sash/api/v1/me/campaigns`, { headers: H, timeoutMs: 20000 }).catch(e => ({ status: 0, json: null, error: e.message }));
+    if (camp.status === 200 && camp.json && typeof camp.json === 'object') {
+      const list = Array.isArray(camp.json.campaigns) ? camp.json.campaigns : [];
+      const claimable = list.filter(x =>
+        String(x.claimStatus || x.claim_status || '').toUpperCase() === 'CLAIMABLE'
+        && ['', 'CLAIM_BENEFIT'].includes(String(x.actionType || x.action_type || ''))
+        && (Number(x.benefit?.amount || 0) > 0 || String(x.benefit?.kind || '').toUpperCase() === 'CREDITS'));
+      const claimed = list.filter(x =>
+        String(x.claimStatus || x.claim_status || '').toUpperCase() === 'CLAIMED'
+        && Number(x.benefit?.amount || 0) > 0);
+      if (!claimable.length) {
+        if (claimed.length) {
+          const amount = claimed.reduce((s, x) => s + Number(x.benefit?.amount || 0), 0);
+          return { ok: true, already: true, gained: 0, message: `今日已领取（${amount || '?'} Credits）` };
+        }
+        return { ok: null, message: '活动平台暂无可领取活动' };
+      }
+      let earned = 0; const names = []; const failures = [];
+      let lastFailureRaw = null;
+      for (const x of claimable) {
+        const cid = x.campaignId || x.campaign_id;
+        const title = x.campaignKey || cid;
+        const cr = await httpJson(`${GATEWAY}/sash/api/v1/me/campaigns/${encodeURIComponent(cid)}/claim`, {
+          method: 'POST', headers: H, body: {}, timeoutMs: 20000,
+        }).catch(e => ({ status: 0, json: null, error: e.message }));
+        const amount = Number(x.benefit?.amount || 0);
+        if (cr.status === 200 && cr.json) {
+          const status = String(cr.json.status || '').toUpperCase();
+          const failure = String(cr.json.failureCode || '').toUpperCase();
+          if (failure === 'SAME_PERSON_ALREADY_CLAIMED' || status === 'BLOCKED') {
+            failures.push(`${title}: 同人已领取`); continue;
+          }
+          if (['CLAIMED', 'GRANTED', 'SUCCESS'].includes(status) || cr.json.replayed) {
+            earned += amount; names.push(`${title}${amount ? ` +${amount}` : ''}`); continue;
+          }
+          failures.push(`${title}: ${status || 'unknown'}`);
+        } else if (cr.status === 409) {
+          earned += amount; names.push(`${title}（幂等确认）`);
+        } else {
+          failures.push(`${title}: HTTP ${cr.status}${cr.error ? ' ' + cr.error : ''}`);
+          lastFailureRaw = { status: cr.status, json: cr.json, text: String(cr.text || '').slice(0, 300) };
+        }
+      }
+      // 余额回查（三池汇总）
+      const w = await httpJson(`${SITE}/user/wallets`, {
+        headers: { Accept: 'application/json', 'User-Agent': USER_AGENT, Authorization: `Bearer ${token}` }, timeoutMs: 15000,
+      }).catch(() => ({ status: 0 }));
+      let extra;
+      if (w.status === 200 && w.json?.data) {
+        const d = w.json.data;
+        extra = {
+          dailyCredits: d.daily_credits?.total_balance ?? 0,
+          monthlyCredits: d.monthly_credits?.total_balance ?? 0,
+          longtermCredits: d.longterm_credits?.total_balance ?? 0,
+          credits: (d.daily_credits?.total_balance ?? 0) + (d.monthly_credits?.total_balance ?? 0) + (d.longterm_credits?.total_balance ?? 0),
+        };
+      }
+      if (names.length) return { ok: true, gained: earned || null, message: `领取成功 ${names.join('、')}${failures.length ? `；另有失败：${failures.join('；')}` : ''}`, extra };
+      return { ok: false, message: `领取失败：${failures.join('；')}`, extra, raw: lastFailureRaw };
+    }
+    // 探测旧的每日签到接口（部分部署在 openapi 侧或 gateway 侧，能力未知，运行时探测）
+    for (const base of [GATEWAY]) {
+      const st = await httpJson(`${base}/sash/api/v1/me/daily-check-in/status`, { headers: H, timeoutMs: 15000 }).catch(() => ({ status: 0 }));
+      if (st.status === 200 && st.json) {
+        const status = String(st.json.status || '').toUpperCase();
+        if (status === 'CLAIMED') return { ok: true, already: true, gained: 0, message: '今日已签到' };
+        if (status === 'CLAIMABLE') {
+          const cl = await httpJson(`${base}/sash/api/v1/me/daily-check-in/claim`, { method: 'POST', headers: H, body: {}, timeoutMs: 15000 }).catch(() => ({ status: 0 }));
+          const cj = cl.json || {};
+          const clMsg = String(cj.message || cj.msg || cl.text || '');
+          if (/已签到|已经签到/i.test(clMsg) || Number(cj.code) === 10001) return { ok: true, already: true, gained: 0, message: '今日已签到' };
+          if (cl.status === 200) return { ok: true, gained: Number(cj.rewardCredits || 0) || null, message: `签到成功${cj.rewardCredits ? ` +${cj.rewardCredits}` : ''}` };
+          return { ok: false, message: `签到请求失败 HTTP ${cl.status}`, raw: { status: cl.status, json: cl.json, text: String(cl.text || '').slice(0, 300) } };
+        }
+        return { ok: null, message: `官方签到活动未开放 (status=${status || '?'})` };
+      }
+    }
+    if ([404, 405, 410].includes(camp.status) || camp.status === 0) {
+      return { ok: null, message: '本区域暂无签到/活动接口（每日积分 00:00 自动重置，无需签到）' };
+    }
+    if (camp.status === 401 || camp.status === 403) return { ok: false, message: `auth ${camp.status}` };
+    return { ok: false, message: `活动平台查询失败 HTTP ${camp.status}` };
+  },
+
   async *chat({ account, upstreamModel, messages, tools, params, signal, onUsage }) {
     const c = await fetchUserInfo(account);
     const token = await ensureToken(account);

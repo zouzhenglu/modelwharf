@@ -612,6 +612,39 @@ router.get('/docs', (req, res) => {
   });
 });
 
+// ---------- auto check-in (自动签到) ----------
+const checkinCore = require('../core/checkin');
+router.get('/checkin/status', (req, res) => res.json(checkinCore.status()));
+// 一键签到全部账号：今天已核对过的账号自动跳过（漏签补签用；要重查某个账号用它行内的「签到」按钮）
+router.post('/checkin/all', async (req, res) => {
+  try {
+    const r = await checkinCore.checkinAll();
+    if (r.busy) return res.status(409).json({ error: '签到正在进行中，请稍候' });
+    res.json(r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+// 单账号签到：总是向上游核对一次（上游幂等，已签过只确认、不会重复发放）
+router.post('/accounts/:id/checkin', async (req, res) => {
+  const a = accountsCore.getAccount(req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  try {
+    const r = await checkinCore.checkinAccount(a, { skipIfDone: false });
+    res.json({ id: a.id, provider_id: a.provider_id, name: a.name, ...r });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+router.get('/settings/checkin', (req, res) => {
+  res.json({ enabled: !!Number(getSetting('checkinEnabled', 1)), hour: Number(getSetting('checkinHour', 9)) });
+});
+router.put('/settings/checkin', (req, res) => {
+  const enabled = req.body?.enabled === undefined ? undefined : !!req.body.enabled;
+  const hour = req.body?.hour === undefined ? undefined : Math.min(23, Math.max(0, Number(req.body.hour) || 0));
+  if (enabled !== undefined) setSetting('checkinEnabled', enabled ? 1 : 0);
+  if (hour !== undefined) setSetting('checkinHour', hour);
+  checkinCore.setup(); // 重新挂定时器
+  res.json({ ok: true, enabled: !!Number(getSetting('checkinEnabled', 1)), hour: Number(getSetting('checkinHour', 9)) });
+});
+router.setupCheckin = checkinCore.setup;
+
 // ---------- settings ----------
 router.get('/settings', (req, res) => {
   res.json({

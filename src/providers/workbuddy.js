@@ -78,6 +78,24 @@ function classifyError(status, message) {
   return 'cooling';
 }
 
+/** 签到后回查积分余额（get-user-resource 汇总未过期的 capacity 包），失败抛错由调用方兜住 */
+async function refreshCredits(account) {
+  const r = await httpJson(`${CN_PORTAL}/billing/meter/get-user-resource`, {
+    method: 'POST', headers: headers(account, { Accept: 'application/json', Origin: CN_PORTAL, Referer: CN_PORTAL + '/' }), body: {}, timeoutMs: 15000,
+  });
+  if (r.status !== 200) throw new Error(`get-user-resource ${r.status}`);
+  const items = r.json?.data?.Response?.Data?.Accounts || [];
+  let remain = 0, size = 0;
+  const now = Date.now();
+  for (const it of items) {
+    if (it.CapacityUnit !== 'credits') continue;
+    if (it.DeductionEndTime && Number(it.DeductionEndTime) < now) continue;
+    remain += Number(it.CapacityRemain || 0);
+    size += Number(it.CapacitySize || 0);
+  }
+  return { credits: remain, quota: size };
+}
+
 module.exports = {
   id: 'workbuddy',
   label: 'WorkBuddy / CodeBuddy (腾讯)',
@@ -227,6 +245,47 @@ module.exports = {
       if (r.status === 401 || r.status === 403) return { ok: false, status: 'invalid', message: `auth ${r.status}` };
     }
     return { ok: true, message: 'token 已刷新可用' };
+  },
+
+  /**
+   * 每日签到：POST /v2/billing/meter/daily-checkin（intl 域为 workbuddy.ai 同路径，
+   * 上游新旧路径分叉：intl 先试无 /v2 前缀的旧路径再试 /v2；CN 单路径 /v2）。
+   * 已签到是 HTTP 400 + 业务体 {"code":10001,"msg":"今天已签到，请明天再来"}（2026-10-15
+   * 实测）——非 200 响应也检查业务体，命中"已签到"文案按幂等成功返回；core 的
+   * alreadyCheckinSignal() 还会拿 raw 兜底复查。成功后回查积分余额更新档案。
+   */
+  async checkin(account) {
+    await ensureToken(account);
+    const realm = account.credentials.region === 'intl' ? INTL_BASE : CN_PORTAL;
+    // intl: global 老客户端走无前缀路径；CN 实测只有 /v2 前缀
+    const paths = account.credentials.region === 'intl'
+      ? ['/billing/meter/daily-checkin', '/v2/billing/meter/daily-checkin']
+      : ['/v2/billing/meter/daily-checkin'];
+    let lastStatus = 0, lastRaw = null;
+    for (const p of paths) {
+      const r = await httpJson(`${realm}${p}`, {
+        method: 'POST',
+        headers: headers(account, { Accept: 'application/json', Origin: realm, Referer: realm + '/' }),
+        body: {}, timeoutMs: 20000,
+      });
+      const j = r.json && typeof r.json === 'object' ? r.json : {};
+      const msgText = String(j.message || j.msg || r.text || '');
+      // "已签到"幂等：业务码/文案识别不挑 HTTP 状态码（实测 400 + code 10001）
+      if (/已签到|已经签到|already/i.test(msgText) || Number(j.code) === 10001) {
+        const credits = await refreshCredits(account).catch(() => null);
+        return { ok: true, already: true, message: '今日已签到', gained: 0, extra: credits ? { credits } : undefined };
+      }
+      if (r.status === 200) {
+        if (j.code != null && j.code !== 0) return { ok: false, message: msgText || `code ${j.code}` };
+        const gained = Number(j?.data?.credits ?? j?.data?.Credits ?? 0) || null;
+        const credits = await refreshCredits(account).catch(() => null);
+        return { ok: true, gained, message: `签到成功${gained ? ` +${gained}` : ''}`, extra: credits ? { credits } : undefined };
+      }
+      lastStatus = r.status; lastRaw = { status: r.status, json: r.json, text: String(r.text || '').slice(0, 300) };
+      if (r.status !== 404 && r.status !== 405 && r.status !== 410) break; // 路径不存在才 fallback
+    }
+    if (lastStatus === 401 || lastStatus === 403) return { ok: false, message: `auth ${lastStatus}` };
+    return { ok: false, message: `签到请求失败 HTTP ${lastStatus}`, raw: lastRaw };
   },
 
   async *chat({ account, upstreamModel, messages, tools, params, signal, onUsage }) {

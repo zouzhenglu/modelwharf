@@ -58,6 +58,7 @@ async function render(page) {
   const m = $('#main');
   if (page === 'dashboard') return renderDashboard(m);
   if (page === 'accounts') return renderAccounts(m);
+  if (page === 'checkin') return renderCheckin(m);
   if (page === 'models') return renderModels(m);
   if (page === 'virtual') return renderVirtual(m);
   if (page === 'apikeys') return renderApikeys(m);
@@ -220,6 +221,7 @@ async function renderAccounts(m) {
       ${['active','cooling','invalid','banned'].map(s => `<option ${acctFilter.status === s ? 'selected' : ''} value="${s}">${s}</option>`).join('')}</select>
     <select id="fEnabled" style="width:100px"><option value="">启用+停用</option><option value="1" ${acctFilter.enabled === '1' ? 'selected' : ''}>仅启用</option><option value="0" ${acctFilter.enabled === '0' ? 'selected' : ''}>仅停用</option></select>
     <span class="spacer"></span>
+    <button class="ghost" onclick="checkinAllAccounts()">一键签到</button>
     <button class="ghost" onclick="syncAllInfo()">同步积分</button>
     <button class="ghost" onclick="checkAllAccounts()">一键检测</button>
     <button class="ghost" onclick="importLocalAll()">扫描本机登录</button>
@@ -244,6 +246,7 @@ async function renderAccounts(m) {
     <td>${switchHtml(a.enabled, `toggleAccount(${a.id}, ${a.enabled ? 0 : 1})`)}</td>
     <td style="white-space:nowrap">
       <button class="small ghost" onclick="checkAccount(${a.id})">检测</button>
+      <button class="small ghost" title="为该账号执行每日签到领积分（已签过会提示，不重复领取）" onclick="checkinAccount(${a.id})">签到</button>
       <button class="small ghost" title="${online ? '只取上游当前实际可用的模型目录（与官方客户端显示一致，会替换现有列表，自定义条目会被移除）' : '从上游 /v1/models 在线目录同步该账号模型（增量补充）'}" onclick="restoreAccountModels(${a.id}, ${online})">恢复在线目录</button>
       <button class="small ghost" onclick="openAccountForm(${a.id})">编辑</button>
       <button class="small danger" onclick="delAccount(${a.id})">删</button>
@@ -257,6 +260,107 @@ async function renderAccounts(m) {
   $('#fEnabled').onchange = e => { acctFilter.enabled = e.target.value; renderAccounts(m); };
   $('#fSearch').onkeydown = e => { if (e.key === 'Enter') { acctFilter.search = e.target.value; renderAccounts(m); } };
 }
+// ---------- checkin (每日签到) ----------
+const CHECKIN_PROVIDER_LABEL = { trae: 'Trae', workbuddy: 'WorkBuddy', qoder: 'Qoder 国际版', qodercn: 'Qoder 中国版', qwenwork: '千问办公' };
+// 打开页面时自动向上游核对未签账号（节流 60s）：你在官方客户端已签过的账号，
+// 网关发起一次签到会被上游幂等拒绝并回"已签到"，状态随即对齐为已签。
+let checkinAutoVerifiedAt = 0;
+async function autoVerifyCheckin(status) {
+  const pending = status.accounts.filter(a => a.supported && a.enabled && !a.done);
+  if (!pending.length || Date.now() - checkinAutoVerifiedAt < 60 * 1000) return;
+  checkinAutoVerifiedAt = Date.now();
+  toast(`正在向上游核对 ${pending.length} 个账号的签到状态…`);
+  await api('/checkin/all', { method: 'POST', body: {} }).catch(() => {});
+  if (PAGE === 'checkin') render('checkin');
+}
+async function renderCheckin(m) {
+  const [st, cfg] = await Promise.all([api('/checkin/status'), api('/settings/checkin')]);
+  const supported = st.accounts.filter(a => a.supported);
+  const doneCount = supported.filter(a => a.done).length;
+  const lastRun = st.lastRun ? new Date(st.lastRun.at).toLocaleString('zh-CN', { hour12: false }) : '尚未运行';
+  const pending = supported.filter(a => a.enabled && !a.done).length;
+  m.innerHTML = `
+  <h2>每日签到 <span class="muted" style="font-size:12px">— 自动为各平台账号领取签到积分</span></h2>
+  <div class="hint">
+    <b>定时任务</b>：每天到达设定时刻自动为全部启用账号签到；服务白天启动时若当天还没签，会在启动后 20 秒自动补签。
+    同一账号同一天只成功领一次（幂等，重复点不会重复拿积分）。
+    <b>状态说明</b>：这里显示的是网关与上游核对后的结果——你在官方客户端自己签过的，打开本页会自动核对并同步为「已签」。
+    ${st.running ? '<b>签到正在进行中…</b>' : ''}
+  </div>
+  <div class="statgrid">
+    <div class="stat"><div class="l">今日已签</div><div class="v">${doneCount} / ${supported.length}</div><div class="l">${pending ? `${pending} 个待核对` : '全部核对完毕'}</div></div>
+    <div class="stat"><div class="l">上次运行</div><div class="v" style="font-size:15px">${esc(lastRun)}</div>
+      <div class="l">${st.lastRun ? `成功领取 ${st.lastRun.claimed} · 已签 ${st.lastRun.already} · 失败 ${st.lastRun.failed}` : '当天未运行过'}</div></div>
+    <div class="stat"><div class="l">定时设置</div><div class="v" style="font-size:15px">${cfg.enabled ? `每天 ${cfg.hour}:00` : '已关闭'}</div>
+      <div class="l"><a href="javascript:go('settings')">修改 →</a></div></div>
+  </div>
+  <div class="toolbar">
+    <button onclick="checkinAllAccounts()">立即签到全部</button>
+    <span class="muted" style="font-size:12px">已确认签到的账号会跳过；要重新核对某个账号，点它行内的「签到」</span>
+    <span class="spacer"></span>
+    <a href="javascript:go('accounts')" style="font-size:13px">管理账号 →</a>
+  </div>
+  <div class="card" style="padding:6px 12px">
+  <table><tr><th>平台</th><th>账号</th><th>今日状态</th><th>说明</th><th>操作</th></tr>
+  ${st.accounts.map(a => {
+    const plat = CHECKIN_PROVIDER_LABEL[a.provider_id] || a.provider_id;
+    let statusHtml, msg = a.message || '';
+    if (!a.supported) { statusHtml = badge('不支持', 'gray'); msg = '该平台无签到机制'; }
+    else if (!a.enabled) { statusHtml = badge('已停用', 'gray'); }
+    else if (a.done && a.gained > 0 && a.claimed) statusHtml = badge(`+${a.gained}`, 'green');
+    else if (a.done) statusHtml = badge('已签', 'green');
+    else statusHtml = badge('未签', 'yellow');
+    return `<tr>
+      <td>${esc(plat)} <span class="muted mono" style="font-size:11px">${esc(a.provider_id)}</span></td>
+      <td><b>${esc(a.name)}</b></td>
+      <td>${statusHtml}</td>
+      <td class="muted" style="font-size:12px">${esc(msg)}</td>
+      <td>${a.supported ? `<button class="small ghost" onclick="checkinAccount(${a.id})">签到</button>` : ''}</td>
+    </tr>`;
+  }).join('')}
+  ${!st.accounts.length ? '<tr><td colspan="5" class="muted" style="text-align:center;padding:24px">暂无账号，先到「平台账号」页添加</td></tr>' : ''}
+  </table></div>
+  <div class="card">
+    <h3 style="font-size:14px;margin-bottom:8px">最近签到记录</h3>
+    ${st.recent.length ? `<table style="font-size:12px"><tr><th>时间</th><th>平台</th><th>账号</th><th>结果</th><th>说明</th></tr>
+    ${st.recent.slice(0, 20).map(r => `<tr>
+      <td class="muted mono">${fmtTime(r.ts)}</td>
+      <td>${esc(CHECKIN_PROVIDER_LABEL[r.provider_id] || r.provider_id || '-')}</td>
+      <td>${esc(r.account_name || r.account_id || '-')}</td>
+      <td>${r.ok === 1 ? badge('成功', 'green') : r.ok === 2 ? badge('无内容', 'gray') : badge('失败', 'red')}</td>
+      <td class="muted">${esc(r.message || '')}${r.gained ? ` <b style="color:var(--green)">+${r.gained}</b>` : ''}</td>
+    </tr>`).join('')}</table>` : '<p class="muted">暂无记录</p>'}
+  </div>`;
+  autoVerifyCheckin(st);
+}
+async function checkinAllAccounts() {
+  toast('正在为全部账号签到…');
+  try {
+    const r = await api('/checkin/all', { method: 'POST', body: {} });
+    const lines = r.results.map(x => {
+      const icon = x.ok === true ? (x.already ? '○' : '✓') : x.ok === false ? '✗' : '·';
+      return `${icon} [${x.provider_id}] ${x.name}: ${x.message || 'ok'}`;
+    });
+    const okCount = r.results.filter(x => x.ok === true).length;
+    const failed = r.results.filter(x => x.ok === false);
+    openModal(`签到完成：${okCount}/${r.total} 成功${r.claimed != null ? `（本次领取 ${r.claimed}，已签过 ${r.already}）` : ''}`, `
+      <p class="muted" style="margin-bottom:8px;font-size:12px">✓=本次领取成功　○=今日已签过　✗=失败　·=平台无签到/无活动</p>
+      <div class="field" style="font-size:13px;line-height:2;max-height:320px;overflow:auto">${lines.map(esc).join('<br>')}</div>
+      ${failed.length ? '<p class="muted" style="font-size:12px;color:var(--red)">失败通常是 token 过期（一键检测看看）或活动未开放；Qoder 派生身份可能被风控过滤，需客户端在线。</p>' : ''}
+      <div class="row"><span class="spacer"></span><button onclick="closeModal();go('checkin')">好的</button></div>`, {});
+  } catch (e) { toast(e.message, true); }
+}
+async function checkinAccount(id) {
+  toast('签到中…');
+  try {
+    const r = await api(`/accounts/${id}/checkin`, { method: 'POST', body: {} });
+    if (r.ok === true) toast(`✓ ${r.already ? r.message || '今日已签到' : (r.message || '签到成功')}`);
+    else if (r.ok === null) toast('· ' + (r.message || '该账号当前无可签内容'));
+    else toast('✗ ' + (r.message || '签到失败'), true);
+    if (PAGE === 'checkin' || PAGE === 'accounts') render(PAGE);
+  } catch (e) { toast(e.message, true); }
+}
+
 function summarizeExtra(extra) {
   if (!extra || typeof extra !== 'object') return '';
   const bits = [];
@@ -1268,9 +1372,23 @@ function copyDoc(id) {
 
 // ---------- settings ----------
 async function renderSettings(m) {
-  const [s, ar] = await Promise.all([api('/settings'), api('/settings/auto-refresh')]);
+  const [s, ar, ck] = await Promise.all([api('/settings'), api('/settings/auto-refresh'), api('/settings/checkin')]);
   m.innerHTML = `
   <h2>设置</h2>
+  <div class="card">
+    <h3 style="font-size:14px;margin-bottom:10px">自动签到 <span class="muted" style="font-size:12px">— 每天定时为全部启用账号领取平台签到积分（Trae / WorkBuddy / Qoder / 千问办公）</span></h3>
+    <div class="row" style="max-width:520px;flex-wrap:wrap">
+      <select id="stCheckinEnabled" style="width:160px">
+        <option value="1" ${ck.enabled ? 'selected' : ''}>开启</option>
+        <option value="0" ${!ck.enabled ? 'selected' : ''}>关闭</option>
+      </select>
+      <select id="stCheckinHour" style="width:160px">
+        ${Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${ck.hour === h ? 'selected' : ''}>每天 ${String(h).padStart(2, '0')}:00</option>`).join('')}
+      </select>
+      <button onclick="saveCheckin()">保存</button>
+      <span class="muted" style="font-size:12px">服务当天中途启动会自动补签；进度见「每日签到」页</span>
+    </div>
+  </div>
   <div class="card">
     <h3 style="font-size:14px;margin-bottom:10px">模型自动刷新 <span class="muted" style="font-size:12px">— 各公司模型更新很快，定时同步保持模型列表最新</span></h3>
     <div class="row" style="max-width:400px">
@@ -1317,6 +1435,12 @@ async function saveAutoRefresh() {
   try {
     const r = await api('/settings/auto-refresh', { method: 'PUT', body: { minutes: Number($('#stAutoRefresh').value) } });
     toast(r.minutes ? `✓ 已开启：每 ${r.minutes < 60 ? r.minutes + ' 分钟' : (r.minutes / 60) + ' 小时'} 自动同步模型` : '已关闭自动同步');
+  } catch (e) { toast(e.message, true); }
+}
+async function saveCheckin() {
+  try {
+    const r = await api('/settings/checkin', { method: 'PUT', body: { enabled: $('#stCheckinEnabled').value === '1', hour: Number($('#stCheckinHour').value) } });
+    toast(r.enabled ? `✓ 自动签到已开启：每天 ${String(r.hour).padStart(2, '0')}:00` : '自动签到已关闭');
   } catch (e) { toast(e.message, true); }
 }
 async function savePw() {

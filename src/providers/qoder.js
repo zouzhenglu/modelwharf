@@ -223,6 +223,47 @@ function ensureSession(account) {
 }
 
 /**
+ * jt- jobToken 过期后的刷新（hub 行为，按 refresh token 前缀路由）：
+ *   drt- → POST openapi /api/v1/deviceToken/refresh
+ *   jrt- → POST openapi /api/v1/jobToken/refresh
+ * 两者失败且有 PAT → 回落 jobToken 重交换。成功返回新令牌（已落库）。
+ */
+async function refreshJobToken(account) {
+  const c = account.credentials;
+  const { db } = require('../store');
+  const rt = String(c.refreshToken || '');
+  const plainH = { 'Content-Type': 'application/json', Accept: 'application/json', 'User-Agent': 'Go-http-client/2.0' };
+  const tryRefresh = async (path) => {
+    const r = await httpJson(`${openapiHost(account)}${path}`, {
+      method: 'POST', headers: plainH, body: { refresh_token: rt }, timeoutMs: 30000,
+    });
+    const token = r.json?.token || r.json?.securityOauthToken || r.json?.device_token;
+    if (r.status !== 200 || !token) return null;
+    const expiresAt = r.json.expires_in ? Date.now() + Number(r.json.expires_in)
+      : (r.json.expireTime ? Number(r.json.expireTime) : null);
+    const fresh = {
+      ...c,
+      jobToken: token,
+      refreshToken: r.json.refresh_token || c.refreshToken,
+      ...(expiresAt ? { jobExpiresAt: expiresAt < 1e12 ? expiresAt * 1000 : expiresAt } : {}),
+    };
+    db.prepare('UPDATE accounts SET credentials=? WHERE id=?').run(JSON.stringify(fresh), account.id);
+    account.credentials = fresh;
+    return token;
+  };
+  if (rt.startsWith('drt-')) {
+    const t = await tryRefresh('/api/v1/deviceToken/refresh');
+    if (t) return t;
+  }
+  if (rt.startsWith('jrt-')) {
+    const t = await tryRefresh('/api/v1/jobToken/refresh');
+    if (t) return t;
+  }
+  if (c.pat) { await exchangePAT(account); return account.credentials.jobToken; }
+  return null;
+}
+
+/**
  * 扫描本机 Qoder 登录态：桌面端（%APPDATA% 下 DPAPI+GCM 加密的 auth.v1.dat）与 CLI 认证文件。
  * 两个版本都装时按 regionFilter 各取各的，label / 建议账号名统一走 _qoder_names。
  * 聊天通道严格需要 PAT（pt-）；桌面/CLI 的 dt- 令牌只能查积分，因此不作为可导入项返回，
@@ -449,6 +490,178 @@ module.exports = {
     });
     if (r2.status === 200) return { ok: true, message: 'COSY 链路有效' };
     return { ok: false, status: r2.status === 401 ? 'invalid' : 'cooling', message: `status ${r2.status}` };
+  },
+
+  /**
+   * 每日签到（活动平台 /sash）：仅国内版（qodercn 通过 asCn 走这里）。
+   * 国际版已按用户要求禁用：国际版活动平台强校验真实 UMID 机器身份且领取
+   * 语义不稳（同人去重按"人"不按号），实测体验差，不做自动领取——用户在
+   * 官方客户端里手动领。
+   *
+   * 国内版流程：GET campaigns 列活动 → 逐个领取 CLAIMABLE 且 CLAIM_BENEFIT 的
+   * （每日 100 Credits 就是这里发的）。官方签到接口 /sash/api/v1/me/daily-check-in/*
+   * 国内 DISABLED，campaigns 是正路。
+   * 令牌链：PAT 账号先确保 jt- jobToken 新鲜（过期走 jrt- 刷新/重交换）；401 时
+   * 刷新 → PAT 重交换 → 另一区域 openapi 域名兜底。
+   * 风控：桌面端头 UA=Qoder + cosy-clienttype:10 + cosy-version 必需（缺了不报错
+   * 但返回空列表）；有官方客户端时用 runtime-info.exe 的**真实** UMID 发全套六头
+   * （本机无客户端则一个机器头都不发，绝不发派生假头——会被判非官方客户端过滤）。
+   * claim 幂等：已领返回 CLAIMED+replayed 或 409；同人去重 BLOCKED/SAME_PERSON_ALREADY_CLAIMED。
+   */
+  async checkin(account) {
+    if (regionOf(account) !== 'cn') {
+      return { ok: null, skipped: true, message: 'Qoder 国际版签到已禁用：请在官方客户端手动领取（国际版活动平台强校验机器身份，自动领取不可靠）' };
+    }
+    const c = account.credentials;
+    if (c.pat) { try { await exchangePAT(account); } catch { /* 带旧 token 试一次 */ } }
+    let token = c.jobToken || c.securityOauthToken || c.pat;
+    if (!token) return { ok: false, message: '缺少令牌（PAT / jobToken），无法访问活动平台' };
+    if (c.jobExpiresAt && Date.now() > c.jobExpiresAt - 5 * 60 * 1000 && !c.pat) {
+      token = (await refreshJobToken(account).catch(() => null)) || token;
+    }
+    const { nativeMachineIdentity } = require('../utils/umid');
+    const machineHeaders = (tok) => {
+      const h = {
+        Accept: 'application/json', 'User-Agent': 'Qoder',
+        'cosy-clienttype': '10', 'cosy-version': c.cosyVersion || '1.1.64',
+        Authorization: `Bearer ${tok}`,
+      };
+      const ident = nativeMachineIdentity(regionOf(account), c.userId || c.uid || '');
+      if (ident) {
+        h['cosy-machineid'] = ident.machineCode;          // 与派生方案不同：code 即 id（hub 行为）
+        h['cosy-machinetoken'] = ident.machineToken;
+        h['cosy-machinetype'] = ident.machineType;
+        h['cosy-machinecode'] = ident.machineCode;
+        h['cosy-machineos'] = ident.machineOs;
+        h['cosy-machinehostname'] = ident.hostname;
+      }
+      return h;
+    };
+    // 401 自愈：jrt- 刷新 → PAT 重交换 → 另一区域 openapi 域名（jobToken 可能属于另一个区）
+    const fetchCampaigns = async (tok, host) => httpJson(`${host}/sash/api/v1/me/campaigns`, { headers: machineHeaders(tok), timeoutMs: 25000 });
+    let camp = await fetchCampaigns(token, openapiHost(account));
+    if (camp.status === 401 || camp.status === 403) {
+      const refreshed = await refreshJobToken(account).catch(() => null);
+      if (refreshed) {
+        token = refreshed;
+        camp = await fetchCampaigns(token, openapiHost(account));
+      }
+    }
+    if ((camp.status === 401 || camp.status === 403) && c.pat) {
+      try { await exchangePAT(account); token = account.credentials.jobToken || token; camp = await fetchCampaigns(token, openapiHost(account)); } catch { /* 继续走 fallback host */ }
+    }
+    if (camp.status === 401 || camp.status === 403) {
+      const otherHost = regionOf(account) === 'intl' ? REGIONS.cn.openapi : REGIONS.intl.openapi;
+      camp = await fetchCampaigns(token, otherHost);
+      if (camp.status === 200 && camp.json && typeof camp.json === 'object') {
+        // 令牌属于另一区域：本轮后续请求（claim/quota）都打到那边
+        return this._checkinOnHost(account, token, otherHost, camp.json);
+      }
+      return { ok: false, message: `活动平台鉴权失败（双区 openapi 均 ${camp.status}）：PAT 可能已过期，请在客户端重新生成`, raw: { status: camp.status, json: camp.json, text: String(camp.text || '').slice(0, 300) } };
+    }
+    if (camp.status !== 200 || !camp.json || typeof camp.json !== 'object') {
+      // 404/405/410 = 该区域没有活动平台
+      if ([404, 405, 410].includes(camp.status)) return { ok: null, message: `本区域无活动接口（HTTP ${camp.status}）` };
+      return { ok: false, message: `活动列表查询失败 HTTP ${camp.status}`, raw: { status: camp.status, json: camp.json, text: String(camp.text || '').slice(0, 300) } };
+    }
+    return this._checkinOnHost(account, token, openapiHost(account), camp.json);
+  },
+
+  /** 活动列表已就绪后的领取流程（host=本轮活动平台实际可用的 openapi 域名） */
+  async _checkinOnHost(account, token, host, campJson) {
+    const c = account.credentials;
+    const { nativeMachineIdentity } = require('../utils/umid');
+    const listHeaders = (() => {
+      const h = {
+        Accept: 'application/json', 'Content-Type': 'application/json', 'User-Agent': 'Qoder',
+        'cosy-clienttype': '10', 'cosy-version': c.cosyVersion || '1.1.64',
+        Authorization: `Bearer ${token}`,
+      };
+      const ident = nativeMachineIdentity(regionOf(account), c.userId || c.uid || '');
+      if (ident) {
+        h['cosy-machineid'] = ident.machineCode;
+        h['cosy-machinetoken'] = ident.machineToken;
+        h['cosy-machinetype'] = ident.machineType;
+        h['cosy-machinecode'] = ident.machineCode;
+        h['cosy-machineos'] = ident.machineOs;
+        h['cosy-machinehostname'] = ident.hostname;
+      }
+      return h;
+    })();
+    const list = Array.isArray(campJson.campaigns) ? campJson.campaigns : [];
+    const claimable = list.filter(x => {
+      const status = String(x.claimStatus || x.claim_status || '').toUpperCase();
+      const action = String(x.actionType || x.action_type || '');
+      const kind = String(x.benefit?.kind || '').toUpperCase();
+      const rewardish = Number(x.benefit?.amount || 0) > 0 || kind === 'CREDITS' || !kind;
+      return status === 'CLAIMABLE' && (action === '' || action === 'CLAIM_BENEFIT') && rewardish;
+    });
+    const claimed = list.filter(x => {
+      const status = String(x.claimStatus || x.claim_status || '').toUpperCase();
+      const action = String(x.actionType || x.action_type || '');
+      const amount = Number(x.benefit?.amount || 0);
+      return status === 'CLAIMED' && (amount > 0 || action === '' || action === 'CLAIM_BENEFIT');
+    });
+    if (!claimable.length) {
+      // 已领取的活动后面可能被官方降级成 VIEW_DETAILS，所以 claimed 判定放宽到 amount>0
+      if (claimed.length) {
+        const amount = claimed.reduce((s, x) => s + Number(x.benefit?.amount || 0), 0);
+        return { ok: true, already: true, gained: 0, message: `今日已领取（${amount || '?'} Credits）` };
+      }
+      if (campJson.showCampaign === false) return { ok: null, message: '暂无可领活动（客户端身份未通过风控，列表被隐藏）' };
+      return { ok: null, message: '暂无可领取的活动' };
+    }
+    let earned = 0; const names = []; const failures = [];
+    let lastFailureRaw = null;
+    for (const x of claimable) {
+      const cid = x.campaignId || x.campaign_id;
+      const title = (() => {
+        for (const pl of x.placements || []) {
+          const zh = pl?.content?.zh || pl?.content?.en || {};
+          if (zh.title) return zh.title;
+        }
+        return x.campaignKey || cid;
+      })();
+      const cr = await httpJson(`${host}/sash/api/v1/me/campaigns/${encodeURIComponent(cid)}/claim`, {
+        method: 'POST', headers: { ...listHeaders, 'Content-Type': 'application/json' }, body: {}, timeoutMs: 20000,
+      });
+      const amount = Number(x.benefit?.amount || 0);
+      if (cr.status === 200 && cr.json) {
+        const status = String(cr.json.status || '').toUpperCase();
+        const failure = String(cr.json.failureCode || '').toUpperCase();
+        if (failure === 'SAME_PERSON_ALREADY_CLAIMED' || status === 'BLOCKED') {
+          failures.push(`${title}: 同人已领取（同设备其他账号本轮已领）`);
+          continue;
+        }
+        if (['CLAIMED', 'GRANTED', 'SUCCESS'].includes(status) || cr.json.replayed) {
+          earned += amount; names.push(`${title}${amount ? ` +${amount}` : ''}`);
+          continue;
+        }
+        failures.push(`${title}: ${status || JSON.stringify(cr.json).slice(0, 80)}`);
+      } else if (cr.status === 409) {
+        earned += amount; names.push(`${title}${amount ? ` +${amount}` : ''}（幂等确认）`);
+      } else {
+        failures.push(`${title}: HTTP ${cr.status}`);
+        lastFailureRaw = { status: cr.status, json: cr.json, text: String(cr.text || '').slice(0, 300) };
+      }
+    }
+    // 领完回查额度
+    const q = await httpJson(`${host}/api/v2/quota/usage`, {
+      headers: { Authorization: `Bearer ${token}`, 'User-Agent': 'Qoder', Accept: 'application/json' }, timeoutMs: 15000,
+    }).catch(() => ({ status: 0 }));
+    let extra;
+    if (q.status === 200 && q.json) {
+      const qq = q.json.userQuota || {}, addOn = q.json.addOnQuota || null;
+      extra = { credits: (qq.remaining ?? 0) + (addOn?.remaining ?? 0), quota: (qq.total ?? 0) + (addOn?.total ?? 0) };
+    }
+    if (names.length) {
+      return {
+        ok: true, gained: earned || null,
+        message: `领取成功 ${names.join('、')}${failures.length ? `；另有失败：${failures.join('；')}` : ''}`,
+        extra,
+      };
+    }
+    return { ok: false, message: `领取失败：${failures.join('；')}`, extra, raw: lastFailureRaw };
   },
 
   async *chat({ account, upstreamModel, messages, tools, params, signal, onUsage }) {

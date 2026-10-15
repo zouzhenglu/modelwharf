@@ -37,6 +37,7 @@ module.exports = {
   async listModels(account) { return asCn(account, (a) => base.listModels(a)); },
   async listOnlineModels(account) { return asCn(account, (a) => base.listOnlineModels(a)); },
   async checkAccount(account) { return asCn(account, (a) => base.checkAccount(a)); },
+  async checkin(account) { return asCn(account, (a) => base.checkin(a)); },
   async *chat(opts) {
     yield* base.chat({ ...opts, account: { ...opts.account, regionOverride: 'cn' } });
   },

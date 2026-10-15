@@ -93,6 +93,7 @@ app.use((err, req, res, next) => {
 function start() {
   registry.loadAll();
   adminRoutes.setupAutoRefresh?.();
+  adminRoutes.setupCheckin?.();   // 自动签到调度（默认每日 09:00，启动补签）
   const server = app.listen(config.port, config.host, () => {
     // PID file for stop.bat
     try { fs.writeFileSync(path.join(config.dataDir, 'dsh.pid'), String(process.pid)); } catch {}

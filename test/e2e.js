@@ -17,6 +17,39 @@ const TMPDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-e2e-'));
 let TOKEN = '';
 let serverProc = null;
 
+// e2e-only provider: minimal plugin with a checkin() implementation wired to the
+// mock server below. Written into src/providers/ before the server boots (the
+// registry auto-loads every non-underscore .js there), removed after the run.
+const TEST_PLUGIN_PATH = path.join(__dirname, '..', 'src', 'providers', 'zz-e2e-checkin.js');
+const TEST_PLUGIN_SRC = `'use strict';
+// e2e-only test plugin (auto-deleted by test/e2e.js) — checkin wired to the mock upstream.
+const { httpJson } = require('../utils/http');
+module.exports = {
+  id: 'e2echeckin',
+  label: 'E2E Checkin (test only)',
+  importLocal: false,
+  credFields: [{ name: 'baseUrl', label: 'Base URL', required: true }],
+  async listModels(account) { return [{ upstream: 'mock-model-a' }]; },
+  async checkAccount(account) { return { ok: true, message: 'e2e mock' }; },
+  async checkin(account) {
+    const base = String(account.credentials.baseUrl || '').replace(/\\/+$/, '');
+    const st = await httpJson(base + '/checkin/status', { timeoutMs: 5000 });
+    if (st.status !== 200) return { ok: false, message: 'HTTP ' + st.status };
+    if (st.json.checked_in) return { ok: true, already: true, message: '今日已签到' };
+    const cl = await httpJson(base + '/checkin/claim', { method: 'POST', body: {}, timeoutMs: 5000 });
+    // emulate workbuddy's already-checked-in shape: HTTP 400 + {"code":10001,"msg":"今天已签到…"}
+    if (cl.status !== 200 && /已签到/.test(String(cl.text || ''))) {
+      return { ok: false, message: '签到请求失败 HTTP ' + cl.status, raw: { status: cl.status, json: cl.json, text: String(cl.text || '') } };
+    }
+    if (cl.status !== 200) return { ok: false, message: 'HTTP ' + cl.status };
+    return { ok: true, gained: cl.json.credits, message: '签到成功 +' + cl.json.credits, extra: { credits: cl.json.balance } };
+  },
+  async *chat() { yield JSON.stringify({ choices: [{ delta: { content: 'e2e' } }] }); },
+};
+`;
+function removeTestPlugin() { try { fs.rmSync(TEST_PLUGIN_PATH, { force: true }); } catch {} }
+fs.writeFileSync(TEST_PLUGIN_PATH, TEST_PLUGIN_SRC);
+
 async function call(method, path, body, headers = {}) {
   const resp = await fetch(BASE + path, {
     method,
@@ -72,6 +105,7 @@ async function main() {
   const auth = { Authorization: 'Bearer ' + TOKEN };
 
   // mock upstream server (OpenAI compatible) — listen on 127.0.0.1 explicitly
+  let mockCheckedIn = false;
   const mock = http.createServer((req, res) => {
     if (req.url === '/v1/models') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -90,6 +124,20 @@ async function main() {
         res.end();
       });
       return;
+    }
+    if (req.url === '/checkin/status') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ checked_in: mockCheckedIn }));
+    }
+    if (req.url === '/checkin/claim') {
+      if (mockCheckedIn) {
+        // emulate workbuddy: already-checked-in is HTTP 400 + business body
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ code: 10001, msg: '今天已签到，请明天再来', requestId: 'mock-req' }));
+      }
+      mockCheckedIn = true;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ credits: 20, balance: 130 }));
     }
     res.writeHead(404); res.end();
   });
@@ -305,14 +353,70 @@ async function main() {
     assert.equal(r.status, 200, r.text);
   });
 
+  console.log('== checkin (自动签到) ==');
+  await t('checkin status endpoint', async () => {
+    const r = await call('GET', '/admin/api/checkin/status', null, auth);
+    assert.equal(r.status, 200);
+    assert.equal(r.json.enabled, true);
+    assert.ok(Array.isArray(r.json.accounts));
+    assert.ok(Array.isArray(r.json.recent));
+  });
+  await t('checkin settings get/put', async () => {
+    const r = await call('PUT', '/admin/api/settings/checkin', { enabled: true, hour: 8 }, auth);
+    assert.equal(r.status, 200);
+    assert.equal(r.json.hour, 8);
+    const g = await call('GET', '/admin/api/settings/checkin', null, auth);
+    assert.equal(g.json.enabled, true);
+    assert.equal(g.json.hour, 8);
+    await call('PUT', '/admin/api/settings/checkin', { hour: 9 }, auth); // restore
+  });
+  await t('single-account checkin against mock upstream', async () => {
+    // add an e2echeckin account pointing at the mock server's checkin endpoints
+    const add = await call('POST', '/admin/api/accounts', {
+      provider_id: 'e2echeckin', name: 'mock-checkin',
+      credentials: { baseUrl: 'http://127.0.0.1:8399' },
+    }, auth);
+    assert.equal(add.status, 200, add.text);
+    const accId = add.json.id;
+    const r = await call('POST', `/admin/api/accounts/${accId}/checkin`, {}, auth);
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.ok, true, r.text);
+    assert.equal(r.json.gained, 20);
+    // single-account checkin always asks upstream: mock returns HTTP 400 +
+    // {"code":10001,"msg":"今天已签到…"} (workbuddy-style) — core's
+    // alreadyCheckinSignal() must reclassify it as already-checked-in
+    const r2 = await call('POST', `/admin/api/accounts/${accId}/checkin`, {}, auth);
+    assert.equal(r2.json.ok, true, r2.text);
+    assert.equal(r2.json.already, true);
+    assert.equal(r2.json.skipped, undefined);
+    assert.match(r2.json.message, /已签到/);
+    // credits from checkin extra merged into account profile
+    const after = await call('GET', '/admin/api/accounts?provider_id=e2echeckin', null, auth);
+    assert.equal(after.json.find(a => a.id === accId).extra.credits, 130);
+  });
+  await t('checkin-all runs and logs', async () => {
+    const r = await call('POST', '/admin/api/checkin/all', {}, auth);
+    assert.equal(r.status, 200);
+    assert.ok(r.json.total >= 2); // mock + dead-upstream accounts
+    const st = await call('GET', '/admin/api/checkin/status', null, auth);
+    assert.ok(st.json.recent.length >= 1);
+    assert.ok(st.json.accounts.find(a => a.name === 'mock-checkin').done === true);
+  });
+
   console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
   mock.close();
   if (serverProc) serverProc.kill();
+  removeTestPlugin();
   try { fs.rmSync(TMPDIR, { recursive: true, force: true }); } catch { /* windows may hold the db briefly */ }
   process.exit(fail ? 1 : 0);
 }
 
 (async () => {
   await startServer();
-  await main();
-})().catch(e => { console.error(e); if (serverProc) serverProc.kill(); process.exit(1); });
+  try { await main(); }
+  catch (e) { console.error(e); process.exitCode = 1; }
+  finally {
+    if (serverProc) serverProc.kill();
+    removeTestPlugin();
+  }
+})().catch(e => { console.error(e); if (serverProc) serverProc.kill(); removeTestPlugin(); process.exit(1); });

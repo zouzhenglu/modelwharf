@@ -104,9 +104,20 @@ CREATE TABLE IF NOT EXISTS virtual_models (
   note TEXT,
   created_at INTEGER DEFAULT (unixepoch())
 );
+CREATE TABLE IF NOT EXISTS checkin_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER DEFAULT (unixepoch()),
+  provider_id TEXT,
+  account_id INTEGER,
+  account_name TEXT,
+  ok INTEGER,                     -- 1 签到/已签成功，0 失败
+  message TEXT,
+  gained REAL                     -- 本次领取的积分（平台给多少记多少）
+);
 CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage(ts);
 CREATE INDEX IF NOT EXISTS idx_usage_model ON usage(public_model);
 CREATE INDEX IF NOT EXISTS idx_usage_apikey ON usage(apikey_id);
+CREATE INDEX IF NOT EXISTS idx_checkin_ts ON checkin_log(ts);
 `);
 
 const stmts = {
