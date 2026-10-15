@@ -1346,7 +1346,7 @@ async function renderUsage(m) {
       <div class="rank">
         <span class="name mono" title="${esc(r.key)}">${esc(r.key)}${r.key.includes('#') || /^\d+$/.test(r.key) ? ' ' + badge('账号', 'gray') : ''}</span>
         <span class="val">${fmtCompact(r.reqs)} 次<span class="share"> · ${(r.reqs / tot * 100).toFixed(1)}%</span></span>
-        <span class="sub" title="${esc(s.full)}">${esc(s.main)}</span>
+        <span class="sub" title="${esc(s.full)}">${s.main}</span>
         <span class="dur" title="平均耗时">${esc(s.dur)}</span>
         <div class="rbar"><i style="width:${Math.round(r.reqs / max * 100)}%;background:${SERIES_COLORS[i % SERIES_COLORS.length]}"></i></div>
       </div>`;
@@ -1366,7 +1366,7 @@ async function renderUsage(m) {
     ${trendChartHtml(chart, 180)}
   </div>
   <div class="card" style="display:flex;gap:26px;flex-wrap:wrap">
-    ${rankTable('模型 Top（请求数）', chart.byModel, r => ({ main: 'tok ' + fmtCompact((r.tin || 0) + (r.tout || 0)), full: `输入 ${fmtCompact(r.tin)} / 输出 ${fmtCompact(r.tout)} tok`, dur: fmtDur(r.lat) }))}
+    ${rankTable('模型 Top（请求数）', chart.byModel, r => ({ main: `<span style="color:var(--cyan)">入 ${fmtCompact(r.tin || 0)}</span> · <span style="color:var(--purple)">出 ${fmtCompact(r.tout || 0)}</span>`, full: `输入 ${fmtCompact(r.tin)} / 输出 ${fmtCompact(r.tout)} tok`, dur: fmtDur(r.lat) }))}
     ${rankTable('平台（请求/积分）', chart.byProvider, r => ({ main: '积分 ' + fmtCompact(r.credits), full: `积分 ${Number(r.credits).toFixed(2)}`, dur: fmtDur(r.lat) }))}
     ${rankTable('账号', chart.byAccount, r => ({ main: '积分 ' + fmtCompact(r.credits), full: `积分 ${Number(r.credits).toFixed(2)}`, dur: fmtDur(r.lat) }))}
     <div style="flex:1;min-width:260px">

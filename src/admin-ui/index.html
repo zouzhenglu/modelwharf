@@ -329,7 +329,7 @@ th.sortable:hover{color:var(--text-dim)}
 .donut-legend .v{margin-left:auto;color:var(--text);font-variant-numeric:tabular-nums;font-weight:600}
 .donut-legend .p{width:48px;text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
 /* Top 榜行：两行两列网格（名称/请求数占比、明细/耗时）+ 通栏份额条，数字不截断 */
-.rank{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);column-gap:12px;row-gap:3px;align-items:baseline;margin-bottom:13px}
+.rank{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:12px;row-gap:3px;align-items:baseline;margin-bottom:13px}
 .rank .name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
 .rank .val{text-align:right;white-space:nowrap;font-weight:600;font-size:12.5px;font-variant-numeric:tabular-nums}
 .rank .val .share{color:var(--muted);font-weight:400;font-size:11px}
