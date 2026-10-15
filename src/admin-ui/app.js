@@ -722,10 +722,9 @@ async function saveModel(id) {
 }
 
 // ---------- virtual models (统一模型) ----------
-// 列表排序状态：key = name(对外名称)/targets(目标数)/tags/enabled/note，dir = 1升序 -1降序
+// 列表排序状态：key = name(对外名称)/targets(目标数)/ctx(上下文)/enabled/note，dir = 1升序 -1降序
 let virtualSort = { key: 'name', dir: 1 };
 let virtualSearch = '';
-let virtualTagFilter = '';
 function virtualSortBy(key) {
   if (virtualSort.key === key) virtualSort.dir *= -1;
   else virtualSort = { key, dir: 1 };
@@ -740,17 +739,48 @@ function targetChainHtml(ts, health) {
     return `<span class="tchip" title="${tip} · 优先级 ${t.priority ?? (i + 1) * 10}"><i>${i + 1}</i><span class="tdot ${h}"></span>${esc(t.provider_id)}/${esc(t.public_name)}</span>`;
   }).join('')}</div>`;
 }
-/** 统一模型标签 chips（模型管理同款 tags 语义；点击 = 加入筛选） */
+/** 统一模型标签 chips（自定义补充标签；能力标签由 capabilityHtml 自动推导，不占这里） */
 function vtagChips(tags) {
-  return String(tags || '').split(',').map(s => s.trim()).filter(Boolean)
-    .map(t => `<span class="badge blue" style="cursor:pointer" title="点击筛选该标签" onclick="virtualSearch='${esc(t)}';renderVirtual($('#main'))">${esc(t)}</span>`).join(' ');
+  return String(tags || '').split(',').map(s => s.trim()).filter(t => t && !/^\d+k$/i.test(t))
+    .map(t => `<span class="badge gray" style="cursor:pointer" title="点击筛选该标签" onclick="virtualSearch='${esc(t)}';renderVirtual($('#main'))">${esc(t)}</span>`).join(' ');
+}
+/**
+ * 统一模型能力徽章：从目标链各平台真实模型的 tags/ctx_window 自动推导（显示上游真相）。
+ * ctx = 各目标里的最大上下文；思考/图片/工具 = 任一目标支持即可（推理时取可用超集）。
+ */
+function capabilityHtml(ts, modelIndex) {
+  if (!ts.length) return '<span class="muted">-</span>';
+  let maxCtx = 0, thinking = false, vision = false, tools = false;
+  for (const t of ts) {
+    const row = modelIndex[`${t.provider_id}/${t.public_name}`];
+    if (!row) continue;
+    if (row.ctx_window > maxCtx) maxCtx = row.ctx_window;
+    const tags = String(row.tags || '');
+    if (/thinking/.test(tags)) thinking = true;
+    if (/vision/.test(tags)) vision = true;
+    if (/tools/.test(tags)) tools = true;
+  }
+  const ctxBadge = maxCtx
+    ? `<span class="badge purple" title="目标链中最长上下文：${(maxCtx/1000).toFixed(0)}k tokens">${maxCtx >= 1000000 ? (maxCtx/1000000) + 'M' : Math.round(maxCtx/1000) + 'k'} 上下文</span>`
+    : '';
+  return [ctxBadge,
+    thinking ? '<span class="badge blue" title="至少一个目标平台支持思考模式（-think / reasoning）">思考</span>' : '',
+    vision ? '<span class="badge green" title="至少一个目标平台支持图片输入（vision）">图片</span>' : '',
+    tools ? '<span class="badge yellow" title="至少一个目标平台支持工具调用（function calling）">工具</span>' : '',
+  ].filter(Boolean).join(' ') || '<span class="muted">-</span>';
 }
 async function renderVirtual(m) {
-  const [virtuals, targets, presets, accounts] = await Promise.all([
-    api('/virtual-models'), api('/virtual-models/targets'), api('/virtual-models/presets'), api('/accounts'),
+  const [virtuals, targets, presets, accounts, models] = await Promise.all([
+    api('/virtual-models'), api('/virtual-models/targets'), api('/virtual-models/presets'), api('/accounts'), api('/models?size=5000'),
   ]);
   const byProvider = {};
   for (const t of targets) (byProvider[t.provider_id] = byProvider[t.provider_id] || []).push(t.public_name);
+  // provider/public_name → 真实模型行（推导能力用，__dev 变体不参与）
+  const modelIndex = {};
+  for (const md of models) {
+    if (String(md.public_name).endsWith('__dev')) continue;
+    modelIndex[`${md.provider_id}/${md.public_name}`] = md;
+  }
   // 平台健康：active=ok；只有 cooling=warn；只有 invalid/banned=bad；没账号=none
   const health = {};
   for (const a of accounts) {
@@ -759,8 +789,8 @@ async function renderVirtual(m) {
     const st = a.status === 'active' ? 'ok' : a.status === 'cooling' ? 'warn' : 'bad';
     if (cur == null || rank[st] < rank[cur]) health[a.provider_id] = st; // 取最好状态
   }
-  // 搜索筛选（名称/目标平台/目标模型/备注/标签）；标签筛选走 tagFilter（点 chip 传入）
-  const q = ((virtualSearch || '') + ' ' + (virtualTagFilter || '')).trim().toLowerCase();
+  // 搜索筛选（名称/目标平台/目标模型/备注/标签）
+  const q = (virtualSearch || '').toLowerCase();
   const rows = virtuals
     .map(v => {
       const ts = JSON.parse(v.targets || '[]').sort((a, b) => (a.priority ?? 100) - (b.priority ?? 100));
@@ -777,16 +807,19 @@ async function renderVirtual(m) {
     if (key === 'name') c = a.public_name.localeCompare(b.public_name, 'zh-CN');
     else if (key === 'targets') c = a._n - b._n;
     else if (key === 'enabled') c = (b.enabled ? 1 : 0) - (a.enabled ? 1 : 0);
+    else if (key === 'ctx') {
+      const ctx = v => Math.max(0, ...v._ts.map(t => modelIndex[`${t.provider_id}/${t.public_name}`]?.ctx_window || 0));
+      c = ctx(b) - ctx(a); // 上下文长的在前更符合直觉；dir 仍可反转
+    }
     else if (key === 'tags') c = String(a.tags || '').localeCompare(String(b.tags || ''), 'zh-CN');
     else c = String(a.note || '').localeCompare(String(b.note || ''), 'zh-CN');
     return c * dir;
   });
   m.innerHTML = `
   ${pageHead(`统一模型 <span class="muted" style="font-size:13px">(${virtuals.length}${q ? ` · 筛出 ${rows.length}` : ''})</span>`, '点击表头排序')}
-  <div class="hint">统一模型把多个平台的真实模型聚合成一个对外名称：客户端请求它时，网关按目标顺序依次尝试，<b>失败自动切换下一个</b>。也可以用来改名（如对外叫 <span class="mono">gpt-4o</span>，实际走 DeepSeek/GLM）。与「模型管理」里的直接模型相互独立，都可通过 /v1/models 看到。目标前的圆点 = 该平台账号池健康（<span class="tdot ok" style="display:inline-block;vertical-align:middle"></span> 可用 · <span class="tdot warn" style="display:inline-block;vertical-align:middle"></span> 冷却 · <span class="tdot bad" style="display:inline-block;vertical-align:middle"></span> 失效 · <span class="tdot none" style="display:inline-block;vertical-align:middle"></span> 无账号）。</div>
+  <div class="hint">统一模型把多个平台的真实模型聚合成一个对外名称：客户端请求它时，网关按目标顺序依次尝试，<b>失败自动切换下一个</b>。也可以用来改名（如对外叫 <span class="mono">gpt-4o</span>，实际走 DeepSeek/GLM）。与「模型管理」里的直接模型相互独立，都可通过 /v1/models 看到。<b>能力列</b>由目标链各平台真实模型自动推导（上下文取最长；思考/图片/工具任一目标支持即亮）。目标前的圆点 = 该平台账号池健康（<span class="tdot ok" style="display:inline-block;vertical-align:middle"></span> 可用 · <span class="tdot warn" style="display:inline-block;vertical-align:middle"></span> 冷却 · <span class="tdot bad" style="display:inline-block;vertical-align:middle"></span> 失效 · <span class="tdot none" style="display:inline-block;vertical-align:middle"></span> 无账号）。</div>
   <div class="toolbar">
     <input id="vSearch" class="searchbox" placeholder="搜索名称/平台/标签/备注…" value="${esc(virtualSearch)}">
-    ${virtualTagFilter ? `<span class="badge blue">标签: ${esc(virtualTagFilter)} <span style="cursor:pointer" title="清除标签筛选" onclick="virtualTagFilter='';renderVirtual($('#main'))">✕</span></span>` : ''}
     <span class="muted">快速创建（同名多平台聚合）：</span>
     <select id="vpSel" style="width:230px"><option value="">选择预设…</option>
       ${presets.filter(p => p.multiProvider).map(p => `<option value="${esc(p.base)}">${esc(p.base)}（${p.targets.length} 平台: ${esc(p.providers.join(','))}）</option>`).join('')}
@@ -800,14 +833,14 @@ async function renderVirtual(m) {
   <table><tr>
     ${sortTh('对外名称', 'name')}
     ${sortTh('目标链（上→下 = 尝试顺序）', 'targets')}
-    ${sortTh('标签', 'tags')}
+    ${sortTh('能力', 'ctx')}
     ${sortTh('启用', 'enabled')}
     ${sortTh('备注', 'note')}
     <th>操作</th></tr>
   ${rows.map(v => `<tr>
-    <td class="mono"><b>${esc(v.public_name)}</b><div class="muted" style="font-size:11px">${v._n} 个目标</div></td>
+    <td class="mono"><b>${esc(v.public_name)}</b><div class="muted" style="font-size:11px">${v._n} 个目标${v.tags ? ' · ' + vtagChips(v.tags) : ''}</div></td>
     <td>${targetChainHtml(v._ts, health)}</td>
-    <td>${vtagChips(v.tags) || '<span class="muted">-</span>'}</td>
+    <td>${capabilityHtml(v._ts, modelIndex)}</td>
     <td>${switchHtml(v.enabled, `toggleVirtual('${esc(v.public_name)}', ${v.enabled ? 0 : 1})`)}</td>
     <td class="muted" style="max-width:160px;overflow:hidden;text-overflow:ellipsis">${esc(v.note || '')}</td>
     <td style="white-space:nowrap">
@@ -817,7 +850,7 @@ async function renderVirtual(m) {
   ${!rows.length ? emptyRow(6, '🔀', q ? '没有匹配的统一模型' : '暂无统一模型 — 用上方预设一键创建，或「自定义」') : ''}
   </table></div>`;
   window._virtualTargets = byProvider;
-  $('#vSearch').onkeydown = e => { if (e.key === 'Enter') { virtualTagFilter = ''; virtualSearch = e.target.value; renderVirtual(m); } };
+  $('#vSearch').onkeydown = e => { if (e.key === 'Enter') { virtualSearch = e.target.value; renderVirtual(m); } };
   $('#vpCreate').onclick = async () => {
     const base = $('#vpSel').value;
     if (!base) return toast('先选一个预设', true);
