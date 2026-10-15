@@ -2,6 +2,12 @@
 
 本文件记录面向用户的显著变更。版本与 git tag 一一对应；日期为 tag 创建日期。
 
+## [Unreleased]
+
+### Fixed
+- 最低 Node 版本修正为 **≥ 22.19**：`better-sqlite3@13` / `better-sqlite3-multiple-ciphers@13` / `undici@8` 硬性要求 Node 22+，Node 20 下启动即段错误（此前 engines 与 README 宣称的 ≥ 20 不成立）；CI 矩阵改为 Node 22/24
+- e2e 启动服务失败时报出子进程启动输出，便于定位（此前只报 "server failed to start"）
+
 ## [0.10.0] - 2026-10-15
 
 ### Added

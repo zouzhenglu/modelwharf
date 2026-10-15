@@ -84,15 +84,22 @@ async function call(method, path, body, headers = {}) {
 }
 
 async function startServer() {
+  // capture boot output (bounded) so startup failures are diagnosable in CI logs
+  const bootLog = [];
+  let bootBytes = 0;
+  const cap = (d) => { if (bootBytes < 8192) { bootLog.push(d); bootBytes += d.length; } };
   serverProc = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'server.js')], {
     env: { ...process.env, DSH_PORT: String(PORT), DSH_DATA_DIR: TMPDIR, DSH_ADMIN_PASSWORD: 'admin' },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
+  serverProc.stdout.on('data', cap);
+  serverProc.stderr.on('data', cap);
   for (let i = 0; i < 40; i++) {
     try { const r = await fetch(BASE + '/health'); if (r.ok) return; } catch {}
     await new Promise(r => setTimeout(r, 250));
   }
-  throw new Error('server failed to start');
+  const out = Buffer.concat(bootLog).toString('utf8').trim();
+  throw new Error('server failed to start' + (out ? ' — boot output:\n' + out : ' (no output; process may have crashed)'));
 }
 
 async function main() {

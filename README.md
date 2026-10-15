@@ -25,7 +25,7 @@ harness 工具 ──►  本网关 (OpenAI /v1  +  Anthropic /v1/messages  +  M
 
 ## 快速开始
 
-要求：Node.js ≥ 20（Windows 可直接双击 `start.bat`，停止用 `stop.bat`）。
+要求：Node.js ≥ 22.19（Windows 可直接双击 `start.bat`，停止用 `stop.bat`）。
 
 ```bash
 npm install
@@ -243,7 +243,7 @@ npm test           # 54 个端到端用例（自带隔离服务 + mock 上游，
 
 | 工作流 | 触发 | 做什么 |
 |---|---|---|
-| `ci.yml` | push `main`/`dev`、任何 PR | Linux + Windows × Node 20/24 四路跑全部端到端用例 |
+| `ci.yml` | push `main`/`dev`、任何 PR | Linux + Windows × Node 22/24 四路跑全部端到端用例 |
 | `release.yml` | push tag `v*` | 测试通过后自动创建 GitHub Release，附源码 zip，发布说明取自 CHANGELOG 对应小节 |
 | `docker.yml` | push `main`、push tag `v*` | 自动构建镜像推 GHCR：`main` → `:main`，tag → `:x.y.z` / `:x.y` / `:latest` |
 
