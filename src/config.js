@@ -23,7 +23,7 @@ const config = {
   apiKeys: (process.env.DSH_API_KEYS || '').split(',').map(s => s.trim()).filter(Boolean),
   requestTimeoutMs: parseInt(process.env.DSH_REQUEST_TIMEOUT_MS || '300000', 10),
   logRetentionDays: parseInt(process.env.DSH_LOG_RETENTION_DAYS || '30', 10),
-  version: '0.1.0',
+  version: '0.8.0',
 };
 
 module.exports = config;

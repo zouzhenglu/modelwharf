@@ -1,9 +1,14 @@
 {
   "name": "dsh-free-api",
-  "version": "0.1.0",
+  "version": "0.8.0",
   "description": "Multi-platform AI proxy: workbuddy / trae / qwen / qoder / qodercn -> OpenAI & Anthropic compatible API with admin panel",
   "main": "src/server.js",
   "type": "commonjs",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",

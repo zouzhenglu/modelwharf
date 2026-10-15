@@ -25,6 +25,8 @@ harness 工具 ──►  本网关 (OpenAI /v1  +  Anthropic /v1/messages  +  M
 
 ## 快速开始
 
+要求：Node.js ≥ 20（Windows 可直接双击 `start.bat`，停止用 `stop.bat`）。
+
 ```bash
 npm install
 npm start                 # 默认 http://localhost:8317
@@ -90,13 +92,20 @@ npm start                 # 默认 http://localhost:8317
 
 ## Git 管理
 
-- `main` 稳定发布分支（tag：`v0.1.0` 逆向平台版、`v0.2.0` +24 官方厂商）
+- `main` 稳定发布分支，每个发布打 tag（最新 `v0.8.0`，见 [CHANGELOG.md](CHANGELOG.md)）
 - `dev` 开发分支，功能验证后合入 main 并打 tag
 - `data/`（数据库）、`logs/`、`.env` 均已 gitignore，凭证不会入库
+- 许可证：MIT（见 [LICENSE](LICENSE)；`src/providers/_qwenwork_wasm_helper.mjs` 来自 Buddy2api，同为 MIT）
 
 ## 测试
 
 ```bash
-npm start &        # 先起服务（全新 data）
-npm test           # 19 个端到端用例
+npm install
+npm test           # 34 个端到端用例（自带隔离服务 + mock 上游，不依赖真实账号）
 ```
+
+## 安全说明
+
+- 所有凭证只存本机 SQLite（`data/`，已 gitignore），不外发
+- 面板密码默认 `admin`，仅限本机使用；对外暴露请务必设置 `DSH_ADMIN_PASSWORD` 与 `DSH_API_KEYS`（默认网关不设 key 时对局域网开放）
+- 如发现安全问题请勿公开提 issue，请联系仓库所有者
