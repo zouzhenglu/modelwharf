@@ -169,9 +169,10 @@ function fmtMetric(v, metric) {
   if (metric === 'lat') return fmtCompact(Math.round(v)) + 'ms';
   return fmtCompact(v);
 }
-/** 耗时短格式：<1s 用 ms，>=1s 用秒（Top 榜明细行要短，避免行尾数字被截断） */
+/** 耗时短格式：<1s 用 ms、<1min 用 s、更长用 min（自动换算，避免长数字挤爆布局） */
 function fmtDur(ms) {
   ms = Math.round(Number(ms) || 0);
+  if (ms >= 60000) return (ms / 60000).toFixed(1) + 'min';
   return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms + 'ms';
 }
 function niceMax(v) {
@@ -1332,24 +1333,24 @@ async function renderUsage(m) {
   ]);
   const statusData = chart.byStatus.map(r => ({ key: r.key, value: r.reqs, color: r.key === '失败' ? 'var(--red)' : 'var(--green)' }));
   const statusTotal = statusData.reduce((a, d) => a + d.value, 0);
-  /** Top 榜：名称 + 请求数/占比 + 名次着色份额条 + 明细（tok/积分/耗时）；各行可收缩省略，窄栏不重叠 */
+  /** Top 榜：两行两列（名称 / 请求数·占比，明细 / 耗时）+ 通栏份额条；
+   *  subFmt(r) -> { main, full, dur }：main 常显（短格式自动换算），full 悬停看全量（如 tok 输入输出拆分） */
   const rankTable = (title, rows, subFmt) => !rows.length ? '' : (() => {
     const tot = rows.reduce((a, r) => a + r.reqs, 0) || 1;
     const max = rows[0].reqs || 1;
     return `<div style="flex:1;min-width:240px;max-width:420px">
       <h4 style="font-size:13px;margin-bottom:10px;color:var(--text-dim)">${title}</h4>
-      ${rows.map((r, i) => `
+      ${rows.map((r, i) => {
+        const s = subFmt(r);
+        return `
       <div class="rank">
-        <div class="r1">
-          <span class="name mono" title="${esc(r.key)}">${esc(r.key)}${r.key.includes('#') || /^\d+$/.test(r.key) ? ' ' + badge('账号', 'gray') : ''}</span>
-          <span class="val">${r.reqs} 次</span>
-          <span class="share">${(r.reqs / tot * 100).toFixed(1)}%</span>
-        </div>
-        <div class="r2">
-          <div class="pbar"><i style="width:${Math.round(r.reqs / max * 100)}%;background:${SERIES_COLORS[i % SERIES_COLORS.length]}"></i></div>
-          <span class="sub" title="${esc(subFmt(r))}">${subFmt(r)}</span>
-        </div>
-      </div>`).join('')}
+        <span class="name mono" title="${esc(r.key)}">${esc(r.key)}${r.key.includes('#') || /^\d+$/.test(r.key) ? ' ' + badge('账号', 'gray') : ''}</span>
+        <span class="val">${fmtCompact(r.reqs)} 次<span class="share"> · ${(r.reqs / tot * 100).toFixed(1)}%</span></span>
+        <span class="sub" title="${esc(s.full)}">${esc(s.main)}</span>
+        <span class="dur" title="平均耗时">${esc(s.dur)}</span>
+        <div class="rbar"><i style="width:${Math.round(r.reqs / max * 100)}%;background:${SERIES_COLORS[i % SERIES_COLORS.length]}"></i></div>
+      </div>`;
+      }).join('')}
     </div>`;
   })();
   m.innerHTML = `
@@ -1365,9 +1366,9 @@ async function renderUsage(m) {
     ${trendChartHtml(chart, 180)}
   </div>
   <div class="card" style="display:flex;gap:26px;flex-wrap:wrap">
-    ${rankTable('模型 Top（请求数）', chart.byModel, r => `输入 ${fmtCompact(r.tin)} / 输出 ${fmtCompact(r.tout)} tok · ${fmtDur(r.lat)}`)}
-    ${rankTable('平台（请求/积分）', chart.byProvider, r => `积分 ${Number(r.credits).toFixed(1)} · ${fmtDur(r.lat)}`)}
-    ${rankTable('账号', chart.byAccount, r => `积分 ${Number(r.credits).toFixed(1)} · ${fmtDur(r.lat)}`)}
+    ${rankTable('模型 Top（请求数）', chart.byModel, r => ({ main: 'tok ' + fmtCompact((r.tin || 0) + (r.tout || 0)), full: `输入 ${fmtCompact(r.tin)} / 输出 ${fmtCompact(r.tout)} tok`, dur: fmtDur(r.lat) }))}
+    ${rankTable('平台（请求/积分）', chart.byProvider, r => ({ main: '积分 ' + fmtCompact(r.credits), full: `积分 ${Number(r.credits).toFixed(2)}`, dur: fmtDur(r.lat) }))}
+    ${rankTable('账号', chart.byAccount, r => ({ main: '积分 ' + fmtCompact(r.credits), full: `积分 ${Number(r.credits).toFixed(2)}`, dur: fmtDur(r.lat) }))}
     <div style="flex:1;min-width:260px">
       <h4 style="font-size:13px;margin-bottom:8px;color:var(--text-dim)">结果分布</h4>
       ${statusData.length ? donutHtml(statusData, statusTotal, '总请求') : '<p class="muted">暂无数据</p>'}
