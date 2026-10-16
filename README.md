@@ -25,6 +25,18 @@ harness 工具 ──►  本网关 (OpenAI /v1  +  Anthropic /v1/messages  +  M
                             └─ openai-compat（任意 OpenAI 协议服务）
 ```
 
+## 面板预览
+
+> 截图为演示数据（mock 上游 + 虚构账号），界面与真实使用一致。
+
+**仪表盘** —— 统计卡（24h 迷你趋势线 + 较昨日涨跌）、最近 24 小时趋势图、账号健康、今日模型 Top：
+
+![仪表盘](docs/screenshots/dashboard.png)
+
+**用量趋势图** —— 请求量 / 失败数 / Token / 积分 / 耗时 五指标切换，折线/面积/柱状三种形态，窗口汇总条：
+
+![用量趋势图](docs/screenshots/usage-trend.png)
+
 ## 为什么有这个东西
 
 最初用 WorkBuddy，就因为它送免费积分——代价是从此只能在 CodeBuddy 里用它。想把积分接到 Claude Code？去找个 workbuddy2api，单独逆向、单独跑一个服务。后来发现 Trae 也送积分，于是同样的事又做了一遍：抓 token、起服务、配工具。再到千问、Qoder……每认识一个新平台，就重来一次；上游一改版，几个逆向项目挨个修。
@@ -256,7 +268,7 @@ node scripts/zcode-integrate.js --key wh-xxx --base $GW
 - `main` 稳定发布分支，每个发布打 tag（见 [CHANGELOG.md](CHANGELOG.md)）
 - `dev` 开发分支，功能验证后合入 main 并打 tag
 - `data/`（数据库）、`logs/`、`.env` 均已 gitignore，凭证不会入库
-- 许可证：MIT（见 [LICENSE](LICENSE)；`src/providers/_qwenwork_wasm_helper.mjs` 来自 Buddy2api，同为 MIT）
+- 许可证：MIT（见 [LICENSE](LICENSE)；第三方组件声明见 [NOTICE](NOTICE)）
 
 ## 测试
 
