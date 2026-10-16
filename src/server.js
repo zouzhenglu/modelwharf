@@ -44,6 +44,7 @@ app.get('/docs/api.md', (req, res) => {
 - OpenAI 协议: \`POST ${base}/v1/chat/completions\`（兼容 \`/v1/completions\`、\`/v1/responses\`、\`/v1/embeddings\`、\`GET /v1/models\`）
 - Anthropic 协议: \`POST ${base}/v1/messages\`（含 \`/v1/messages/count_tokens\`；Claude Code: \`ANTHROPIC_BASE_URL=${base}\`）
 - MCP: \`POST ${base}/mcp\`（JSON-RPC over HTTP，tools/resources/prompts 聚合）
+- opencode: 跑网关仓库里的 \`node scripts/opencode-integrate.js\` 一键写入 provider 配置（底层即上面的 OpenAI 兼容端点）
 - 健康检查: \`GET ${base}/health\`
 
 ## 认证

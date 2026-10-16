@@ -2,7 +2,7 @@
 
 > 各家都在送 AI 积分，可每份积分都锁在工具里 —— 一个码头，全停进来。
 
-多平台 AI 代理网关：把 **workbuddy(腾讯 CodeBuddy)、Trae(字节)、通义千问(chat.qwen.ai)、千问办公(QwenWork)、Qoder(阿里，国内/国际)、以及任意 OpenAI 兼容 API / 本地模型(Ollama)** 统一代理成标准 API，供各类 harness 工具（Claude Code、Cline、OpenClaw、Cursor 等）接入。自带网页管理面板。
+多平台 AI 代理网关：把 **workbuddy(腾讯 CodeBuddy)、Trae(字节)、通义千问(chat.qwen.ai)、千问办公(QwenWork)、Qoder(阿里，国内/国际)、ChatGPT(OpenAI 网页版)、以及任意 OpenAI 兼容 API / 本地模型(Ollama)** 统一代理成标准 API，供各类 harness 工具（Claude Code、Cline、OpenClaw、Cursor 等）接入。自带网页管理面板。
 
 ```
 harness 工具 ──►  本网关 (OpenAI /v1  +  Anthropic /v1/messages  +  MCP /mcp)
@@ -13,7 +13,8 @@ harness 工具 ──►  本网关 (OpenAI /v1  +  Anthropic /v1/messages  +  M
                         │   ├─ qwen (chat.qwen.ai)          → 千问网页版
                         │   ├─ qwenwork (千问办公)          → gateway.qwenwork.cn
                         │   ├─ qoder · Qoder 国际版          → api1.qoder.sh
-                        │   └─ qodercn · Qoder 中国版        → gateway.qoder.com.cn
+                        │   ├─ qodercn · Qoder 中国版        → gateway.qoder.com.cn
+                        │   └─ chatgpt (OpenAI 网页版)       → chatgpt.com
                         ├─ 国际官方 API（key 即用）
                         │   ├─ OpenAI · Anthropic · Google Gemini · xAI(Grok) · Mistral
                         │   ├─ OpenRouter · Groq · Together · Perplexity · Cerebras · GitHub Models
@@ -84,6 +85,7 @@ npm start                 # 默认 http://localhost:8317
      - Qoder（国内版 / 国际版同一步骤）：客户端 设置 → Integrations 创建 PAT（`pt-` 开头，最稳）。两个版本是两套独立账号体系，账号分别挂在「Qoder 国际版」「Qoder 中国版」两个平台下；「扫描本机登录」会各扫各的。
      - 千问：chat.qwen.ai 登录后 Cookie 里的 `token`；也可直接填邮箱+密码由网关自动登录续期
      - 千问办公(QwenWork)：推荐「扫描本机登录」自动读取客户端登录态（`%APPDATA%\QwenWorkCN\auth-v2.dat`）；或添加账号弹窗点「网页授权登录」（设备码流程，无需客户端）；聊天需本机装有千问办公客户端（wasm 签名）
+     - ChatGPT（OpenAI 网页版）：浏览器登录 chatgpt.com 后，F12 控制台执行 `(await (await fetch("/api/auth/session")).json()).accessToken` 复制 accessToken；填 Session Cookie（`__Secure-next-auth.session-token` 的值）可自动续期
 2. **同步模型**（仪表盘 → 平台「同步模型」；之后可逐个模型 启用/停用/改名/设倍率/打标签）
 3. **生成 API Key**（可限定该 key 能用的模型、限速）
 4. **测试**（测试台：选模型 → 流式/非流式 → 实时输出 + token/积分耗时）
@@ -168,6 +170,15 @@ node scripts/zcode-integrate.js --key wh-xxx --base $GW
 
 写入前自动备份 `~/.zcode/v2/` 两个配置文件（合并写入、非覆盖），重启 ZCode 后选择提供商「modelwharf」。
 
+### opencode 一键集成
+
+```bash
+node scripts/opencode-integrate.js            # 自动取网关里第一个可用 key（没有就创建）
+node scripts/opencode-integrate.js --key wh-xxx --base $GW
+```
+
+备份（`.bak-` 后缀）并合并写入 `~/.config/opencode/opencode.json`（自定义 OpenAI 兼容 provider），不覆盖已有的其他 provider 和默认模型设置。跑完启动 `opencode`，Shift+Tab 切换到 modelwharf 的模型。
+
 ### 思考（reasoning）控制
 
 所有模型统一用模型名后缀控制，无需改请求体：
@@ -250,6 +261,7 @@ node scripts/zcode-integrate.js --key wh-xxx --base $GW
 - **逆向平台随时可能变化**：端点/加密/风控来自开源社区逆向成果（见下），上游改版后需要跟着更新对应插件。Trae 本地存储若为加密格式，需手动粘贴 token；WorkBuddy 新版客户端的 `$wbEncrypted` 信封同理。
 - **Qoder COSY 签名**未完整实现（签名+AES+RSA 链路复杂），当前用 PAT 模式（官方支持创建，最稳）。
 - **千问办公（qwenwork）**聊天请求体必须由官方客户端自带的 `qoder_auth_wasm_bg.wasm` 签名（本机需安装千问办公客户端；运行时从安装目录读取，不随本仓库分发）。积分与账号检查无需客户端。上游 1.2.x 已验证，客户端大版本更新后可能需要适配。
+- **ChatGPT 网页版**：① 免费/Plus 账号的部分模型有 arkose/PoW 人机校验，本插件未实现，命中时上游 403 原文透传（换模型或账号再试）；② 上游不返回 token 用量，记账按 0 计；③ 不支持函数调用与图片输入；④ accessToken 约 2 周过期，不填 Session Cookie 时需重新粘贴。
 - 单机 SQLite，无分布式；面向个人/小团队本地使用。
 
 ## 参考的开源项目
@@ -260,6 +272,7 @@ node scripts/zcode-integrate.js --key wh-xxx --base $GW
 - Qoder: `shuishuipingan/qoder2api-hub`、`fengyinxia/qoder2api`、`Zhengyuuuui/qoder2api`
 - QwenWork (千问办公): `wearetheone777/dumate2api`、`wpy030414/xrl-router-plugin-qwenwork`；wasm 签名封装基于 `wicm84266964/Buddy2api`（MIT，`src/providers/_qwenwork_wasm_helper.mjs`）
 - Qwen: `LLM-Red-Team/qwen-free-api` 系
+- ChatGPT: `ChatGPT-to-API` / `Pandora` 一系的 backend-api 公开逆向成果
 
 ⚠️ 使用逆向接口请自行评估各平台服务条款与账号风险。
 
@@ -274,7 +287,7 @@ node scripts/zcode-integrate.js --key wh-xxx --base $GW
 
 ```bash
 npm install
-npm test           # 55 个端到端用例（自带隔离服务 + mock 上游，不依赖真实账号）
+npm test           # 64 个端到端用例（自带隔离服务 + mock 上游，不依赖真实账号）
 ```
 
 ## 部署到服务器 / Docker

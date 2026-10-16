@@ -5,8 +5,13 @@
 ## [Unreleased]
 
 ### Added
+- **ChatGPT (OpenAI 网页版) 逆向平台**：`src/providers/chatgpt.js` 新插件，接 chatgpt.com backend-api。浏览器 console 一行 `(await (await fetch("/api/auth/session")).json()).accessToken` 取 token 粘贴导入；配 `__Secure-next-auth.session-token` 可自动续期。模型清单实时拉取（`/backend-api/models`），支持流式/非流式、推理内容透传；不支持函数调用/图片输入，上游不返回 token 用量（记账按 0），arkose/PoW 人机校验未实现（命中时 403 原文透传）。详见 README「已知限制」
+- **opencode 一键集成脚本** `scripts/opencode-integrate.js`：自动取/建 key，备份（`.bak-`）并合并写入 `~/.config/opencode/opencode.json`（`@ai-sdk/openai-compatible` 自定义 provider），不覆盖已有 provider 与默认模型；重跑可刷新模型清单。面板「文档教程」页与 `/docs/api.md` 同步新增 opencode 接入说明
 - **`AGENTS.md`**：给 AI 助手的安装与接入手册（安装 → 常驻 → 导账号决策树 → 建 key → 配工具 → 端到端验证），复制一句提示词即可让 agent 全程代办；README「快速开始」提供该提示词
 - README 顶部痛点→解法引导文案与标语；「使用方式一览」升级为按读者分类的「文档地图」（新人 / agent / 技术人员 / 已部署）；「部署到服务器 / Docker」从自动化一节独立成节并加对外暴露安全前提；新增「升级与排障」一节
+
+### Changed
+- 端到端用例 55 → 64：新增 chatgpt provider 全链路 mock 上游用例（session 续期 / 模型同步 / 流式 / 推理内容 / 工具调用拒绝）与 opencode-integrate 配置写入、备份、幂等重跑用例
 
 ### Fixed
 - `/docs/api.md` 生成的示例 URL 此前写死 `http://localhost`，远程/Docker 部署时文档地址全错——现按请求的 Host（及 `X-Forwarded-Proto`）动态生成，用什么地址打开示例就用什么地址

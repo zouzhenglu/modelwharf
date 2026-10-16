@@ -135,7 +135,7 @@ curl -s -X POST http://localhost:8317/admin/api/import-local-all -H "Authorizati
 ```
 
 覆盖 trae / workbuddy / qoder / qodercn / qwenwork 五个平台的本地客户端凭证，按凭证指纹去重，可重复调用。单平台导入：`POST /providers/<id>/import-local`。
-前提是用户本机装过对应客户端**且登录过**。若用户没装，引导用户装好并登录后再扫，或走 B/C。
+前提是用户本机装过对应客户端**且登录过**。若用户没装，引导用户装好并登录后再扫，或走 B/C。（chatgpt 不支持本地扫描：桌面客户端的登录态存在加密的 Cookies sqlite 里，走 C 浏览器取 token。）
 
 ### B. 网页授权登录（无需客户端、无需抓 token）
 
@@ -172,6 +172,7 @@ curl -s -X POST http://localhost:8317/admin/api/accounts \
 | `qoder` / `qodercn` | `pat`（`pt-`开头）、`region`? | ① **PAT 最稳**：Qoder 客户端 → 设置 → Integrations 创建 ② 扫描（A）。国内版账号挂 `qodercn`，国际版挂 `qoder` |
 | `qwen` | `token` 或 `email`+`password` | ① 填邮箱+密码，网关自动登录续期（最省心）② 浏览器登录 chat.qwen.ai → Cookie 里 `token` 字段 |
 | `qwenwork` | `token`、`refreshToken`?、`uid`（**必需**） | ① 授权登录（B）② 扫描（A，会自动带 uid）③ 手动：token+uid（uid 在 `~/.qoderworkcn` 或客户端数据目录） |
+| `chatgpt` | `accessToken`（JWT，**必需**）、`sessionCookie`?、`baseUrl`? | 浏览器登录 chatgpt.com → F12 控制台执行 `(await (await fetch("/api/auth/session")).json()).accessToken`；要自动续期再复制 `__Secure-next-auth.session-token` 的值填 `sessionCookie`（DevTools → 应用 → Cookie）。无 sessionCookie 时 token 约 2 周过期需重粘 |
 | 官方 24 家（`zhipu`/`moonshot`/`siliconflow`/`deepseek`/…） | `apiKey` | 用户到对应官网注册拿 key，即用。`GET /admin/api/providers` 查全部 id 与字段定义（`credFields`） |
 
 **你有 shell 权限时**：可以直接替用户读 A/C 表格里的本地文件路径、提取 token、再 `POST /accounts`——效果等同扫描，且能处理扫描之外的路径。加密信封（新版 Trae / CodeBuddy 的 `$wbEncrypted`）读不出明文，改走 B 或让用户手动粘贴。
@@ -187,6 +188,9 @@ curl -s -X POST http://localhost:8317/admin/api/accounts \
 ```bash
 # ZCode —— 一键脚本（自动取/建 key、写配置前备份原文件）
 node scripts/zcode-integrate.js
+
+# opencode —— 一键脚本（备份并合并写 ~/.config/opencode/opencode.json）
+node scripts/opencode-integrate.js
 
 # Claude Code / Anthropic 协议
 export ANTHROPIC_BASE_URL=http://localhost:8317
@@ -226,7 +230,7 @@ curl -s http://localhost:8317/v1/chat/completions \
 | `EADDRINUSE` | 端口占用，设 `WH_PORT` 换端口 |
 | 扫描导入 0 条 | 用户本机没装客户端或没登录；加密凭证扫不出，走 B/C |
 | qwenwork 聊天报错 | 聊天需本机装千问办公客户端（wasm 签名，运行时读安装目录）；积分/账号检查不受影响 |
-| 上游 401/403 | 凭证过期或风控。trae/workbuddy 可给账号补 `refreshToken` 自动续期；qwen 用邮箱+密码模式 |
+| 上游 401/403 | 凭证过期或风控。trae/workbuddy 可给账号补 `refreshToken` 自动续期；qwen 用邮箱+密码模式；chatgpt 补 `sessionCookie` 自动续期，403 含 arkose 字样是网页版人机校验（未实现），换模型或账号 |
 | 上游 5xx / 连不上 | 逆向平台随时可能改版（README「已知限制」），检查仓库有无新版本，或暂用官方 API 平台 |
 
 ## 10. 安全红线

@@ -616,6 +616,7 @@ router.get('/docs', (req, res) => {
   for (const r of enabledModels) (byProvider[r.provider_id] = byProvider[r.provider_id] || []).push(r.public_name);
   res.json({
     base,
+    gatewayDir: path.join(__dirname, '..', '..'),
     keyNames: keys,
     openGateway: config.apiKeys.length === 0 && db.prepare('SELECT COUNT(*) c FROM apikeys').get().c === 0,
     sampleModel,

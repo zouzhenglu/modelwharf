@@ -118,6 +118,7 @@ async function main() {
     assert.ok(r.json.providers.includes('qwen'));
     assert.ok(r.json.providers.includes('qoder'));
     assert.ok(r.json.providers.includes('qodercn'));
+    assert.ok(r.json.providers.includes('chatgpt'));
   });
 
   console.log('== admin ==');
@@ -194,6 +195,50 @@ async function main() {
       mockCheckedIn = true;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ credits: 20, balance: 130 }));
+    }
+    // --- ChatGPT web upstream emulation (provider chatgpt via baseUrl override) ---
+    if (req.url === '/api/auth/session') {
+      if ((req.headers.cookie || '').includes('__Secure-next-auth.session-token=mock-session')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ accessToken: 'mock-chatgpt-token-2', accountPlan: 'plus', user: { email: 'e2e@example.com' } }));
+      }
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'unauthorized' }));
+    }
+    if (req.url === '/backend-api/models') {
+      if (req.headers.authorization !== 'Bearer mock-chatgpt-token-2') {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ detail: 'bad token' }));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ models: [
+        { slug: 'gpt-4o', title: 'GPT-4o' },
+        { slug: 'o3', title: 'o3', tags: ['reasoning'] },
+      ] }));
+    }
+    if (req.url === '/backend-api/conversation') {
+      if (req.headers.authorization !== 'Bearer mock-chatgpt-token-2') {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ detail: 'bad token' }));
+      }
+      let body = '';
+      req.on('data', c => body += c);
+      req.on('end', () => {
+        const j = JSON.parse(body || '{}');
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        const sseMsg = (msg) => `event: message\ndata: ${JSON.stringify({ message: msg, conversation_id: 'conv-mock' })}\n\n`;
+        if (j.model === 'o3') {
+          // reasoning 模型：parts 为新格式对象（type: reasoning/text）
+          res.write(sseMsg({ id: 'm1', author: { role: 'assistant' }, content: { content_type: 'text', parts: [{ type: 'reasoning', text: '想' }, { type: 'text', text: '你好' }] }, status: 'in_progress' }));
+          res.write(sseMsg({ id: 'm1', author: { role: 'assistant' }, content: { content_type: 'text', parts: [{ type: 'reasoning', text: '想好了' }, { type: 'text', text: '你好，世界！' }] }, status: 'finished_successfully' }));
+        } else {
+          // 普通模型：parts 为纯字符串（旧格式）
+          res.write(sseMsg({ id: 'm1', author: { role: 'assistant' }, content: { content_type: 'text', parts: ['你好'] }, status: 'in_progress' }));
+          res.write(sseMsg({ id: 'm1', author: { role: 'assistant' }, content: { content_type: 'text', parts: ['你好，世界！'] }, status: 'finished_successfully' }));
+        }
+        res.end();
+      });
+      return;
     }
     res.writeHead(404); res.end();
   });
@@ -559,6 +604,103 @@ async function main() {
     for (const x of results) assert.equal(x.status, 200, x.text);
     const kinds = new Set(results.map(x => x.json.choices[0].message.content.startsWith('echo#') ? 'echo' : 'greet'));
     assert.ok(kinds.has('echo') && kinds.has('greet'), 'least_conn strategy did not spread: ' + [...kinds]);
+  });
+
+  console.log('== provider: chatgpt (mock ChatGPT web upstream) ==');
+  // 已过期的 JWT：ensureToken 必须凭 sessionCookie 走 /api/auth/session 换新 token
+  const b64url = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const expiredJwt = `${b64url({ alg: 'none' })}.${b64url({ exp: Math.floor(Date.now() / 1000) - 3600, email: 'e2e@example.com' })}.sig`;
+  await t('chatgpt: add account (expired token + session cookie)', async () => {
+    const r = await call('POST', '/admin/api/accounts', {
+      provider_id: 'chatgpt', name: 'mock-chatgpt',
+      credentials: { accessToken: expiredJwt, sessionCookie: 'mock-session', baseUrl: 'http://127.0.0.1:8399' },
+    }, auth);
+    assert.equal(r.status, 200, r.text);
+  });
+  await t('chatgpt: refresh models (session refresh + backend-api/models)', async () => {
+    const r = await call('POST', '/admin/api/providers/chatgpt/refresh-models', {}, auth);
+    assert.equal(r.status, 200, r.text);
+    assert.ok(r.json.added >= 2, `added=${r.json.added}`);
+    // 避开 virtual rename 用例占用过的公开名 gpt-4o：改名后再测聊天
+    const models = await call('GET', '/admin/api/models?provider_id=chatgpt', null, auth);
+    for (const m of models.json) {
+      const pub = m.upstream_model === 'o3' ? 'cgpt-o3' : 'cgpt-4o';
+      await call('PUT', `/admin/api/models/${m.id}`, { public_name: pub }, auth);
+    }
+  });
+  await t('chatgpt: checkAccount reports plan', async () => {
+    const accts = await call('GET', '/admin/api/accounts?provider_id=chatgpt', null, auth);
+    const r = await call('POST', `/admin/api/accounts/${accts.json[0].id}/check`, {}, auth);
+    assert.equal(r.status, 200, r.text);
+    assert.ok(r.json.ok, r.text);
+    assert.match(r.json.message, /plus/, r.text);
+  });
+  await t('chatgpt: non-stream chat', async () => {
+    const r = await call('POST', '/v1/chat/completions', { model: 'cgpt-4o', messages: [{ role: 'user', content: 'hi' }] }, { Authorization: 'Bearer ' + fullKey });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.choices[0].message.content, '你好，世界！');
+  });
+  await t('chatgpt: reasoning parts -> reasoning_content', async () => {
+    const r = await call('POST', '/v1/chat/completions', { model: 'cgpt-o3', messages: [{ role: 'user', content: 'hi' }] }, { Authorization: 'Bearer ' + fullKey });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.choices[0].message.reasoning_content, '想好了');
+    assert.equal(r.json.choices[0].message.content, '你好，世界！');
+  });
+  await t('chatgpt: stream chat', async () => {
+    const resp = await fetch(BASE + '/v1/chat/completions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + fullKey },
+      body: JSON.stringify({ model: 'cgpt-4o', messages: [{ role: 'user', content: 'hi' }], stream: true }),
+    });
+    assert.equal(resp.status, 200);
+    const text = await resp.text();
+    assert.ok(text.includes('"content":"你好"'), 'first delta missing');
+    assert.ok(text.includes('"content":"，世界！"'), 'second delta missing');
+    assert.ok(text.includes('[DONE]'));
+  });
+  await t('chatgpt: tools rejected clearly', async () => {
+    const r = await call('POST', '/v1/chat/completions', {
+      model: 'cgpt-4o', messages: [{ role: 'user', content: 'hi' }],
+      tools: [{ type: 'function', function: { name: 'f', description: 'd', parameters: { type: 'object', properties: {} } } }],
+    }, { Authorization: 'Bearer ' + fullKey });
+    assert.equal(r.status, 400, r.text);
+    assert.match(r.json.error.message, /函数调用/);
+  });
+
+  console.log('== opencode-integrate ==');
+  const runIntegrate = (xdg) => new Promise((resolve) => {
+    const p = spawn(process.execPath, [path.join(__dirname, '..', 'scripts', 'opencode-integrate.js'), '--base', BASE], {
+      env: { ...process.env, XDG_CONFIG_HOME: xdg, WH_DATA_DIR: TMPDIR },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    p.stdout.on('data', d => out += d);
+    p.stderr.on('data', d => out += d);
+    p.on('close', code => resolve({ code, out }));
+  });
+  await t('opencode-integrate writes provider config (temp XDG, keeps user entries)', async () => {
+    const xdg = path.join(TMPDIR, 'xdg');
+    fs.mkdirSync(path.join(xdg, 'opencode'), { recursive: true });
+    // 预置用户已有配置：脚本必须保留既有 provider 与默认模型
+    fs.writeFileSync(path.join(xdg, 'opencode', 'opencode.json'), JSON.stringify({ model: 'other/x', provider: { other: { npm: '@ai-sdk/openai-compatible', options: {} } } }));
+    const r = await runIntegrate(xdg);
+    assert.equal(r.code, 0, r.out);
+    const cfg = JSON.parse(fs.readFileSync(path.join(xdg, 'opencode', 'opencode.json'), 'utf8'));
+    assert.equal(cfg.provider.modelwharf.npm, '@ai-sdk/openai-compatible');
+    assert.equal(cfg.provider.modelwharf.options.baseURL, BASE + '/v1');
+    assert.ok(cfg.provider.modelwharf.options.apiKey.startsWith('wh-'));
+    assert.ok(Object.keys(cfg.provider.modelwharf.models).length >= 1, 'models missing');
+    assert.ok(cfg.provider.other, 'user provider entry was dropped');
+    assert.equal(cfg.model, 'other/x', 'user default model was overwritten');
+  });
+  await t('opencode-integrate re-run idempotent + backup created', async () => {
+    const xdg = path.join(TMPDIR, 'xdg');
+    const r = await runIntegrate(xdg);
+    assert.equal(r.code, 0, r.out);
+    const dir = path.join(xdg, 'opencode');
+    assert.ok(fs.readdirSync(dir).some(f => f.startsWith('opencode.json.bak-')), 'no .bak backup written');
+    const cfg = JSON.parse(fs.readFileSync(path.join(dir, 'opencode.json'), 'utf8'));
+    assert.equal(cfg.provider.modelwharf.options.baseURL, BASE + '/v1');
+    assert.ok(cfg.provider.other, 'user provider entry lost on re-run');
   });
 
   console.log('== usage chart ==');

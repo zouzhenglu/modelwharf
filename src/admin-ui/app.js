@@ -129,7 +129,7 @@ async function renderPlatforms(m) {
 // ---------- dashboard ----------
 const VENDOR_GROUPS = [
   // qodercn 紧跟 qoder：同一个客户端的两个版本，放一起才好对照
-  { name: '逆向平台（账号池）', ids: ['trae', 'workbuddy', 'qoder', 'qodercn', 'qwen', 'qwenwork'] },
+  { name: '逆向平台（账号池）', ids: ['trae', 'workbuddy', 'qoder', 'qodercn', 'qwen', 'qwenwork', 'chatgpt'] },
   { name: '国际官方 API', ids: ['openai', 'anthropic', 'gemini', 'xai', 'openrouter', 'mistral', 'groq', 'together', 'perplexity', 'cerebras', 'github-copilot'] },
   { name: '国内官方 API', ids: ['dashscope', 'zhipu', 'moonshot', 'minimax', 'doubao', 'hunyuan', 'baichuan', 'stepfun', 'siliconflow', 'internvl', 'modelscope'] },
   { name: '本地 / 自定义', ids: ['ollama', 'openai-compat'] },
@@ -1747,6 +1747,7 @@ claude`;
       <div class="kv" style="margin-top:10px">
         <span class="muted">OpenAI 工具</span><span class="mono">${d.base}/v1</span>
         <span class="muted">Claude Code</span><span class="mono">ANTHROPIC_BASE_URL=${d.base}</span>
+        <span class="muted">opencode</span><span class="mono">node scripts/opencode-integrate.js</span>
         <span class="muted">MCP 客户端</span><span class="mono">${d.base}/mcp</span>
       </div>
       <p class="muted" style="margin-top:8px;font-size:12px">${keyHint}</p>
@@ -1768,6 +1769,13 @@ claude`;
       <div class="copypre"><pre class="mono" id="docCC">${esc(ccEx)}</pre>
       <button class="small ghost copybtn" onclick="copyDoc('docCC')">复制</button></div>
       <p class="muted" style="margin-top:8px;font-size:12px">其他工具同理：凡支持自定义 OpenAI base_url 的（Cline / Cursor / LobeChat / Dify…），base 填 <span class="mono">${d.base}/v1</span>，key 填网关 key。</p>
+    </div>
+    <div class="doccard">
+      <h4>opencode（一键脚本）</h4>
+      <div class="copypre"><pre class="mono" id="docOC">cd ${esc(d.gatewayDir)}   # 网关仓库目录
+node scripts/opencode-integrate.js</pre>
+      <button class="small ghost copybtn" onclick="copyDoc('docOC')">复制</button></div>
+      <p class="muted" style="margin-top:8px;font-size:12px">自动取/建 key、备份并合并写入 <span class="mono">~/.config/opencode/opencode.json</span>；重跑可刷新模型清单。跑完启动 <span class="mono">opencode</span>，Shift+Tab 切到 modelwharf 的模型。</p>
     </div>
   </div>
   <div class="card">
