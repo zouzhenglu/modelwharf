@@ -1,0 +1,7 @@
+# Third-party components
+
+This project incorporates code from the following open-source projects:
+
+- `src/providers/_qwenwork_wasm_helper.mjs` is derived from
+  [Buddy2api](https://github.com/wicm84266964/Buddy2api), MIT License,
+  Copyright (c) 2026. The original license notice is preserved in the file header.

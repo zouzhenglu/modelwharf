@@ -19,11 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-Third-party components:
-
-- src/providers/_qwenwork_wasm_helper.mjs is derived from Buddy2api
-  (https://github.com/wicm84266964/Buddy2api), MIT License,
-  Copyright (c) 2026. The original license notice is preserved in the file header.
