@@ -1,5 +1,7 @@
 # modelwharf 模型码头
 
+> 各家都在送 AI 积分，可每份积分都锁在工具里 —— 一个码头，全停进来。
+
 多平台 AI 代理网关：把 **workbuddy(腾讯 CodeBuddy)、Trae(字节)、通义千问(chat.qwen.ai)、千问办公(QwenWork)、Qoder(阿里，国内/国际)、以及任意 OpenAI 兼容 API / 本地模型(Ollama)** 统一代理成标准 API，供各类 harness 工具（Claude Code、Cline、OpenClaw、Cursor 等）接入。自带网页管理面板。
 
 ```
@@ -23,9 +25,21 @@ harness 工具 ──►  本网关 (OpenAI /v1  +  Anthropic /v1/messages  +  M
                             └─ openai-compat（任意 OpenAI 协议服务）
 ```
 
+## 为什么有这个东西
+
+最初用 WorkBuddy，就因为它送免费积分——代价是从此只能在 CodeBuddy 里用它。想把积分接到 Claude Code？去找个 workbuddy2api，单独逆向、单独跑一个服务。后来发现 Trae 也送积分，于是同样的事又做了一遍：抓 token、起服务、配工具。再到千问、Qoder……每认识一个新平台，就重来一次；上游一改版，几个逆向项目挨个修。
+
+与其继续装，不如做一次。workbuddy / trae / qwen / qoder 的账号池（多账号轮询、签到、积分检查）+ 24 家官方 API（智谱、Kimi、硅基流动……key 即用），统一代理成 OpenAI / Anthropic / MCP 标准接口：**一个进程、一个 key、一个面板**，工具侧只改 base_url。新平台 = 一个插件文件，不再是一次重来。
+
 ## 快速开始
 
-要求：Node.js ≥ 22.19（Windows 可直接双击 `start.bat`，停止用 `stop.bat`）。
+**最省事：丢给你的 AI 助手。** 复制这句话给 Claude Code / ZCode / Codex 等带命令执行能力的 agent：
+
+> 读取 https://github.com/zouzhenglu/modelwharf 的 AGENTS.md，把这个网关在我电脑上装好、导入账号、并配进我正在用的 AI 工具。
+
+它会按 [AGENTS.md](AGENTS.md) 全程代办：装依赖 → 常驻后台 → 扫描/导入账号 → 同步模型 → 生成 key → 写入工具配置 → 真实对话验证。
+
+**自己动手**：要求 Node.js ≥ 22.19（Windows 可直接双击 `start.bat`，停止用 `stop.bat`）。
 
 ```bash
 npm install
@@ -33,14 +47,18 @@ npm start                 # 默认 http://localhost:8317
 ```
 
 - 管理面板：http://localhost:8317/admin （默认密码 `admin`，请立即在设置页修改）
+- 要部署到服务器 / Docker（局域网多人用、手机也能连）→ [部署到服务器 / Docker](#部署到服务器--docker)
 
-## 使用方式一览
+## 文档地图
 
 | 你是谁 | 怎么用 | 看哪节 |
 |---|---|---|
+| **新人**，先看看这是什么 | 三分钟读懂痛点与解法 → 动手安装 | [为什么有这个东西](#为什么有这个东西) · [快速开始](#快速开始) |
+| **不想动手**（推荐） | 把仓库地址丢给 AI 助手，安装/导账号/配工具全程代办 | [AGENTS.md](AGENTS.md) |
 | 自己用（网页操作） | 面板添加账号 → 同步模型 → 生成 key → 测试台试聊 | [管理面板流程](#一管理面板流程自己用) |
-| 接到 harness 工具（Claude Code / Cline / Cursor / Codex…） | 拿 base_url + key 填进工具 | [接入教程](#二接入教程工具接进来) |
-| 让 AI 助手自己接入 | 把 `http://localhost:8317/docs/api.md` 喂给 AI，它读完全部端点/认证/模型清单后自动配好 | [给 AI 看的接入说明](#三给-ai-看的接入说明) |
+| **技术人员**，接到 harness 工具（Claude Code / Cline / Cursor / Codex…） | 拿 base_url + key 填进工具；协议细节、环境变量、测试都在下文 | [接入教程](#二接入教程工具接进来) |
+| **AI 助手**，网关已装好只差配工具 | 把 `$GW/docs/api.md` 喂给 AI，它读完端点/认证/模型清单后自动配好 | [给 AI 看的接入说明](#三给-ai-看的接入说明) |
+| **已部署**，日常使用与维护 | 账号体检、签到、用量、升级、故障排查 | [管理面板流程](#一管理面板流程自己用) · [升级与排障](#升级与排障) |
 
 ---
 
@@ -62,21 +80,25 @@ npm start                 # 默认 http://localhost:8317
 
 ## 二、接入教程（工具接进来）
 
-网关同时暴露三种协议，同一个 API key 通用：
+网关同时暴露三种 API 协议 + MCP 网关，同一个 API key 通用：
+
+> **网关地址（下文用 `$GW` 表示）**：本机部署默认 `http://localhost:8317`。**网关跑在其他机器上时（服务器 / Docker / 局域网），下文所有 `localhost` 都换成网关主机地址**，如 `http://192.168.1.10:8317` 或 `https://ai.example.com`。bash 示例统一用 `$GW` 变量，只改一处。
 
 | 协议 | base_url | 适用工具 |
 |---|---|---|
-| OpenAI | `http://localhost:8317/v1` | Cline、Cursor、OpenClaw、OpenAI SDK、绝大多数工具 |
-| Anthropic | `http://localhost:8317` | Claude Code、Anthropic SDK |
-| Responses API | `http://localhost:8317/v1` | Codex CLI、OpenAI Responses SDK |
-| MCP | `http://localhost:8317/mcp` | Claude Desktop、Cursor 等 MCP 客户端 |
+| OpenAI | `$GW/v1` | Cline、Cursor、OpenClaw、OpenAI SDK、绝大多数工具 |
+| Anthropic | `$GW` | Claude Code、Anthropic SDK |
+| Responses API | `$GW/v1` | Codex CLI、OpenAI Responses SDK |
+| MCP | `$GW/mcp` | Claude Desktop、Cursor 等 MCP 客户端 |
 
 key 在面板生成（形如 `wh-...`）。未配置任何 key 时网关为**开放模式**（不带认证头即可访问，仅限本机使用）。
 
 ### OpenAI 协议（Chat Completions）
 
 ```bash
-curl http://localhost:8317/v1/chat/completions \
+GW=http://localhost:8317      # ← 换成你的网关地址
+
+curl $GW/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer wh-..." \
   -d '{"model": "glm-5.3", "messages": [{"role":"user","content":"你好"}], "stream": true}'
@@ -89,12 +111,12 @@ curl http://localhost:8317/v1/chat/completions \
 - 向量：`POST /v1/embeddings`（OpenAI 兼容上游透传，逆向平台返回 501）
 - 兼容 `POST /v1/completions`（legacy 补全，含 `n>1` 多选；流式 `n>1` 报 400）
 
-**Cline / Cursor / 其他 OpenAI 兼容工具**：Base URL 填 `http://localhost:8317/v1`，API Key 填面板生成的 key，模型从 `/v1/models` 里选。
+**Cline / Cursor / 其他 OpenAI 兼容工具**：Base URL 填 `$GW/v1`，API Key 填面板生成的 key，模型从 `/v1/models` 里选。
 
 ### Anthropic 协议（Claude Code）
 
 ```bash
-export ANTHROPIC_BASE_URL=http://localhost:8317
+export ANTHROPIC_BASE_URL=$GW      # 本机即 http://localhost:8317
 export ANTHROPIC_AUTH_TOKEN=wh-...
 claude
 ```
@@ -107,11 +129,11 @@ claude
 
 ### Responses API（Codex CLI）
 
-Codex 配置 `base_url = http://localhost:8317/v1`（Wire API 选 Responses），或直接调 `POST /v1/responses`。支持流式事件、`reasoning` 汇总输出。
+Codex 配置 `base_url = $GW/v1`（Wire API 选 Responses），或直接调 `POST /v1/responses`。支持流式事件、`reasoning` 汇总输出。
 
 ### MCP 网关
 
-面板 → MCP 服务 添加上游 MCP server（stdio / http 均可），网关把所有已启用服务的 **tools / resources / prompts** 聚合暴露在 `http://localhost:8317/mcp`（Streamable HTTP，JSON-RPC）：
+面板 → MCP 服务 添加上游 MCP server（stdio / http 均可），网关把所有已启用服务的 **tools / resources / prompts** 聚合暴露在 `$GW/mcp`（Streamable HTTP，JSON-RPC）：
 
 - `tools/list` / `tools/call`、`prompts/list` / `prompts/get`：名称格式 `服务id__名称`
 - `resources/list` / `resources/read`：资源 URI 带 `mcpres://服务id/…` 前缀（模板占位符原样保留）
@@ -123,11 +145,13 @@ Codex 配置 `base_url = http://localhost:8317/v1`（Wire API 选 Responses）�
 { "mcpServers": { "modelwharf": { "type": "http", "url": "http://localhost:8317/mcp" } } }
 ```
 
+> 配置里的地址同样要与网关实际部署位置一致（本机 `localhost`，服务器填服务器地址）。
+
 ### ZCode 一键集成
 
 ```bash
 node scripts/zcode-integrate.js            # 自动取网关里第一个可用 key（没有就创建）
-node scripts/zcode-integrate.js --key wh-xxx --base http://localhost:8317
+node scripts/zcode-integrate.js --key wh-xxx --base $GW
 ```
 
 写入前自动备份 `~/.zcode/v2/` 两个配置文件（合并写入、非覆盖），重启 ZCode 后选择提供商「modelwharf」。
@@ -151,9 +175,11 @@ node scripts/zcode-integrate.js --key wh-xxx --base http://localhost:8317
 
 让 AI 助手（Claude / ZCode / Cursor Agent 等）自己完成接入：
 
-> 请读取 http://localhost:8317/docs/api.md ，按照文档把我接入这个网关。
+> 请读取 $GW/docs/api.md ，按照文档把我接入这个网关。
 
-`/docs/api.md` 无需登录、实时生成，包含当前网关的端点、认证方式、实时模型清单（含免费/倍率标注）、请求示例和接入注意事项。AI 读完即可直接写出正确配置。
+`/docs/api.md` 无需登录、**按访问地址实时生成**（用什么地址打开，文档里的示例就用什么地址），包含当前网关的端点、认证方式、实时模型清单（含免费/倍率标注）、请求示例和接入注意事项。AI 读完即可直接写出正确配置。
+
+> 与 [AGENTS.md](AGENTS.md) 的分工：**AGENTS.md 管"装好并配好"**（安装、常驻、导账号、建 key、写工具配置，给有命令执行能力的 agent）；**`/docs/api.md` 管"已装好，接进来"**（只谈协议和模型，给负责写代码/配工具的 AI）。装机那句复制提示词见[快速开始](#快速开始)。
 
 ---
 
@@ -239,29 +265,55 @@ npm install
 npm test           # 55 个端到端用例（自带隔离服务 + mock 上游，不依赖真实账号）
 ```
 
+## 部署到服务器 / Docker
+
+服务器部署后，客户端工具里的网关地址换成 `http://<服务器地址>:8317`（即上文 `$GW`）。
+
+```bash
+# 部署（数据与日志挂卷持久化）
+docker run -d -p 8317:8317 -v wharf-data:/app/data -v wharf-logs:/app/logs \
+  ghcr.io/zouzhenglu/modelwharf:latest
+```
+
+> 镜像由 CI 自动构建推 GHCR：`main` → `:main`，tag → `:x.y.z` / `:x.y` / `:latest`。首次推送后 GHCR 包默认 private，需在包设置改为 public 才能匿名拉取。
+> 千问办公（qwenwork）依赖本机客户端的 wasm 签名，容器内无法使用该 provider，其余全部可用。
+> **对外暴露前**：必须改默认面板密码 + 设置 `WH_API_KEYS`，并确认 `WH_HOST`/防火墙规则（见[安全说明](#安全说明)）。
+
+## 升级与排障
+
+```bash
+# 升级（源码部署）：拉代码装依赖后重启服务（systemctl / 计划任务 / 重开 start.bat）
+git pull && npm install && npm test
+# 升级（Docker）：重新 docker run 新镜像即可，挂卷里的数据不丢
+```
+
+| 现象 | 处理 |
+|---|---|
+| 启动即段错误 / native module 报错 | Node < 22.19，见[快速开始](#快速开始)升级 |
+| `EADDRINUSE` | 端口占用，设 `WH_PORT` 换端口 |
+| 上游 401/403，账号变 `invalid` | 凭证过期或风控：重新「扫描本机登录」导入；trae/workbuddy 可补 `refreshToken` 自动续期；qwen 用邮箱+密码模式 |
+| 扫描导入 0 条 | 本机没装客户端或没登录；加密凭证（`$wbEncrypted`）扫不出，手动粘贴 token |
+| qwenwork 聊天报错 | 需本机装千问办公客户端（wasm 签名）；积分/账号检查不受影响 |
+| 上游 5xx / 连不上 | 逆向平台随时可能改版（[已知限制](#已知限制如实说明)），检查有无新版本，或暂用官方 API 平台 |
+
+更详细的 agent 排障路径见 [AGENTS.md](AGENTS.md) §9；账号/用量详情在面板「用量」页。
+
 ## 自动化（GitHub Actions）
 
 | 工作流 | 触发 | 做什么 |
 |---|---|---|
 | `ci.yml` | push `main`/`dev`、任何 PR | Linux + Windows × Node 22/24 四路跑全部端到端用例 |
 | `release.yml` | push tag `v*` | 测试通过后自动创建 GitHub Release，附源码 zip，发布说明取自 CHANGELOG 对应小节 |
-| `docker.yml` | push `main`、push tag `v*` | 自动构建镜像推 GHCR：`main` → `:main`，tag → `:x.y.z` / `:x.y` / `:latest` |
+| `docker.yml` | push `main`、push tag `v*` | 自动构建镜像推 GHCR（见上节） |
 
 ```bash
 # 发版：打 tag 即自动出 Release + Docker 镜像
 git tag v0.11.0 && git push origin v0.11.0
-
-# 部署（数据与日志挂卷持久化）
-docker run -d -p 8317:8317 -v wharf-data:/app/data -v wharf-logs:/app/logs \
-  ghcr.io/zouzhenglu/modelwharf:latest
 ```
-
-> 首次推送镜像后，GHCR 上的包默认是 private，需在包设置里改为 public 才能匿名拉取。
-> 千问办公（qwenwork）依赖本机客户端的 wasm 签名，容器内无法使用该 provider，其余全部可用。
 
 ## 安全说明
 
 - 所有凭证只存本机 SQLite（`data/`，已 gitignore），不外发
-- 面板密码默认 `admin`，仅限本机使用；对外暴露请务必设置 `DSH_ADMIN_PASSWORD` 与 `DSH_API_KEYS`（默认网关不设 key 时对局域网开放）
+- 面板密码默认 `admin`，仅限本机使用；对外暴露请务必设置 `WH_ADMIN_PASSWORD` 与 `WH_API_KEYS`（默认网关不设 key 时对局域网开放）
 - MCP 网关端点（`/mcp`）鉴权与 `/v1` 相同：配置了 API key 后必须携带 key，未配置任何 key 时为开放模式
 - 如发现安全问题请勿公开提 issue，请联系仓库所有者
