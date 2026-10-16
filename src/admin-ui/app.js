@@ -790,7 +790,13 @@ function mFormAccount(acct, providers, p) {
   const supportsOAuth = !acct && ['workbuddy', 'qwenwork'].includes(p?.id); // platforms with device-flow login
   openModal(acct ? '编辑账号' : '添加账号', `
     <div class="field"><label>平台</label>
-      <select id="afProvider" ${acct ? 'disabled' : ''}>${providers.map(x => `<option value="${x.id}" ${p?.id === x.id ? 'selected' : ''}>${esc(x.label)} (${x.id})</option>`).join('')}</select></div>
+      <select id="afProvider" ${acct ? 'disabled' : ''}>${providerOptgroups(providers, p?.id, true)}</select></div>
+    ${!acct && p?.id === 'chatgpt' ? `
+    <div class="card" style="background:var(--bg-soft);padding:14px 18px;margin-bottom:14px">
+      <b style="font-size:13px">① 获取 Access Token（只需一次）</b>
+      <p class="muted" style="font-size:12px;margin:4px 0 10px">点下面按钮打开 chatgpt.com（<b>需浏览器已登录</b>），页面会直接显示一段 JSON——复制其中 <code>accessToken</code> 的值，粘贴到下方第一个字段。</p>
+      <button onclick="window.open('https://chatgpt.com/api/auth/session','_blank')">🌐 打开 token 获取页</button>
+    </div>` : ''}
     ${supportsOAuth ? `
     <div class="card" style="background:var(--bg-soft);padding:14px 18px;margin-bottom:14px">
       <b style="font-size:13px">推荐：网页授权登录</b>

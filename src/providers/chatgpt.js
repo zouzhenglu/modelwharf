@@ -122,7 +122,7 @@ module.exports = {
     { name: 'sessionCookie', label: 'Session Cookie（可选，自动续期用）', secret: true, placeholder: '__Secure-next-auth.session-token 的值' },
     { name: 'baseUrl', label: 'Base URL（可选，默认 https://chatgpt.com）', placeholder: 'https://chatgpt.com' },
   ],
-  docs: '浏览器登录 chatgpt.com 后，F12 控制台执行 (await (await fetch("/api/auth/session")).json()).accessToken 复制 accessToken；要自动续期再到 应用→Cookie→https://chatgpt.com 复制 __Secure-next-auth.session-token 的值填入 Session Cookie。',
+  docs: 'Access Token：点上方「打开 token 获取页」复制 JSON 里 accessToken 的值（浏览器需已登录 chatgpt.com）。Session Cookie（可选）：填了可自动续期，DevTools → 应用 → Cookie → 复制 __Secure-next-auth.session-token 的值。',
 
   async listModels(account) {
     await ensureToken(account);
