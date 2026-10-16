@@ -29,7 +29,10 @@ app.get('/health', (req, res) => res.json({ ok: true, version: config.version, p
 app.get('/docs/api.md', (req, res) => {
   const { db } = require('./store');
   const modelsCore = require('./core/models');
-  const base = `http://localhost:${config.port}`;
+  // 按访问地址生成示例 URL：远程/反代部署时文档里的地址才正确
+  const host = req.get('host') || `localhost:${config.port}`;
+  const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim() || 'http';
+  const base = `${proto}://${host}`;
   const models = modelsCore.listPublicModels();
   const open = config.apiKeys.length === 0 && db.prepare('SELECT COUNT(*) c FROM apikeys').get().c === 0;
   const sample = models[0]?.public_name || 'glm-5.3';
