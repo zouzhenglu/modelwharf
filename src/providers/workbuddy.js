@@ -236,9 +236,12 @@ module.exports = {
       const rid = crypto.randomUUID();
       const r = await httpRequest(`${base(account)}/v2/chat/completions`, {
         method: 'POST',
+        // 会话头五件套必须带全（与 chat() 一致）：缺 X-Conversation-Message-ID / X-Request-ID
+        // 会触发图灵盾通道校验 400 + code 11128 "request illegal"（2026-10-25 实测）
         headers: headers(account, {
           Accept: 'text/event-stream',
           'X-Conversation-ID': rid, 'X-Conversation-Request-ID': rid, 'X-Root-Request-ID': rid,
+          'X-Conversation-Message-ID': crypto.randomUUID(), 'X-Request-ID': rid,
         }),
         // intl 上游要求首条消息必须是 system（否则 400 + code 11128 "first message is not system prompt"，2026-10-25 实测）
         body: { model: 'default-model', messages: [{ role: 'system', content: 'You are a helpful assistant.' }, { role: 'user', content: 'ping' }], stream: true, max_tokens: 1 },
