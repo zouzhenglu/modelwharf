@@ -238,6 +238,9 @@ async function main() {
     const after = await call('GET', '/v1/models');
     assert.ok(!after.json.data.find(m => m.id === 'mock-model-b'));
     assert.ok(after.json.data.find(m => m.id === 'mock-a'));
+    // 免费模型优先排序：mock-a（is_free=1）应排在计费模型 mock-echo 之前
+    const ids = after.json.data.map(m => m.id);
+    assert.ok(ids.indexOf('mock-a') < ids.indexOf('mock-echo'), `free-first ordering broken: ${ids.join(',')}`);
   });
 
   console.log('== gateway (openai) ==');

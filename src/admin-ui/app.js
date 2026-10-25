@@ -872,7 +872,7 @@ function modelTagBadges(tags) {
   if (!list.length) return '<span class="muted">-</span>';
   return list.map(t => {
     const cls = /thinking/i.test(t) ? 'think' : /vision/i.test(t) ? 'vision' : /tools/i.test(t) ? 'tools'
-      : /^\d+k$/i.test(t) ? 'ctx' : 'other';
+      : /^\d+k$/i.test(t) ? 'ctx' : /^free$/i.test(t) ? 'free' : 'other';
     return `<span class="mtag ${cls}">${esc(t)}</span>`;
   }).join('');
 }
