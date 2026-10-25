@@ -16,6 +16,7 @@
  */
 const { httpJson, httpRequest, config, logger } = require('../utils/http');
 const { sseParse } = require('../utils/sse');
+const { DSMLStreamFilter, newToolCallId, dsmlToolDoc, mapToolMessage } = require('../utils/dsml');
 const crypto = require('crypto');
 const path = require('path');
 
@@ -289,26 +290,31 @@ module.exports = {
     };
   },
 
-  async *chat({ account, upstreamModel, messages, params, signal }) {
+  async *chat({ account, upstreamModel, messages, tools, params, signal }) {
     const token = await ensureToken(account);
-    // canonical -> trae payload: content as [{type:text}]
-    const conv = messages.map(m => {
-      let content;
-      if (Array.isArray(m.parts)) {
-        // canonical parts -> trae [{type:'text'|'image_url',...}]
-        content = m.parts.map(p => p.type === 'text'
-          ? { type: 'text', text: p.text }
-          : { type: 'image_url', image_url: { url: p.url } });
-      } else {
-        content = [{ type: 'text', text: m.text || '' }];
-      }
-      const out = { role: m.role, content };
-      if (m.tool_calls) {
-        // trae expects function_call naming
-        out.function_call = m.tool_calls.map(tc => ({ name: tc.function?.name, arguments: tc.function?.arguments }));
-      }
-      return out;
-    });
+    // 上游没有原生 tools 通道，且对 OpenAI 形态的 tool_calls/tool 消息一律拒绝
+    // （legacy function_call -> 4027，现代 tool_calls -> 2001 proto 错误）：
+    // 统一走文本工具协议——工具清单注入提示词、历史工具消息转 DSML 文本/观察文本、
+    // 响应侧把正文 DSML 块解析回结构化 tool_calls
+    const useTools = Array.isArray(tools) && tools.length > 0 && params.tool_choice !== 'none';
+    const hasToolHistory = messages.some(m => m.tool_calls?.length || m.role === 'tool');
+    const conv = [
+      ...(useTools ? [{ role: 'system', content: [{ type: 'text', text: dsmlToolDoc(tools) }] }] : []),
+      ...messages.map(m => {
+        const mapped = (useTools || hasToolHistory) ? mapToolMessage(m) : null;
+        if (mapped) return { role: mapped.role, content: [{ type: 'text', text: mapped.content }] };
+        let content;
+        if (Array.isArray(m.parts)) {
+          // canonical parts -> trae [{type:'text'|'image_url',...}]
+          content = m.parts.map(p => p.type === 'text'
+            ? { type: 'text', text: p.text }
+            : { type: 'image_url', image_url: { url: p.url } });
+        } else {
+          content = [{ type: 'text', text: m.text || '' }];
+        }
+        return { role: m.role, content };
+      }),
+    ];
     const body = {
       messages: conv,
       function: 'solo_work_lite',
@@ -331,6 +337,16 @@ module.exports = {
     // followed by a data line; output payload = {response, reasoning_content, tool_calls, phase}
     let inputTokens = 0, outputTokens = 0;
     let pendingEvent = '';
+    // 响应侧：正文里的 DSML 块一律解析回结构化 tool_calls（请求不带 tools 时模型也会按
+    // 训练格式自发输出，裸透传就是标签汤）；tools 供缺失 invoke 名字时按参数 schema 推断
+    const dsml = new DSMLStreamFilter(tools);
+    let callIndex = 0, finishSent = false;
+    const emitCall = function* ({ name, arguments: args }) {
+      const id = newToolCallId();
+      yield JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: callIndex, id, type: 'function', function: { name, arguments: '' } }] } }] });
+      yield JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: callIndex, function: { name: '', arguments: args } }] } }] });
+      callIndex++;
+    };
     for await (const { event, data } of sseParse(resp.body)) {
       if (event) { pendingEvent = event; continue; }
       if (data === '[DONE]') break;
@@ -346,7 +362,14 @@ module.exports = {
         continue;
       }
       if (type === 'output') {
-        if (ev.response != null) yield JSON.stringify({ choices: [{ delta: { content: ev.response } }] });
+        if (ev.response != null) {
+          if (!dsml) yield JSON.stringify({ choices: [{ delta: { content: ev.response } }] });
+          else {
+            const { content, calls } = dsml.push(ev.response);
+            if (content) yield JSON.stringify({ choices: [{ delta: { content } }] });
+            for (const call of calls) yield* emitCall(call);
+          }
+        }
         if (ev.reasoning_content) yield JSON.stringify({ choices: [{ delta: { reasoning_content: ev.reasoning_content } }] });
         if (ev.tool_calls) yield JSON.stringify({ choices: [{ delta: { tool_calls: ev.tool_calls } }] });
       }
@@ -354,9 +377,16 @@ module.exports = {
         yield JSON.stringify({ choices: [{ delta: { reasoning_content: ev.reasoning_content } }] });
       }
       if (type === 'done' || type === 'responsedone' || type === 'streamdone') {
-        yield JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens } });
+        finishSent = true;
+        yield JSON.stringify({ choices: [{ delta: {}, finish_reason: dsml?.sawCalls ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens } });
         break;
       }
+    }
+    if (dsml) {
+      const tail = dsml.flush();
+      if (tail.content) yield JSON.stringify({ choices: [{ delta: { content: tail.content } }] });
+      for (const call of tail.calls) yield* emitCall(call);
+      if (dsml.sawCalls && !finishSent) yield JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] });
     }
     yield JSON.stringify({ usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens } });
   },

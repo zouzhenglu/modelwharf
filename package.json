@@ -12,7 +12,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node test/e2e.js"
+    "test": "node test/dsml.test.js && node test/e2e.js"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",

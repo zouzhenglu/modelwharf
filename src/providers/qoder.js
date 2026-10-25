@@ -23,6 +23,7 @@ const { httpJson, httpRequest, config, logger } = require('../utils/http');
 const { sseParse } = require('../utils/sse');
 const crypto = require('crypto');
 const { REGIONS, normalizeRegion } = require('./_qoder_names');
+const { dsmlToolDoc, mapToolMessage, DSMLStreamFilter, newToolCallId } = require('../utils/dsml');
 
 // Qoder 桌面端在本机的存放目录（%APPDATA%），国内版与国际版各自独立安装、独立登录
 const DESKTOP_DIRS = [
@@ -678,13 +679,20 @@ module.exports = {
     // hub-style body: OpenAI-shaped messages at the top level (verified against the live gateway)
     const userMsg = [...messages].reverse().find(m => m.role === 'user');
     const lastUserParts = userMsg?.parts;
-    const wireMessages = messages.map(m => {
+    // 上游没有原生 tools 字段：带 tools 的请求走文本工具协议——提示词注入工具清单，
+    // 历史里的 tool_calls/tool 消息转成文本（DSML 协议），响应侧再把 DSML 解析回 tool_calls
+    const useTools = Array.isArray(tools) && tools.length > 0 && params.tool_choice !== 'none';
+    const toWire = (m) => {
       const out = { role: m.role, content: m.text ?? '' };
       if (m.parts?.some(p => p.type === 'image_url')) {
         out.content = m.parts.map(p => p.type === 'text' ? { type: 'text', text: p.text } : { type: 'image_url', image_url: { url: p.url } });
       }
       return out;
-    });
+    };
+    const wireMessages = [
+      ...(useTools ? [{ role: 'system', content: dsmlToolDoc(tools) }] : []),
+      ...messages.map(m => mapToolMessage(m) || toWire(m)),
+    ];
     const bodyObj = {
       model: upstreamModel,
       messages: wireMessages,
@@ -709,7 +717,10 @@ module.exports = {
         },
         extra: { modelConfig: { key: upstreamModel, source: 'system', ...(params.reasoning_effort && params.reasoning_effort !== 'none' ? { is_reasoning: true, reasoningEffort: params.reasoning_effort === 'xhigh' ? 'xhigh' : params.reasoning_effort === 'high' ? 'high' : 'medium' } : {}) }, originalContent: { text: userMsg?.text || '' } },
         // send short history (upstream expects its own context format; flat messages usually tolerated via text)
-        history: messages.slice(0, -1).map(m => ({ role: m.role, text: m.text || '' })),
+        history: messages.slice(0, -1).map(m => {
+          const w = mapToolMessage(m) || toWire(m);
+          return { role: w.role, text: Array.isArray(w.content) ? (m.text || '') : String(w.content ?? '') };
+        }),
       },
       ...(params.max_tokens ? { max_tokens: params.max_tokens } : {}),
     };
@@ -725,6 +736,16 @@ module.exports = {
       const text = await resp.body.text().catch(() => '');
       throw Object.assign(new Error(`qoder ${resp.statusCode}: ${text.slice(0, 300)}`), { status: resp.statusCode === 401 || resp.statusCode === 403 ? 401 : resp.statusCode });
     }
+    // 正文里的 DSML 块一律在流式增量里解析成 OpenAI tool_calls（请求不带 tools 时模型也会按
+    // 训练格式自发输出，裸透传就是标签汤）；tools 供缺失 invoke 名字时按参数 schema 推断
+    const conv = new DSMLStreamFilter(tools);
+    let callIndex = 0, finishSent = false;
+    const emitCall = function* ({ name, arguments: args }) {
+      const id = newToolCallId();
+      yield JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: callIndex, id, type: 'function', function: { name, arguments: '' } }] } }] });
+      yield JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: callIndex, function: { name: '', arguments: args } }] } }] });
+      callIndex++;
+    };
     for await (const { data } of sseParse(resp.body)) {
       if (data === '[DONE]') break;
       let env; try { env = JSON.parse(data); } catch { continue; }
@@ -750,7 +771,28 @@ module.exports = {
       }
       if (inner.usage) onUsage?.({ input_tokens: inner.usage.prompt_tokens, output_tokens: inner.usage.completion_tokens, credits: inner.credits ?? inner.original_credits });
       // inner is OpenAI-shaped choices[].delta
-      yield JSON.stringify(inner);
+      if (!conv) { yield JSON.stringify(inner); continue; }
+      for (const [ci, ch] of (inner.choices || []).entries()) {
+        const idx = ch.index ?? ci;
+        const d = ch.delta || {};
+        if (d.tool_calls?.length) yield JSON.stringify({ choices: [{ index: idx, delta: { tool_calls: d.tool_calls } }] });
+        if (d.reasoning_content) yield JSON.stringify({ choices: [{ index: idx, delta: { reasoning_content: d.reasoning_content } }] });
+        if (d.content) {
+          const { content, calls } = conv.push(d.content);
+          if (content) yield JSON.stringify({ choices: [{ index: idx, delta: { content } }] });
+          for (const call of calls) yield* emitCall(call);
+        }
+        if (ch.finish_reason) {
+          finishSent = true;
+          yield JSON.stringify({ choices: [{ index: idx, delta: {}, finish_reason: conv.sawCalls ? 'tool_calls' : ch.finish_reason }] });
+        }
+      }
+    }
+    if (conv) {
+      const tail = conv.flush();
+      if (tail.content) yield JSON.stringify({ choices: [{ delta: { content: tail.content } }] });
+      for (const call of tail.calls) yield* emitCall(call);
+      if (conv.sawCalls && !finishSent) yield JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] });
     }
   },
 
