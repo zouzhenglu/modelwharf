@@ -128,8 +128,8 @@ async function renderPlatforms(m) {
 
 // ---------- dashboard ----------
 const VENDOR_GROUPS = [
-  // qodercn 紧跟 qoder：同一个客户端的两个版本，放一起才好对照
-  { name: '逆向平台（账号池）', ids: ['trae', 'workbuddy', 'qoder', 'qodercn', 'qwen', 'qwenwork'] },
+  // qodercn 紧跟 qoder、workbuddyintl 紧跟 workbuddy：同一个客户端的国内/国际版，放一起才好对照
+  { name: '逆向平台（账号池）', ids: ['trae', 'workbuddy', 'workbuddyintl', 'qoder', 'qodercn', 'qwen', 'qwenwork'] },
   { name: '国际官方 API', ids: ['openai', 'anthropic', 'gemini', 'xai', 'openrouter', 'mistral', 'groq', 'together', 'perplexity', 'cerebras', 'github-copilot'] },
   { name: '国内官方 API', ids: ['dashscope', 'zhipu', 'moonshot', 'minimax', 'doubao', 'hunyuan', 'baichuan', 'stepfun', 'siliconflow', 'internvl', 'modelscope'] },
   { name: '本地 / 自定义', ids: ['ollama', 'openai-compat'] },
@@ -1257,20 +1257,30 @@ async function delKey(id) { if (!confirm('删除该 key？使用它的客户端�
 async function openKeyForm(id) {
   const keys = await api('/apikeys');
   const k = id ? keys.find(x => x.id === id) : null;
-  const [models, virtuals] = await Promise.all([api('/models?size=1000'), api('/virtual-models')]);
-  const allNames = [
-    ...virtuals.map(v => ({ name: v.public_name, tag: '统一' })),
-    ...models.filter(md => md.enabled).map(md => ({ name: md.public_name, tag: md.provider_id })),
-  ];
+  const [models, virtuals, providers] = await Promise.all([api('/models'), api('/virtual-models'), api('/providers')]);
+  // 候选只含「启用」的模型：禁用的统一模型/原始模型一律不出现（route() 本身也只路由 enabled）
+  const unified = virtuals.filter(v => v.enabled).map(v => ({ name: v.public_name, tag: '统一' }));
+  const regular = models.filter(md => md.enabled).map(md => ({ name: md.public_name, tag: md.provider_id }));
   const selected = new Set((k?.allowed_models || '*') === '*' ? [] : (k?.allowed_models || '').split(',').map(s => s.trim()).filter(Boolean));
   const isAll = (k?.allowed_models || '*') === '*';
-  window._keyModels = { allNames, selected };
+  window._keyModels = { unified, regular, selected, ui: { type: '', platform: '', q: '' } };
   openModal(k ? '编辑 Key' : '生成 Key', `
     <div class="field"><label>名称</label><input id="kfName" value="${esc(k?.name || '')}" placeholder="如 my-trae-client"></div>
     <div class="field"><label>允许的模型</label>
       <label class="row" style="gap:6px;font-size:13px;margin-bottom:8px"><input type="checkbox" id="kfAll" style="width:auto" ${isAll ? 'checked' : ''} onchange="kfToggleAll(this)"> 全部模型（不限制）</label>
       <div id="kfPicker" style="${isAll ? 'display:none' : ''}">
-        <input id="kfSearch" placeholder="输入筛选（如 glm、kimi、qoder…）" oninput="kfRenderList()" style="margin-bottom:8px">
+        <div class="row" style="gap:8px;margin-bottom:8px">
+          <select id="kfType" style="width:120px" onchange="kfSetUi('type', this.value)">
+            <option value="">全部类型</option><option value="unified">统一模型</option><option value="regular">原始模型</option>
+          </select>
+          <select id="kfPlatform" style="width:170px" onchange="kfSetUi('platform', this.value)"><option value="">全部平台</option>${providerOptgroups(providers, '', true)}</select>
+          <input id="kfSearch" style="flex:1" placeholder="搜索模型名…" oninput="kfSetUi('q', this.value)">
+        </div>
+        <div class="row" style="gap:8px;margin-bottom:8px">
+          <button class="small ghost" onclick="kfSelectFiltered(true)">全选筛选结果</button>
+          <button class="small ghost" onclick="kfSelectFiltered(false)">清空已选</button>
+          <span class="muted" style="font-size:12px" id="kfShown"></span>
+        </div>
         <div id="kfList" style="max-height:220px;overflow:auto;border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px;background:var(--bg-soft)"></div>
         <p class="muted" style="margin-top:6px" id="kfCount"></p>
       </div></div>
@@ -1287,10 +1297,24 @@ async function openKeyForm(id) {
   }
 }
 function kfToggleAll(cb) { $('#kfPicker').style.display = cb.checked ? 'none' : ''; }
+function kfSetUi(key, value) {
+  const ui = window._keyModels.ui;
+  ui[key] = value;
+  if (key === 'type') $('#kfPlatform').style.display = value === 'unified' ? 'none' : '';
+  kfRenderList();
+}
+function kfFiltered() {
+  const { unified, regular, ui } = window._keyModels;
+  const q = (ui.q || '').toLowerCase();
+  let list = ui.type === 'unified' ? unified : ui.type === 'regular' ? regular : [...unified, ...regular];
+  if (ui.type !== 'unified' && ui.platform) list = list.filter(m => m.tag === ui.platform);
+  if (q) list = list.filter(m => m.name.toLowerCase().includes(q) || m.tag.toLowerCase().includes(q));
+  return list;
+}
 function kfRenderList() {
-  const q = ($('#kfSearch')?.value || '').toLowerCase();
-  const { allNames, selected } = window._keyModels;
-  const filtered = allNames.filter(m => !q || m.name.toLowerCase().includes(q) || m.tag.toLowerCase().includes(q));
+  const { selected } = window._keyModels;
+  const filtered = kfFiltered();
+  $('#kfShown').textContent = `候选 ${filtered.length} 个（仅启用中的模型）`;
   $('#kfList').innerHTML = filtered.map(m => `
     <label class="row" style="gap:6px;font-size:13px;padding:3px 6px;cursor:pointer;border-radius:4px">
       <input type="checkbox" style="width:auto" ${selected.has(m.name) ? 'checked' : ''} onchange="kfPick('${esc(m.name)}', this.checked)">
@@ -1302,6 +1326,12 @@ function kfPick(name, on) {
   const { selected } = window._keyModels;
   if (on) selected.add(name); else selected.delete(name);
   $('#kfCount').textContent = `已选 ${selected.size} 个模型`;
+}
+function kfSelectFiltered(on) {
+  const { selected } = window._keyModels;
+  if (on) kfFiltered().forEach(m => selected.add(m.name));
+  else selected.clear();
+  kfRenderList();
 }
 async function saveKey(id) {
   const all = $('#kfAll').checked;
