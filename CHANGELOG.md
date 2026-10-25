@@ -9,11 +9,12 @@
 - 面板「网页授权登录」按钮改由服务端声明（`/admin/api/providers` 新增 `supports_oauth`），新通道自动获得按钮，不再硬编码平台名单
 - 本地扫描遇到 `$wbEncrypted` 加密信封时**始终**给出提示（此前同目录还有旧明文文件时静默，用户会误把过期历史文件当当前登录态）；并识别对象形态的加密信封（新版客户端格式）
 - **免费模型优先展示**：`/v1/models`（含 Anthropic 协议与 `/docs/api.md`）与管理面板模型列表中，免费模型（`is_free=1`，如 workbuddy hy3 系列、千问全系列）始终排在计费模型前面，工具的模型选择器里一眼可见；模型管理「能力标签」列的 `free` 标签着绿色（与「免费」徽章同色系）
+- **模型列表带费率标签**：`/v1/models`（OpenAI 与 Anthropic 协议）返回的模型 id 直接带费率后缀——免费模型 `·免费`、倍率≠1 的计费模型 `·x<倍率>`（如同一 DeepSeek V4.1 Flash 的 `deepseek-v4.1-flash-intl ·免费` 与 `deepseek-v4.1-flash-sg ·x0.03` 在工具的模型选择器里一眼可分）；同时附带 `x_free` / `x_multiplier` 字段供程序消费。标签只是展示别名：客户端原样回传时，网关在路由与 key 白名单校验前剥掉（`engine.runChat` / `runEmbeddings` / 三个协议的 allowed 检查），带不带标签、已配置的旧模型名均不受影响
 - **`AGENTS.md`**：给 AI 助手的安装与接入手册（安装 → 常驻 → 导账号决策树 → 建 key → 配工具 → 端到端验证），复制一句提示词即可让 agent 全程代办；README「快速开始」提供该提示词
 - README 顶部痛点→解法引导文案与标语；「使用方式一览」升级为按读者分类的「文档地图」（新人 / agent / 技术人员 / 已部署）；「部署到服务器 / Docker」从自动化一节独立成节并加对外暴露安全前提；新增「升级与排障」一节
 
 ### Fixed
-- **逆向平台的工具调用回环（DSML 文本协议）**：qoder/qodercn/trae 上游没有原生 tools 通道，DeepSeek V4 系模型在「工具只出现在提示词文本」时会把工具调用写成正文里的 DSML 标记（`<｜｜DSML｜｜ calls>…`），此前直接透传就是客户端无法执行的乱码文本（`deepseek-v4.1-flash` 在 workbuddy 被风控落到 qodercn 兜底时必现）。现统一走文本工具协议：请求侧注入工具清单、历史 tool_calls/tool 消息转文本，响应侧流式把 DSML 块解析回 OpenAI `tool_calls`（`finish_reason: tool_calls`，流式/非流式/多轮循环均已验证）；trae 顺带修复带工具历史必报上游校验错误（4027/2001）的问题。协议解析器独立成 `src/utils/dsml.js`（带单元测试）
+- **逆向平台的工具调用回环（DSML 文本协议）**：qoder/qodercn/trae 上游没有原生 tools 通道，DeepSeek V4 系模型在「工具只出现在提示词文本」时会把工具调用写成正文里的 DSML 标记（`<｜｜DSML｜｜ calls>…`），此前直接透传就是客户端无法执行的乱码文本（`deepseek-v4.1-flash` 在 workbuddy 被风控落到 qodercn 兜底时必现）。现统一走文本工具协议：请求侧注入工具清单、历史 tool_calls/tool 消息转文本，响应侧流式把 DSML 块解析回 OpenAI `tool_calls`（`finish_reason: tool_calls`，流式/非流式/多轮循环均已验证）；trae 顺带修复带工具历史必报上游校验错误（4027/2001）的问题。协议解析器独立成 `src/utils/dsml.js`（带单元测试）。同日 DeepSeek harness 端到端再抓到四类退化输出（`<invoke>` 开标签整缺失、闭标签裸化成 `</｜｜DSML｜｜>`、冗余闭标记连发、全块挤一行），块内解析改为宽容 token 流就近归属，缺失的 invoke 名字按请求 tools 的参数 schema 唯一最优推断（推断不出则丢弃调用但标签照样剥掉），并兼容关键字前无空格的 `<｜｜DSML｜｜calls>` 形态；流式过滤改为无条件启用（首轮流式不带 tools 也会自发输出 DSML）
 - **面板平台筛选缺失新平台**：平台分组下拉（模型管理/账号页）用硬编码名单且丢弃未分组平台，`workbuddyintl` 因此从不出现——已补进「逆向平台（账号池）」分组（紧跟 workbuddy）
 - **Key 表单模型选择器重做**：候选增加「类型」（统一模型/原始模型）与「平台」双下拉（平台沿用分组名单，含国际版）+ 保留搜索；统一模型此前不过滤启用状态，禁用的统一模型会混进候选——现在统一/原始模型都只列启用中的；新增「全选筛选结果 / 清空已选」批量操作（如筛选「统一模型」后一键全选）
 - `/docs/api.md` 生成的示例 URL 此前写死 `http://localhost`，远程/Docker 部署时文档地址全错——现按请求的 Host（及 `X-Forwarded-Proto`）动态生成，用什么地址打开示例就用什么地址

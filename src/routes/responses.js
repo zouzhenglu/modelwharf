@@ -38,7 +38,8 @@ router.use(auth);
 function checkModelAllowed(req, res, next) {
   const allowed = req.apikey?.allowed_models || '*';
   const model = req.body?.model;
-  if (allowed !== '*' && model && !allowed.split(',').map(s => s.trim()).filter(Boolean).includes(model)) {
+  // key 白名单存的是干净的 public_name —— 客户端回传带费率标签的 id（`·免费`/`·x0.03`）时按剥后名比较
+  if (allowed !== '*' && model && !allowed.split(',').map(s => s.trim()).filter(Boolean).includes(modelsCore.stripRateTag(model))) {
     return res.status(403).json({ error: { message: `model '${model}' not allowed for this key`, code: 'model_not_allowed' } });
   }
   next();

@@ -17,6 +17,9 @@ const TMPDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'wharf-e2e-'));
 let TOKEN = '';
 let serverProc = null;
 
+// /v1/models 的 id 带费率标签（`·免费` / `·x0.03`）——比较时剥掉
+const stripRateTag = (id) => String(id || '').replace(/\s*·(?:免费|x[0-9]+(?:\.[0-9]+)?)$/u, '');
+
 // e2e-only provider: minimal plugin with a checkin() implementation wired to the
 // mock server below. Written into src/providers/ before the server boots (the
 // registry auto-loads every non-underscore .js there), removed after the run.
@@ -236,10 +239,10 @@ async function main() {
     const b = models.json.find(m => m.upstream_model === 'mock-model-b');
     await call('POST', `/admin/api/models/${b.id}/toggle`, {}, auth);
     const after = await call('GET', '/v1/models');
-    assert.ok(!after.json.data.find(m => m.id === 'mock-model-b'));
-    assert.ok(after.json.data.find(m => m.id === 'mock-a'));
+    assert.ok(!after.json.data.find(m => stripRateTag(m.id) === 'mock-model-b'));
+    assert.ok(after.json.data.find(m => stripRateTag(m.id) === 'mock-a'));
     // 免费模型优先排序：mock-a（is_free=1）应排在计费模型 mock-echo 之前
-    const ids = after.json.data.map(m => m.id);
+    const ids = after.json.data.map(m => stripRateTag(m.id));
     assert.ok(ids.indexOf('mock-a') < ids.indexOf('mock-echo'), `free-first ordering broken: ${ids.join(',')}`);
   });
 
@@ -264,6 +267,16 @@ async function main() {
   await t('unknown model -> 404', async () => {
     const r = await call('POST', '/v1/chat/completions', { model: 'nope', messages: [{ role: 'user', content: 'x' }] });
     assert.equal(r.status, 404);
+  });
+  await t('rate-tagged model id routes to base model', async () => {
+    // 客户端原样回传 /v1/models 里带费率标签的 id（`mock-a ·免费`）应照常路由
+    const list = await call('GET', '/v1/models');
+    const tagged = list.json.data.find(m => /·免费$/.test(m.id));
+    assert.ok(tagged, 'no rate-tagged id in /v1/models');
+    assert.equal(tagged.x_free, true);
+    const r = await call('POST', '/v1/chat/completions', { model: tagged.id, messages: [{ role: 'user', content: 'hi' }] });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.choices[0].message.content, '你好，世界！');
   });
   await t('sampling params passthrough (stop/seed/penalties/logprobs)', async () => {
     const r = await call('POST', '/v1/chat/completions', {

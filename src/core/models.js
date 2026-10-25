@@ -131,6 +131,31 @@ function deleteVirtualModel(publicName) {
   db.prepare('DELETE FROM virtual_models WHERE public_name=?').run(publicName);
 }
 
+// ---------- 费率标签（模型选择时可区分同款模型的免费/计费版本） ----------
+// /v1/models 的 id 直接带标签：`deepseek-v4.1-flash-intl ·免费` vs `deepseek-v4.1-flash-sg ·x0.03`。
+// 客户端原样回传，engine 在路由前剥掉标签（stripRateTag），allowed_models 校验同样按剥后名比较。
+const RATE_TAG_RE = /\s*·(?:免费|x[0-9]+(?:\.[0-9]+)?)$/u;
+
+/** 费率标签：免费模型 `·免费`；倍率≠1 的计费模型 `·x<倍率>`；其余（倍率未知/标准）无标签 */
+function rateTag(m) {
+  if (!m) return '';
+  if (m.is_free || m.free) return '·免费';
+  const r = Number(m.multiplier);
+  if (Number.isFinite(r) && r > 0 && r !== 1) return `·x${r}`;
+  return '';
+}
+
+/** 模型对外名 + 费率标签 */
+function decoratePublicModel(name, m) {
+  const t = rateTag(m);
+  return t ? `${name} ${t}` : String(name || '');
+}
+
+/** 剥掉尾部费率标签（无标签原样返回） */
+function stripRateTag(name) {
+  return String(name || '').replace(RATE_TAG_RE, '');
+}
+
 /** public model list for clients: regular enabled models + virtual models (免费模型排最前) */
 function listPublicModels() {
   const regular = db.prepare(`
@@ -148,4 +173,4 @@ function listEnabledModelNames() {
   return db.prepare('SELECT provider_id, public_name FROM models WHERE enabled=1 ORDER BY provider_id, public_name').all();
 }
 
-module.exports = { syncProviderModels, listModels, listPublicModels, route, findModelByUpstream, recordUsage, getProviderConfig, setProviderConfig, listVirtualModels, getVirtualModel, upsertVirtualModel, deleteVirtualModel, listEnabledModelNames, resetProviderModelsToOnline };
+module.exports = { syncProviderModels, listModels, listPublicModels, route, findModelByUpstream, recordUsage, getProviderConfig, setProviderConfig, listVirtualModels, getVirtualModel, upsertVirtualModel, deleteVirtualModel, listEnabledModelNames, resetProviderModelsToOnline, rateTag, decoratePublicModel, stripRateTag };

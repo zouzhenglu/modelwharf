@@ -40,7 +40,8 @@ function authApiKey(req, res, next) {
 function checkModelAllowed(req, res, next) {
   const allowed = req.apikey?.allowed_models || '*';
   const model = req.body?.model;
-  if (allowed !== '*' && model && !allowed.split(',').map(s => s.trim()).filter(Boolean).includes(model)) {
+  // key 白名单存的是干净的 public_name —— 客户端回传带费率标签的 id（`·免费`/`·x0.03`）时按剥后名比较
+  if (allowed !== '*' && model && !allowed.split(',').map(s => s.trim()).filter(Boolean).includes(modelsCore.stripRateTag(model))) {
     return res.status(403).json({ error: { message: `model '${model}' not allowed for this key`, type: 'invalid_request_error' } });
   }
   next();
@@ -49,18 +50,21 @@ function checkModelAllowed(req, res, next) {
 router.use(authApiKey);
 
 // ---------- /v1/models ----------
+// id 带费率标签（`·免费` / `·x0.03`），同一模型在模型选择器里能区分免费/计费版本；
+// 标签是展示用的别名，网关在路由与 key 白名单校验时都会剥掉（engine / checkModelAllowed）。
 router.get('/models', (req, res) => {
   const list = modelsCore.listPublicModels();
   const allowed = req.apikey?.allowed_models || '*';
   const data = list
     .filter(m => allowed === '*' || allowed.split(',').map(s => s.trim()).includes(m.public_name))
-    .map(m => ({ id: m.public_name, object: 'model', created: Math.floor(Date.now() / 1000), owned_by: m.provider_id }));
+    .map(m => ({ id: modelsCore.decoratePublicModel(m.public_name, m), object: 'model', created: Math.floor(Date.now() / 1000), owned_by: m.provider_id, x_free: !!m.is_free, x_multiplier: m.multiplier ?? null }));
   res.json({ object: 'list', data });
 });
 router.get('/models/:id', (req, res) => {
-  const m = modelsCore.listPublicModels().find(x => x.public_name === req.params.id);
+  const clean = modelsCore.stripRateTag(req.params.id);
+  const m = modelsCore.listPublicModels().find(x => x.public_name === clean || x.public_name === req.params.id);
   if (!m) return res.status(404).json({ error: { message: 'model not found', type: 'invalid_request_error' } });
-  res.json({ id: m.public_name, object: 'model', created: 0, owned_by: m.provider_id });
+  res.json({ id: modelsCore.decoratePublicModel(m.public_name, m), object: 'model', created: 0, owned_by: m.provider_id, x_free: !!m.is_free, x_multiplier: m.multiplier ?? null });
 });
 
 // 客户端可透传给 OpenAI 兼容上游的采样参数（逆向平台插件各自白名单，多收无害）

@@ -30,9 +30,13 @@ function auth(req, res, next) {
 }
 router.use(auth);
 
+// id/display_name 带费率标签（`·免费` / `·x0.03`），与 OpenAI 协议一致；请求回传时网关剥掉再路由
 router.get('/models', (req, res) => {
   const list = modelsCore.listPublicModels();
-  res.json({ data: list.map(m => ({ id: m.public_name, type: 'model', display_name: m.public_name })), has_more: false });
+  res.json({ data: list.map(m => {
+    const id = modelsCore.decoratePublicModel(m.public_name, m);
+    return { id, type: 'model', display_name: id };
+  }), has_more: false });
 });
 
 // Anthropic count_tokens: token 数为本地估算（无上游 tokenizer），Claude Code 等
@@ -93,7 +97,7 @@ router.post('/messages', async (req, res) => {
     return res.status(400).json({ type: 'error', error: { type: 'invalid_request_error', message: 'model and messages required' } });
   }
   const allowed = req.apikey?.allowed_models || '*';
-  if (allowed !== '*' && !allowed.split(',').map(s => s.trim()).includes(model)) {
+  if (allowed !== '*' && !allowed.split(',').map(s => s.trim()).includes(modelsCore.stripRateTag(model))) {
     return res.status(403).json({ type: 'error', error: { type: 'permission_error', message: `model '${model}' not allowed for this key` } });
   }
   const messages = toCanonical(body);

@@ -65,6 +65,11 @@ function releaseTarget(t) { const k = targetKey(t); targetInflight.set(k, Math.m
  */
 async function runChat(opts, onEvent, onUsage) {
   const started = Date.now();
+  // 客户端可能原样回传 /v1/models 里带费率标签的 id（`model ·免费` / `model ·x0.03`）——剥掉再路由
+  if (opts.publicModel) {
+    const clean = models.stripRateTag(opts.publicModel);
+    if (clean !== opts.publicModel) opts = { ...opts, publicModel: clean };
+  }
   // normalize once here so every entry point (openai/anthropic/responses/admin-test)
   // gets canonical messages with .text set
   if (opts.messages?.length && opts.messages[0].text === undefined && opts.messages[0].content !== undefined) {
@@ -209,6 +214,11 @@ async function runSingle(opts, model, onEvent, onUsage, started, usagePublicMode
  */
 async function runEmbeddings(opts) {
   const started = Date.now();
+  // 同 runChat：剥掉客户端回传的费率标签再路由
+  if (opts.publicModel) {
+    const clean = models.stripRateTag(opts.publicModel);
+    if (clean !== opts.publicModel) opts = { ...opts, publicModel: clean };
+  }
   let virtual = models.getVirtualModel(opts.publicModel);
   if (!virtual) {
     const { baseModel: vBase } = parseModelSuffix(opts.publicModel);
