@@ -115,6 +115,7 @@ async function main() {
     assert.equal(r.status, 200);
     assert.ok(r.json.providers.includes('trae'));
     assert.ok(r.json.providers.includes('workbuddy'));
+    assert.ok(r.json.providers.includes('workbuddyintl'));
     assert.ok(r.json.providers.includes('qwen'));
     assert.ok(r.json.providers.includes('qoder'));
     assert.ok(r.json.providers.includes('qodercn'));
@@ -132,6 +133,16 @@ async function main() {
     TOKEN = r.json.token;
   });
   const auth = { Authorization: 'Bearer ' + TOKEN };
+  await t('GET /admin/api/providers — supports_oauth 由服务端声明', async () => {
+    const r = await call('GET', '/admin/api/providers', null, auth);
+    assert.equal(r.status, 200);
+    const byId = Object.fromEntries(r.json.map(p => [p.id, p]));
+    assert.ok(byId.workbuddy.supports_oauth === true, 'workbuddy 应支持 OAuth');
+    assert.ok(byId.workbuddyintl.supports_oauth === true, 'workbuddyintl 应支持 OAuth');
+    assert.ok(byId.qwenwork.supports_oauth === true, 'qwenwork 应支持 OAuth');
+    assert.ok(byId.trae.supports_oauth === false, 'trae 不应有 OAuth 按钮');
+    assert.equal(byId.workbuddyintl.label.includes('国际版'), true);
+  });
 
   // mock upstream server (OpenAI compatible) — listen on 127.0.0.1 explicitly
   let mockCheckedIn = false;

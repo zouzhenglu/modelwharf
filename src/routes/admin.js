@@ -51,6 +51,8 @@ router.get('/providers', (req, res) => {
     const p = registry.get(r.id);
     return { ...r, config: JSON.parse(r.config || '{}'), label: p?.label || r.id, homepage: p?.homepage, credFields: p?.credFields || [], docs: p?.docs,
       supports_online: typeof p?.listOnlineModels === 'function',
+      supports_oauth: typeof p?.startOAuth === 'function',
+      oauth_prefix: p?.oauthPrefix || r.id,
       account_count: db.prepare('SELECT COUNT(*) c FROM accounts WHERE provider_id=?').get(r.id).c,
       model_count: db.prepare('SELECT COUNT(*) c FROM models WHERE provider_id=? AND enabled=1').get(r.id).c };
   }));
@@ -258,7 +260,7 @@ router.post('/providers/:id/oauth/poll', async (req, res) => {
   try {
     const r = await plugin.pollOAuth(req.body?.state);
     if (r.pending) return res.json({ pending: true });
-    const name = r.identity?.nickname ? `${req.params.id === 'workbuddy' ? 'wb' : req.params.id}-${r.identity.nickname}` : `${req.params.id}-oauth`;
+    const name = r.identity?.nickname ? `${plugin.oauthPrefix || req.params.id}-${r.identity.nickname}` : `${req.params.id}-oauth`;
     let finalName = name, n = 2;
     while (db.prepare('SELECT 1 FROM accounts WHERE provider_id=? AND name=?').get(req.params.id, finalName)) finalName = `${name}-${n++}`;
     const ins = db.prepare('INSERT INTO accounts(provider_id,name,credentials,extra) VALUES(?,?,?,?)')

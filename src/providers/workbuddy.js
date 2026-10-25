@@ -20,7 +20,22 @@ const CN_BASE = 'https://copilot.tencent.com';
 const INTL_BASE = 'https://www.workbuddy.ai';
 const CN_PORTAL = 'https://www.codebuddy.cn';
 
-function base(account) { return account.credentials.region === 'intl' ? INTL_BASE : CN_BASE; }
+// 国际版域名家族：现名 workbuddy.ai，旧名 codebuddy.ai（客户端 auth.domain 二者都可能出现）
+const INTL_DOMAIN_RE = /(?:^|\.)workbuddy\.ai$|(?:^|\.)codebuddy\.ai$/i;
+
+function normalizeRegion(v, fallback = 'cn') {
+  const s = String(v || '').toLowerCase();
+  if (['intl', 'international', 'i18n', 'global'].includes(s)) return 'intl';
+  if (['cn', 'china', 'domestic'].includes(s)) return 'cn';
+  return fallback;
+}
+
+/** 区域解析：account.regionOverride（workbuddyintl 包装层挂的，不入库）优先于 credentials.region */
+function regionOf(account) {
+  return normalizeRegion(account.regionOverride || account.credentials?.region, 'cn');
+}
+
+function base(account) { return regionOf(account) === 'intl' ? INTL_BASE : CN_BASE; }
 
 function headers(account, extra = {}) {
   const c = account.credentials;
@@ -37,7 +52,7 @@ function headers(account, extra = {}) {
     ...(uid ? { 'X-User-Id': String(uid) } : {}),
     ...extra,
   };
-  if (c.region === 'intl') {
+  if (regionOf(account) === 'intl') {
     h['X-Domain'] = 'www.workbuddy.ai';
   } else if (c.enterpriseId) {
     h['X-Enterprise-Id'] = c.enterpriseId; h['X-Tenant-Id'] = c.tenantId || c.enterpriseId; h['X-Domain'] = c.domain || 'www.codebuddy.cn';
@@ -80,7 +95,8 @@ function classifyError(status, message) {
 
 /** 签到后回查积分余额（get-user-resource 汇总未过期的 capacity 包），失败抛错由调用方兜住 */
 async function refreshCredits(account) {
-  const r = await httpJson(`${CN_PORTAL}/billing/meter/get-user-resource`, {
+  const realm = regionOf(account) === 'intl' ? INTL_BASE : CN_PORTAL;
+  const r = await httpJson(`${realm}/billing/meter/get-user-resource`, {
     method: 'POST', headers: headers(account, { Accept: 'application/json', Origin: CN_PORTAL, Referer: CN_PORTAL + '/' }), body: {}, timeoutMs: 15000,
   });
   if (r.status !== 200) throw new Error(`get-user-resource ${r.status}`);
@@ -100,15 +116,17 @@ module.exports = {
   id: 'workbuddy',
   label: 'WorkBuddy / CodeBuddy (腾讯)',
   homepage: 'https://www.workbuddy.cn',
+  region: 'cn',
+  oauthPrefix: 'wb',
   importLocal: true,
   credFields: [
     { name: 'token', label: 'Access Token', required: true, secret: true },
     { name: 'refreshToken', label: 'Refresh Token（可选，自动续期）', secret: true },
     { name: 'userId', label: 'User ID（可选）' },
-    { name: 'region', label: '区域', placeholder: 'cn（默认）或 intl' },
+    { name: 'region', label: '区域', placeholder: 'cn（默认）；国际版请用 workbuddyintl 通道' },
     { name: 'deviceToken', label: 'X-Device-Token（可选，风控需要时填）', secret: true },
   ],
-  docs: '从本机 %LOCALAPPDATA%\\CodeBuddyExtension\\Data\\Public\\auth\\*.info 读取（新版本若为 $wbEncrypted 加密信封则需手动抓包取 token）；或登录网页版后从请求头复制 Authorization。',
+  docs: '从本机 %LOCALAPPDATA%\\CodeBuddyExtension\\Data\\Public\\auth\\*.info 读取（国际版客户端的文件是 workbuddy-desktop-ai.info，请用 workbuddyintl 通道；新版本若为 $wbEncrypted 加密信封则需手动抓包取 token）；或登录网页版后从请求头复制 Authorization。',
 
   /** parse /v3/config into the true online catalog: rates, tags, ctx, vision */
   async fetchConfigCatalog(account) {
@@ -212,8 +230,30 @@ module.exports = {
 
   async checkAccount(account) {
     await ensureToken(account);
+    // 国际版：billing/meter/* 对插件 token 返回 401，/v3/config 不鉴权（均 2026-10-25 实测，
+    // 都不能作为 token 存活依据）——用最小聊天请求（max_tokens:1）做真链路探活
+    if (regionOf(account) === 'intl') {
+      const rid = crypto.randomUUID();
+      const r = await httpRequest(`${base(account)}/v2/chat/completions`, {
+        method: 'POST',
+        headers: headers(account, {
+          Accept: 'text/event-stream',
+          'X-Conversation-ID': rid, 'X-Conversation-Request-ID': rid, 'X-Root-Request-ID': rid,
+        }),
+        body: { model: 'default-model', messages: [{ role: 'user', content: 'ping' }], stream: true, max_tokens: 1 },
+        timeoutMs: 30000,
+      });
+      await r.body.text().catch(() => {}); // 排干响应体
+      if (r.statusCode === 401 || r.statusCode === 403) return { ok: false, status: 'invalid', message: `auth ${r.statusCode}` };
+      if (r.statusCode === 402) return { ok: false, status: 'banned', message: 'credits exhausted' };
+      if (r.statusCode === 200 || r.statusCode === 400 || r.statusCode === 429) {
+        // 200=探活成功；400=模型名不被接受（token 本身有效）；429=限流（token 有效）
+        return { ok: true, message: r.statusCode === 200 ? 'intl token 有效（chat 探活）' : `token 有效（chat 探活 HTTP ${r.statusCode}）` };
+      }
+      return { ok: true, message: `token 已刷新可用（chat 探活 HTTP ${r.statusCode}）` };
+    }
     // identity + credits via CN portal (billing/meter/get-user-resource returns capacity packages)
-    if (account.credentials.region !== 'intl') {
+    if (regionOf(account) === 'cn') {
       const r = await httpJson(`${CN_PORTAL}/billing/meter/get-user-resource`, {
         method: 'POST', headers: headers(account, { Accept: 'application/json', Origin: CN_PORTAL, Referer: CN_PORTAL + '/' }), body: {}, timeoutMs: 15000,
       });
@@ -256,9 +296,10 @@ module.exports = {
    */
   async checkin(account) {
     await ensureToken(account);
-    const realm = account.credentials.region === 'intl' ? INTL_BASE : CN_PORTAL;
+    const region = regionOf(account);
+    const realm = region === 'intl' ? INTL_BASE : CN_PORTAL;
     // intl: global 老客户端走无前缀路径；CN 实测只有 /v2 前缀
-    const paths = account.credentials.region === 'intl'
+    const paths = region === 'intl'
       ? ['/billing/meter/daily-checkin', '/v2/billing/meter/daily-checkin']
       : ['/v2/billing/meter/daily-checkin'];
     let lastStatus = 0, lastRaw = null;
@@ -349,7 +390,13 @@ module.exports = {
   // entries are reported so the user knows to re-login in the desktop app or paste a token.
   // Dedupes by account identity (uid from JWT sub / account.uid), NOT by token:
   // the same account refreshes tokens frequently, so token-fingerprint dedup leaks duplicates.
-  discoverLocal() {
+  // 国内/国际版客户端共用同一目录，按 auth.domain 区分（国际版文件名通常为
+  // workbuddy-desktop-ai.info）。CN 通道只扫 cn，国际版由 workbuddyintl 通道
+  // scanLocal('intl') 负责，避免同一个登录被两条通道重复导入。
+  discoverLocal() { return this.scanLocal('cn'); },
+
+  /** regionFilter: 'cn' | 'intl' — 不传返回全部（含 region 字段供调用方自行过滤） */
+  scanLocal(regionFilter) {
     const fs = require('fs'), os = require('os'), path = require('path');
     const { decodeJwtClaims } = require('../utils/jwt');
     const dirs = [
@@ -371,8 +418,15 @@ module.exports = {
           const auth = j.auth || j;
           const token = auth.accessToken;
           const uid = j.account?.uid || auth.uid || j.userId || null;
-          if (!token || typeof token !== 'string') continue;
+          if (!token) continue;
+          // 加密信封两种形态都算「扫不出」：字符串 '$wbEncrypted...' / 对象 {$wbEncrypted:1,envelope}（新版客户端，2026-10 实测）
+          if (typeof token !== 'string') {
+            if (typeof token === 'object' && (token.$wbEncrypted || token.envelope)) encryptedSeen = true;
+            continue;
+          }
           if (token.startsWith('$wbEncrypted') || auth['$wbEncrypted']) { encryptedSeen = true; continue; }
+          const region = INTL_DOMAIN_RE.test(auth.domain || '') ? 'intl' : 'cn';
+          if (regionFilter && region !== normalizeRegion(regionFilter)) continue;
           // identity = uid or JWT sub; skip files from the same account (fresh token wins: files sorted newest first)
           const claims = decodeJwtClaims(token);
           const identity = String(uid || claims?.sub || '') || null;
@@ -384,21 +438,24 @@ module.exports = {
             if (seenIdentity.has(fp)) continue;
             seenIdentity.add(fp);
           }
+          const prefix = region === 'intl' ? 'wbi' : 'wb';
           found.push({
             label: (f === 'workbuddy-desktop.info' ? 'workbuddy-desktop (当前)' : f.replace(/workbuddy-desktop\.|\.info/g, '').slice(0, 16)) + (claims?.nickname ? ` (${claims.nickname})` : uid ? ` (${String(uid).slice(0, 8)})` : ''),
-            suggestName: claims?.nickname ? `wb-${claims.nickname}` : ('wb-' + (found.filter(x => x.credentials).length + 1)),
+            suggestName: claims?.nickname ? `${prefix}-${claims.nickname}` : (`${prefix}-` + (found.filter(x => x.credentials).length + 1)),
             credentials: {
               token,
               refreshToken: auth.refreshToken || null,
               userId: uid,
               expiresAt: auth.expiresAt ? Number(auth.expiresAt) : (auth.expiresIn ? Date.now() + Number(auth.expiresIn) * 1000 : null),
-              region: (auth.domain || '').includes('workbuddy.ai') ? 'intl' : 'cn',
+              region,
             },
           });
         } catch { /* skip */ }
       }
-      if (encryptedSeen && !found.some(x => x.credentials)) {
-        found.push({ label: 'workbuddy-desktop（当前登录的 token 是加密信封 $wbEncrypted，无法直接读取。可在 WorkBuddy 客户端退出重登后立即扫描，或抓包后手动添加）', suggestName: null, credentials: null });
+      if (encryptedSeen) {
+        // 只要目录里出现加密信封就提示（即便同目录还有旧明文可导）——否则用户会误以为
+        // 扫到的是当前登录态，实际那是过期历史文件。label 固定前缀便于在面板永久排除。
+        found.push({ label: 'workbuddy-desktop（当前登录的 token 是加密信封 $wbEncrypted，无法直接读取。推荐用「网页授权登录」（设备码流程）；或在 WorkBuddy 客户端退出重登后立即扫描，或抓包后手动添加）', suggestName: null, credentials: null });
       }
     }
     return found;
@@ -410,9 +467,11 @@ module.exports = {
   //   open authUrl in browser -> user logs in
   //   poll GET /v2/plugin/auth/token?state=... until tokens arrive (10min)
   //   poll GET /v2/plugin/login/account?state=... for account info (60s)
-  async startOAuth() {
+  // CN 与 intl 同路径同协议，仅域名不同（intl 实测 2026-10-25：workbuddy.ai 返回
+  // workbuddy.ai/login 授权页；codebuddy.ai 旧域名同样可用）。
+  async startOAuth(region = 'cn') {
     const { httpJson } = require('../utils/http');
-    const BASE = 'https://copilot.tencent.com/v2/plugin';
+    const BASE = `${normalizeRegion(region) === 'intl' ? INTL_BASE : CN_BASE}/v2/plugin`;
     const H = { accept: 'application/json', 'content-type': 'application/json', 'user-agent': 'CLI/unknown CodeBuddy/2.137.1', 'x-product': 'SaaS', 'X-No-Authorization': 'true', 'X-No-User-Id': 'true', 'X-No-Enterprise-Id': 'true', 'X-No-Department-Info': 'true' };
     const r = await httpJson(`${BASE}/auth/state?platform=CLI`, { method: 'POST', headers: H, body: {}, timeoutMs: 15000 });
     if (r.status !== 200 || !r.json?.data?.state || !r.json?.data?.authUrl) {
@@ -422,9 +481,9 @@ module.exports = {
   },
 
   /** poll once (called repeatedly by admin UI until tokens arrive or timeout) */
-  async pollOAuth(state) {
+  async pollOAuth(state, region = 'cn') {
     const { httpJson } = require('../utils/http');
-    const BASE = 'https://copilot.tencent.com/v2/plugin';
+    const BASE = `${normalizeRegion(region) === 'intl' ? INTL_BASE : CN_BASE}/v2/plugin`;
     const H = { accept: 'application/json', 'user-agent': 'CLI/unknown CodeBuddy/2.137.1', 'x-product': 'SaaS', 'X-No-Authorization': 'true', 'X-No-User-Id': 'true', 'X-No-Enterprise-Id': 'true', 'X-No-Department-Info': 'true' };
     const t = await httpJson(`${BASE}/auth/token?state=${encodeURIComponent(state)}`, { headers: H, timeoutMs: 15000 });
     if (!(t.status === 200 && t.json?.code === 0 && t.json?.data?.accessToken)) {
@@ -443,7 +502,7 @@ module.exports = {
         refreshToken: auth.refreshToken || null,
         userId: account.userId || account.uid || claims.sub || null,
         expiresAt: auth.expiresAt ? Number(auth.expiresAt) : (auth.expiresIn ? Date.now() + Number(auth.expiresIn) * 1000 : null),
-        region: 'cn',
+        region: normalizeRegion(region),
       },
       identity: { nickname: claims.nickname || account.displayName || null, email: claims.email || null, phone: claims.preferred_username || null },
     };
@@ -452,7 +511,7 @@ module.exports = {
   async importLocal(opts = {}) {
     const found = this.discoverLocal();
     const { importFound } = require('../core/localcred');
-    if (opts.import) return { found, ...importFound('workbuddy', found, opts.names || []) };
+    if (opts.import) return { found, ...importFound(this.id, found, opts.names || []) };
     return { found };
   },
 };

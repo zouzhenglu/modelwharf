@@ -134,12 +134,13 @@ curl -s -X PUT http://localhost:8317/admin/api/settings \
 curl -s -X POST http://localhost:8317/admin/api/import-local-all -H "Authorization: Bearer $WH_TOKEN"
 ```
 
-覆盖 trae / workbuddy / qoder / qodercn / qwenwork 五个平台的本地客户端凭证，按凭证指纹去重，可重复调用。单平台导入：`POST /providers/<id>/import-local`。
+覆盖 trae / workbuddy / workbuddyintl / qoder / qodercn / qwenwork 六个平台的本地客户端凭证，按凭证指纹去重，可重复调用。单平台导入：`POST /providers/<id>/import-local`。
 前提是用户本机装过对应客户端**且登录过**。若用户没装，引导用户装好并登录后再扫，或走 B/C。
+注意：新版 CodeBuddy/WorkBuddy 客户端把 token 加密为 `$wbEncrypted` 信封（字符串或对象形态），扫描读不出——此时走 B（网页授权登录）。
 
 ### B. 网页授权登录（无需客户端、无需抓 token）
 
-workbuddy、qwenwork 支持 OAuth 设备码流程：
+workbuddy、workbuddyintl、qwenwork 支持 OAuth 设备码流程：
 
 ```bash
 # 1. 创建登录会话
@@ -153,7 +154,7 @@ curl -s -X POST http://localhost:8317/admin/api/providers/qwenwork/oauth/poll \
 # {"pending":true} 继续等；{"pending":false,"account_id":...} 成功，账号已自动入库
 ```
 
-workbuddy 同理，把路径里的 `qwenwork` 换成 `workbuddy`。
+workbuddy 同理，把路径里的 `qwenwork` 换成 `workbuddy`（国际版换 `workbuddyintl`）。
 
 ### C. 手动凭证（POST /accounts）
 
@@ -168,7 +169,7 @@ curl -s -X POST http://localhost:8317/admin/api/accounts \
 | provider_id | 关键字段 | 凭证来源（按推荐顺序） |
 |---|---|---|
 | `trae` | `token`（JWT）、`refreshToken`?、`region`? | ① 扫描（A）② 读 `%APPDATA%/Trae CN/User/globalStorage/storage.json` 里 `"iCubeAuthInfo://icube.cloudide"` 的值 ③ 抓 IDE 请求头 `Authorization` |
-| `workbuddy` | `token`、`refreshToken`?、`userId`?、`region`? | ① 授权登录（B）② 扫描（A）③ 读 `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\*.info` ④ 抓包 `copilot.tencent.com` 的 `Authorization` |
+| `workbuddy` / `workbuddyintl` | `token`、`refreshToken`?、`userId`?、`region`? | ① 授权登录（B，国内/国际版各自的通道）② 扫描（A，客户端 `auth.domain` 为 workbuddy.ai/codebuddy.ai 的登录态自动挂国际版通道）③ 读 `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\*.info` ④ 抓包对应域名的 `Authorization`。国内版挂 `workbuddy`，国际版挂 `workbuddyintl`（无积分/签到，账单接口对插件 token 不可用） |
 | `qoder` / `qodercn` | `pat`（`pt-`开头）、`region`? | ① **PAT 最稳**：Qoder 客户端 → 设置 → Integrations 创建 ② 扫描（A）。国内版账号挂 `qodercn`，国际版挂 `qoder` |
 | `qwen` | `token` 或 `email`+`password` | ① 填邮箱+密码，网关自动登录续期（最省心）② 浏览器登录 chat.qwen.ai → Cookie 里 `token` 字段 |
 | `qwenwork` | `token`、`refreshToken`?、`uid`（**必需**） | ① 授权登录（B）② 扫描（A，会自动带 uid）③ 手动：token+uid（uid 在 `~/.qoderworkcn` 或客户端数据目录） |

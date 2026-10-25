@@ -787,7 +787,7 @@ async function openAccountForm(id) {
   mFormAccount(acct, providers, p);
 }
 function mFormAccount(acct, providers, p) {
-  const supportsOAuth = !acct && ['workbuddy', 'qwenwork'].includes(p?.id); // platforms with device-flow login
+  const supportsOAuth = !acct && !!p?.supports_oauth; // platforms with device-flow login (server-declared)
   openModal(acct ? '编辑账号' : '添加账号', `
     <div class="field"><label>平台</label>
       <select id="afProvider" ${acct ? 'disabled' : ''}>${providers.map(x => `<option value="${x.id}" ${p?.id === x.id ? 'selected' : ''}>${esc(x.label)} (${x.id})</option>`).join('')}</select></div>
@@ -811,7 +811,7 @@ function mFormAccount(acct, providers, p) {
   $('#afProvider')?.addEventListener('change', e => {
     const np = providers.find(x => x.id === e.target.value);
     // re-render the whole form for oauth-capable platforms
-    if (!acct && ['workbuddy', 'qwenwork'].includes(np?.id)) { mFormAccount(null, providers, np); return; }
+    if (!acct && np?.supports_oauth) { mFormAccount(null, providers, np); return; }
     $('#afCreds').innerHTML = credFieldsHtml(np, null);
     const d = $('#afDocs'); if (d) d.textContent = np?.docs || '';
   });

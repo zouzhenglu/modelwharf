@@ -2,13 +2,14 @@
 
 > 各家都在送 AI 积分，可每份积分都锁在工具里 —— 一个码头，全停进来。
 
-多平台 AI 代理网关：把 **workbuddy(腾讯 CodeBuddy)、Trae(字节)、通义千问(chat.qwen.ai)、千问办公(QwenWork)、Qoder(阿里，国内/国际)、以及任意 OpenAI 兼容 API / 本地模型(Ollama)** 统一代理成标准 API，供各类 harness 工具（Claude Code、Cline、OpenClaw、Cursor 等）接入。自带网页管理面板。
+多平台 AI 代理网关：把 **workbuddy(腾讯 CodeBuddy，国内/国际)、Trae(字节)、通义千问(chat.qwen.ai)、千问办公(QwenWork)、Qoder(阿里，国内/国际)、以及任意 OpenAI 兼容 API / 本地模型(Ollama)** 统一代理成标准 API，供各类 harness 工具（Claude Code、Cline、OpenClaw、Cursor 等）接入。自带网页管理面板。
 
 ```
 harness 工具 ──►  本网关 (OpenAI /v1  +  Anthropic /v1/messages  +  MCP /mcp)
                         │
                         ├─ 逆向平台（账号池，多账号轮询）
-                        │   ├─ workbuddy / CodeBuddy (腾讯) → copilot.tencent.com
+                        │   ├─ workbuddy / CodeBuddy (腾讯)  → copilot.tencent.com
+                        │   ├─ workbuddyintl · 国际版        → www.workbuddy.ai
                         │   ├─ trae (字节)                  → trae-api-cn.mchost.guru
                         │   ├─ qwen (chat.qwen.ai)          → 千问网页版
                         │   ├─ qwenwork (千问办公)          → gateway.qwenwork.cn
