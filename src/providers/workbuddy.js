@@ -240,14 +240,15 @@ module.exports = {
           Accept: 'text/event-stream',
           'X-Conversation-ID': rid, 'X-Conversation-Request-ID': rid, 'X-Root-Request-ID': rid,
         }),
-        body: { model: 'default-model', messages: [{ role: 'user', content: 'ping' }], stream: true, max_tokens: 1 },
+        // intl 上游要求首条消息必须是 system（否则 400 + code 11128 "first message is not system prompt"，2026-10-25 实测）
+        body: { model: 'default-model', messages: [{ role: 'system', content: 'You are a helpful assistant.' }, { role: 'user', content: 'ping' }], stream: true, max_tokens: 1 },
         timeoutMs: 30000,
       });
       await r.body.text().catch(() => {}); // 排干响应体
       if (r.statusCode === 401 || r.statusCode === 403) return { ok: false, status: 'invalid', message: `auth ${r.statusCode}` };
       if (r.statusCode === 402) return { ok: false, status: 'banned', message: 'credits exhausted' };
       if (r.statusCode === 200 || r.statusCode === 400 || r.statusCode === 429) {
-        // 200=探活成功；400=模型名不被接受（token 本身有效）；429=限流（token 有效）
+        // 200=探活成功；400=模型名不被接受等请求层问题（token 本身有效）；429=限流（token 有效）
         return { ok: true, message: r.statusCode === 200 ? 'intl token 有效（chat 探活）' : `token 有效（chat 探活 HTTP ${r.statusCode}）` };
       }
       return { ok: true, message: `token 已刷新可用（chat 探活 HTTP ${r.statusCode}）` };

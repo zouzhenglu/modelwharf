@@ -6,7 +6,7 @@
  * 与国内版的实测差异（2026-10-25，插件 token）：
  *  - 聊天 /v2/chat/completions、模型目录 /v3/config、token 续期 ✅ 可用
  *  - 积分 billing/meter/*、签到 daily-checkin ❌ 401（边缘网关对插件 token 不放行）
- *    → checkAccount 用 /v3/config 只读探活；不实现 checkin（避免每天白跑一次 401）
+ *    → checkAccount 用最小聊天请求探活；不实现 checkin（避免每天白跑一次 401）
  */
 const base = require('./workbuddy');
 const { importFound } = require('../core/localcred');
@@ -17,6 +17,30 @@ const { importFound } = require('../core/localcred');
  */
 function asIntl(account, fn) {
   return fn({ ...account, regionOverride: 'intl' });
+}
+
+/**
+ * 对外名称全局唯一：网关路由按 public_name 全局查找（先入库者胜），与其他平台撞名的
+ * 国际版模型会被同名国内版行遮蔽而不可达（hy3 / glm-5.2 / deepseek… 与 workbuddy CN
+ * 大量撞名）→ 撞名的自动加 -intl 后缀（hy3 → hy3-intl），国际版独有模型保持原名。
+ * 以当前库内其他平台的名称为基准去重，重复同步结果稳定。
+ */
+function uniqueNames(models) {
+  const list = Array.isArray(models) ? models : models?.models;
+  if (!Array.isArray(list) || !list.length) return models;
+  const { db } = require('../store');
+  const taken = new Set(db.prepare("SELECT public_name FROM models WHERE provider_id<>'workbuddyintl'")
+    .all().map(r => String(r.public_name).toLowerCase()));
+  const alloc = (name) => {
+    const n = String(name || '');
+    if (!taken.has(n.toLowerCase())) { taken.add(n.toLowerCase()); return n; }
+    let out = `${n}-intl`, i = 2;
+    while (taken.has(String(out).toLowerCase())) out = `${n}-intl-${i++}`;
+    taken.add(String(out).toLowerCase());
+    return out;
+  };
+  for (const m of list) m.publicName = alloc(m.publicName || m.upstream);
+  return models;
 }
 
 module.exports = {
@@ -37,9 +61,9 @@ module.exports = {
   // 只扫国际版（auth.domain 为 workbuddy.ai / codebuddy.ai 的登录态）
   discoverLocal() { return base.scanLocal('intl'); },
 
-  async listModels(account) { return asIntl(account, (a) => base.listModels(a)); },
-  async listOnlineModels(account) { return asIntl(account, (a) => base.listOnlineModels(a)); },
-  async fetchConfigCatalog(account) { return asIntl(account, (a) => base.fetchConfigCatalog(a)); },
+  async listModels(account) { return uniqueNames(await asIntl(account, (a) => base.listModels(a))); },
+  async listOnlineModels(account) { return uniqueNames(await asIntl(account, (a) => base.listOnlineModels(a))); },
+  async fetchConfigCatalog(account) { return uniqueNames(await asIntl(account, (a) => base.fetchConfigCatalog(a))); },
   async checkAccount(account) { return asIntl(account, (a) => base.checkAccount(a)); },
   // 国际版账单接口 401（见文件头）——不暴露 checkin，core 视为「平台不支持签到」直接跳过
   checkin: undefined,
