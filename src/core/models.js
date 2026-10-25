@@ -80,7 +80,8 @@ function listModels({ providerId, search, enabled, tag } = {}) {
   if (search) { where.push('(m.public_name LIKE ? OR m.upstream_model LIKE ? OR m.tags LIKE ?)'); args.push(`%${search}%`, `%${search}%`, `%${search}%`); }
   if (tag) { where.push('m.tags LIKE ?'); args.push(`%${tag}%`); }
   if (where.length) sql += ' WHERE ' + where.join(' AND ');
-  sql += ' ORDER BY m.provider_id, m.public_name';
+  // 每个平台内免费模型排前面，便于管理界面优先核对免费额度
+  sql += ' ORDER BY m.provider_id, m.is_free DESC, m.public_name';
   return db.prepare(sql).all(...args);
 }
 
@@ -130,13 +131,13 @@ function deleteVirtualModel(publicName) {
   db.prepare('DELETE FROM virtual_models WHERE public_name=?').run(publicName);
 }
 
-/** public model list for clients: regular enabled models + virtual models */
+/** public model list for clients: regular enabled models + virtual models (免费模型排最前) */
 function listPublicModels() {
   const regular = db.prepare(`
     SELECT m.public_name, m.provider_id, m.upstream_model, m.multiplier, m.is_free, m.ctx_window,
            (SELECT COUNT(*) FROM accounts a WHERE a.provider_id=m.provider_id AND a.enabled=1 AND a.status NOT IN ('invalid','banned')) AS accounts
     FROM models m WHERE m.enabled=1
-    ORDER BY m.public_name`).all().filter(m => m.accounts > 0);
+    ORDER BY m.is_free DESC, m.public_name`).all().filter(m => m.accounts > 0);
   const virtual = db.prepare('SELECT * FROM virtual_models WHERE enabled=1').all()
     .map(v => ({ public_name: v.public_name, provider_id: 'virtual', upstream_model: null, multiplier: 1, is_free: 0, ctx_window: null, accounts: 1, virtual: 1 }));
   return [...regular, ...virtual];
