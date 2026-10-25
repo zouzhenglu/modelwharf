@@ -2,7 +2,7 @@
 
 本文件记录面向用户的显著变更。版本与 git tag 一一对应；日期为 tag 创建日期。
 
-## [Unreleased]
+## [0.12.0] - 2026-10-25
 
 ### Added
 - **WorkBuddy 国际版独立通道 `workbuddyintl`**：与国内版同一套协议（聊天/模型/续期），网关 `www.workbuddy.ai`；支持本机扫描（按客户端 `auth.domain` 自动分流，国际版文件 `workbuddy-desktop-ai.info`）、设备码网页授权登录、账号体检。实测差异（2026-10-25）：国际版积分/签到接口对插件 token 返回 401，故国际版账号体检用最小聊天请求探活，且无签到

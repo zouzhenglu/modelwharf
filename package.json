@@ -1,6 +1,6 @@
 {
   "name": "modelwharf",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "modelwharf — 模型码头: multi-platform AI proxy (workbuddy/trae/qwen/qoder + 24 official vendors) -> OpenAI & Anthropic & MCP compatible API with admin panel",
   "main": "src/server.js",
   "type": "commonjs",
