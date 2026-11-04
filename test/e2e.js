@@ -149,10 +149,12 @@ async function main() {
 
   // mock upstream server (OpenAI compatible) — listen on 127.0.0.1 explicitly
   let mockCheckedIn = false;
+  // 最近一次 /v1/chat/completions 的请求体，供「多轮工具历史」回归测试断言网关转发出去的消息
+  let lastUpstreamBody = null;
   const mock = http.createServer((req, res) => {
     if (req.url === '/v1/models') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ data: [{ id: 'mock-model-a' }, { id: 'mock-model-b' }, { id: 'mock-echo' }] }));
+      return res.end(JSON.stringify({ data: [{ id: 'mock-model-a' }, { id: 'mock-model-b' }, { id: 'mock-echo' }, { id: 'mock-tool' }, { id: 'mock-mixed' }] }));
     }
     if (req.url === '/v1/embeddings') {
       let body = '';
@@ -169,6 +171,29 @@ async function main() {
       req.on('data', c => body += c);
       req.on('end', () => {
         const j = JSON.parse(body || '{}');
+        lastUpstreamBody = j;
+        // mock-mixed: 同一条流里依次出现 reasoning → text → tool，验证 done 事件按 output_index 顺序收尾
+        if (j.model === 'mock-mixed') {
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          const chunk = o => res.write(`data: ${JSON.stringify(o)}\n\n`);
+          chunk({ choices: [{ index: 0, delta: { reasoning_content: '想想' } }] });
+          chunk({ choices: [{ index: 0, delta: { content: '答案' } }] });
+          chunk({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_m', type: 'function', function: { name: 'get_time', arguments: '{"tz":"Tokyo"}' } }] } }] });
+          chunk({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 10, completion_tokens: 8 } });
+          res.write('data: [DONE]\n\n');
+          return res.end();
+        }
+        // mock-tool: 模拟上游把一次工具调用拆成多个流式 delta（DSML/文本工具协议典型形态）
+        if (j.model === 'mock-tool') {
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          const chunk = o => res.write(`data: ${JSON.stringify(o)}\n\n`);
+          chunk({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_xyz', type: 'function', function: { name: 'get_time', arguments: '' } }] } }] });
+          chunk({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { name: '', arguments: '{"tz":' } }] } }] });
+          chunk({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { name: '', arguments: '"Tokyo"}' } }] } }] });
+          chunk({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 10, completion_tokens: 8 } });
+          res.write('data: [DONE]\n\n');
+          return res.end();
+        }
         // mock-echo: echo received upstream params back as content; honor n (multi-choice)
         if (j.model === 'mock-echo') {
           const echo = {
@@ -351,6 +376,22 @@ async function main() {
     assert.equal(r.status, 200, r.text);
     assert.equal(r.json.data[0].embedding.length, 3);
   });
+  await t('chat completions multi-turn tool history stays structured', async () => {
+    // 对照：OpenAI 协议的历史工具调用一直走顶层 tool_calls/tool_call_id，
+    // Anthropic/Responses 两条链路的回归测试断言与这里一致。
+    const r = await call('POST', '/v1/chat/completions', {
+      model: 'mock-a', messages: [
+        { role: 'user', content: 'what time?' },
+        { role: 'assistant', content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'get_time', arguments: '{"tz":"Tokyo"}' } }] },
+        { role: 'tool', tool_call_id: 'call_1', content: '12:00' },
+      ], tools: [{ type: 'function', function: { name: 'get_time', description: 'd', parameters: { type: 'object', properties: { tz: { type: 'string' } } } } }],
+    });
+    assert.equal(r.status, 200, r.text);
+    const ms = lastUpstreamBody.messages;
+    assert.ok(Array.isArray(ms[1].tool_calls) && ms[1].tool_calls[0].function.name === 'get_time', JSON.stringify(ms[1]));
+    assert.equal(ms[2].role, 'tool');
+    assert.equal(ms[2].tool_call_id, 'call_1');
+  });
 
   console.log('== gateway (anthropic) ==');
   await t('/v1/messages non-stream', async () => {
@@ -393,6 +434,51 @@ async function main() {
     const content = r.json.content[0].text;
     const echo = JSON.parse(content.slice(content.indexOf('{')));
     assert.equal(echo.reasoning_effort, 'medium', content);
+  });
+  await t('/v1/messages multi-turn tool history stays structured', async () => {
+    // Claude Code 第二轮：assistant.tool_use + user.tool_result 回传。网关必须还原成
+    // 结构化 tool_calls / tool_call_id（顶层），否则上游报 "tool calls and tool results
+    // do not match"，agent 循环断链。
+    const r = await call('POST', '/v1/messages', {
+      model: 'mock-a', max_tokens: 100,
+      messages: [
+        { role: 'user', content: 'what time?' },
+        { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'get_time', input: { tz: 'Tokyo' } }] },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: '12:00' }] },
+      ],
+      tools: [{ name: 'get_time', description: 'd', input_schema: { type: 'object', properties: { tz: { type: 'string' } } } }],
+    });
+    assert.equal(r.status, 200, r.text);
+    const ms = lastUpstreamBody.messages;
+    assert.equal(ms[0].role, 'user');
+    assert.ok(Array.isArray(ms[1].tool_calls) && ms[1].tool_calls.length === 1, 'assistant tool_calls lost: ' + JSON.stringify(ms[1]));
+    assert.equal(ms[1].tool_calls[0].function.name, 'get_time');
+    assert.deepEqual(JSON.parse(ms[1].tool_calls[0].function.arguments), { tz: 'Tokyo' });
+    assert.equal(ms[2].role, 'tool');
+    assert.equal(ms[2].tool_call_id, 'toolu_1', 'tool_result tool_use_id lost: ' + JSON.stringify(ms[2]));
+    assert.equal(ms[2].content, '12:00');
+  });
+  await t('/v1/messages stream: no [DONE], stops at message_stop', async () => {
+    const resp = await fetch(BASE + '/v1/messages', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'mock-a', max_tokens: 50, stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(resp.status, 200);
+    const text = await resp.text();
+    assert.ok(text.includes('event: message_start'), 'missing event: line');
+    assert.ok(text.includes('event: message_stop'), 'missing message_stop');
+    assert.ok(!text.includes('[DONE]'), 'Anthropic stream must not end with OpenAI [DONE]');
+  });
+  await t('/v1/messages stream tool_use aggregates arguments', async () => {
+    const resp = await fetch(BASE + '/v1/messages', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'mock-tool', max_tokens: 100, stream: true, messages: [{ role: 'user', content: 'time?' }], tools: [{ name: 'get_time', description: 'd', input_schema: { type: 'object', properties: { tz: { type: 'string' } } } }] }),
+    });
+    assert.equal(resp.status, 200);
+    const text = await resp.text();
+    assert.ok(text.includes('event: content_block_start'), text.slice(0, 400));
+    assert.ok(text.includes('"type":"tool_use"'), 'missing tool_use block');
+    assert.ok(text.includes('"partial_json":"{\\"tz\\":\\"Tokyo\\"}"'), 'tool arguments not aggregated: ' + text.slice(-600));
   });
 
   console.log('== apikeys ==');
@@ -638,6 +724,95 @@ async function main() {
     assert.ok(text.includes('"type":"response.created"'));
     assert.ok(text.includes('"type":"response.output_text.delta"'));
     assert.ok(text.includes('"type":"response.completed"'));
+    assert.ok(text.includes('event: response.created'), 'missing event: line (strict SSE clients need it)');
+    assert.ok(text.includes('event: response.output_item.added'), 'missing output_item.added');
+    assert.ok(text.includes('event: response.output_item.done'), 'missing output_item.done');
+    assert.ok(text.includes('event: response.content_part.done'), 'missing content_part.done');
+    assert.ok(!text.includes('[DONE]'), 'Responses stream must not end with OpenAI [DONE]');
+  });
+  await t('POST /v1/responses multi-turn tool history stays structured', async () => {
+    // Codex 第二轮：function_call + function_call_output 回传。tool_calls / tool_call_id
+    // 必须在规范消息顶层，塞进 raw 会被 provider 静默丢弃。
+    const r = await call('POST', '/v1/responses', {
+      model: 'mock-a', input: [
+        { type: 'message', role: 'user', content: 'what time?' },
+        { type: 'function_call', call_id: 'call_1', name: 'get_time', arguments: '{"tz":"Tokyo"}' },
+        { type: 'function_call_output', call_id: 'call_1', output: '12:00' },
+      ],
+      tools: [{ type: 'function', name: 'get_time', parameters: { type: 'object', properties: { tz: { type: 'string' } } } }],
+    }, { Authorization: 'Bearer ' + fullKey });
+    assert.equal(r.status, 200, r.text);
+    const ms = lastUpstreamBody.messages;
+    assert.equal(ms[0].role, 'user');
+    assert.ok(Array.isArray(ms[1].tool_calls) && ms[1].tool_calls.length === 1, 'assistant tool_calls lost: ' + JSON.stringify(ms[1]));
+    assert.equal(ms[1].tool_calls[0].function.name, 'get_time');
+    assert.equal(ms[1].tool_calls[0].id, 'call_1');
+    assert.equal(ms[2].role, 'tool');
+    assert.equal(ms[2].tool_call_id, 'call_1', 'function_call_output call_id lost: ' + JSON.stringify(ms[2]));
+  });
+  await t('POST /v1/responses maps developer/instructions to user (Codex native)', async () => {
+    // Codex CLI 原生用 role:developer + 顶层 instructions 下发大段指令；workbuddy
+    // 系上游对大体积 system/developer 消息返回 400 code:11-128 "unapproved channel"，
+    // 同样内容作为 user 消息则放行。这就是「路由模式能用、直连 responses 失败」的根因。
+    const bigDev = 'You are a coding agent. '.repeat(300); // ~7KB
+    const r = await call('POST', '/v1/responses', {
+      model: 'mock-a',
+      instructions: 'Top-level instructions',
+      input: [
+        { type: 'message', role: 'developer', content: [{ type: 'input_text', text: bigDev }] },
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
+      ],
+    }, { Authorization: 'Bearer ' + fullKey });
+    assert.equal(r.status, 200, r.text);
+    const ms = lastUpstreamBody.messages;
+    // openai-compat 的 _generic 不做 system 兜底，roles 就是网关发出的原样
+    assert.ok(!ms.some(m => m.role === 'developer'), 'developer role leaked upstream: ' + JSON.stringify(ms.map(m => m.role)));
+    assert.ok(!ms.some(m => m.role === 'system'), 'instructions must not become system: ' + JSON.stringify(ms.map(m => m.role)));
+    assert.equal(ms[0].role, 'user');
+    assert.ok(ms[0].content.includes('Top-level instructions'));
+    assert.equal(ms[1].role, 'user');
+    assert.ok(ms[1].content.includes('You are a coding agent'));
+    assert.equal(ms[2].role, 'user');
+    assert.equal(ms[2].content, 'hi');
+  });
+  await t('POST /v1/responses streaming aggregates tool call deltas', async () => {
+    // 上游把一次工具调用拆成 3 个 delta：只能发一次 output_item.added，
+    // arguments 用 delta 分片累加，最后 done 里是完整 JSON。
+    const resp = await fetch(BASE + '/v1/responses', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + fullKey },
+      body: JSON.stringify({ model: 'mock-tool', input: 'time?', stream: true, tools: [{ type: 'function', name: 'get_time', parameters: { type: 'object', properties: { tz: { type: 'string' } } } }] }),
+    });
+    assert.equal(resp.status, 200);
+    const text = await resp.text();
+    const added = (text.match(/event: response\.output_item\.added/g) || []).length;
+    assert.equal(added, 1, 'one tool call must produce exactly one output_item.added, got ' + added);
+    assert.ok((text.match(/event: response\.function_call_arguments\.delta/g) || []).length >= 2, 'missing arguments deltas');
+    assert.ok(text.includes('event: response.function_call_arguments.done'), 'missing arguments.done');
+    const doneEvent = text.split('\n\n').find(b => b.includes('response.function_call_arguments.done'));
+    assert.ok(doneEvent && doneEvent.includes('Tokyo'), 'aggregated arguments missing: ' + doneEvent);
+    assert.ok(doneEvent.includes('"name":"get_time"'), 'tool name must not be duplicated: ' + doneEvent);
+    const completed = text.split('\n\n').map(b => { try { return JSON.parse(b.slice(b.indexOf('data: ') + 6)); } catch { return null; } }).filter(Boolean).find(o => o.type === 'response.completed');
+    assert.ok(completed, 'missing response.completed');
+    const fc = completed.response.output.find(o => o.type === 'function_call');
+    assert.ok(fc, 'missing function_call in completed.output');
+    assert.equal(fc.name, 'get_time');
+    assert.ok(fc.arguments.includes('Tokyo'), 'final function_call arguments not aggregated: ' + JSON.stringify(fc));
+  });
+  await t('POST /v1/responses streaming closes items in output_index order', async () => {
+    // reasoning(0) → message(1) → function_call(2)：done 事件的 output_index 必须升序，
+    // 否则 Codex 按 index 累加状态时会错乱。
+    const resp = await fetch(BASE + '/v1/responses', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + fullKey },
+      body: JSON.stringify({ model: 'mock-mixed', input: 'time?', stream: true, tools: [{ type: 'function', name: 'get_time', parameters: { type: 'object', properties: { tz: { type: 'string' } } } }] }),
+    });
+    assert.equal(resp.status, 200);
+    const text = await resp.text();
+    const blocks = text.split('\n\n').map(b => { try { return JSON.parse(b.slice(b.indexOf('data: ') + 6)); } catch { return null; } }).filter(Boolean);
+    const doneIndexes = blocks.filter(o => o.type === 'response.output_item.done').map(o => o.output_index);
+    assert.ok(doneIndexes.length >= 3, 'expected 3 output_item.done, got ' + doneIndexes.length);
+    assert.deepEqual(doneIndexes, [...doneIndexes].sort((a, b) => a - b), 'output_item.done indexes out of order: ' + doneIndexes.join(','));
+    const addedIndexes = blocks.filter(o => o.type === 'response.output_item.added').map(o => o.output_index);
+    assert.deepEqual(addedIndexes, [...addedIndexes].sort((a, b) => a - b), 'output_item.added indexes out of order');
   });
   await t('reasoning suffix -think routes to base model', async () => {
     const r = await call('POST', '/v1/chat/completions', { model: 'mock-a-think', messages: [{ role: 'user', content: 'hi' }] }, { Authorization: 'Bearer ' + fullKey });

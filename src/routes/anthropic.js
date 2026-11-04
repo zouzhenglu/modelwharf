@@ -60,17 +60,29 @@ function toCanonical(body) {
     if (typeof m.content === 'string') { msgs.push({ role: m.role, text: m.content }); continue; }
     // content blocks
     const parts = [];
+    const toolUses = [];
     let toolResult = null;
     for (const b of m.content || []) {
       if (b.type === 'text') parts.push({ type: 'text', text: b.text });
       else if (b.type === 'image') parts.push({ type: 'image_url', url: b.source?.data ? `data:${b.source.media_type};base64,${b.source.data}` : b.source?.url });
-      else if (b.type === 'tool_use') parts.push({ type: 'text', text: `[tool_use ${b.name}] ${JSON.stringify(b.input)}` });
-      else if (b.type === 'tool_result') toolResult = b;
+      else if (b.type === 'thinking') parts.push({ type: 'text', text: b.thinking || '' });
+      else if (b.type === 'tool_use') {
+        // 历史里的 assistant 工具调用必须还原成结构化 tool_calls（顶层字段），
+        // 否则上游收到「一句纯文本 + 孤儿 tool 结果」会报
+        // "tool calls and tool results do not match"（Claude Code 第二轮即断链）。
+        toolUses.push({ id: b.id || `toolu_${crypto.randomBytes(8).toString('hex')}`, type: 'function', function: { name: b.name, arguments: typeof b.input === 'string' ? b.input : JSON.stringify(b.input ?? {}) } });
+      } else if (b.type === 'tool_result') toolResult = b;
     }
     if (toolResult) {
       const inner = typeof toolResult.content === 'string' ? toolResult.content
         : (toolResult.content || []).map(c => c.text || '').join('\n');
-      msgs.push({ role: 'tool', text: inner, raw: { tool_use_id: toolResult.tool_use_id } });
+      msgs.push({ role: 'tool', text: inner, tool_call_id: toolResult.tool_use_id });
+    } else if (toolUses.length) {
+      msgs.push({
+        role: m.role, text: parts.filter(p => p.type === 'text').map(p => p.text).join('\n'),
+        parts: parts.length ? parts : undefined,
+        tool_calls: toolUses,
+      });
     } else {
       msgs.push({ role: m.role, text: parts.filter(p => p.type === 'text').map(p => p.text).join('\n'), parts: parts.length ? parts : undefined });
     }
@@ -193,9 +205,9 @@ router.post('/messages', async (req, res) => {
     const stopReason = acc.toolCalls.some(Boolean) ? 'tool_use' : 'end_turn';
     sendEvent('message_delta', { type: 'message_delta', delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: usageAcc.output_tokens } });
     sendEvent('message_stop', { type: 'message_stop' });
-    sse.end();
+    sse.end({ done: false });  // Anthropic 官方流以 message_stop 收尾，没有 [DONE]
   } catch (err) {
-    if (!sse.isClosed) { sendEvent('error', { type: 'error', error: { type: 'api_error', message: err.message } }); sse.end(); }
+    if (!sse.isClosed) { sendEvent('error', { type: 'error', error: { type: 'api_error', message: err.message } }); sse.end({ done: false }); }
   }
 });
 

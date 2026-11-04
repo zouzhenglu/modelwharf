@@ -4,7 +4,9 @@
  * Translates to the internal chat/completions pipeline:
  *   - requests: input (string | message array | function_call outputs) -> canonical messages
  *   - tools:    {type:'function', name, parameters, description} -> OpenAI tools format
- *   - streaming: chat.completion.chunk deltas -> response.output_text.delta events + response.completed
+ *   - streaming: chat.completion.chunk deltas -> full Responses SSE event sequence
+ *                (event: lines + output_item/content_part lifecycle + aggregated
+ *                function_call arguments.delta/done), ends at response.completed
  *   - reasoning: reasoning_effort accepted and forwarded as reasoning_content; non-stream
  *                responses emit reasoning summary in output[0] (type "reasoning") when present.
  */
@@ -12,7 +14,6 @@ const express = require('express');
 const crypto = require('crypto');
 const engine = require('../core/engine');
 const modelsCore = require('../core/models');
-const { normalizeMessages } = require('../core/messages');
 const { db } = require('../store');
 const { sseInit } = require('../utils/sse');
 
@@ -46,9 +47,22 @@ function checkModelAllowed(req, res, next) {
 }
 
 // ---------- request translation ----------
+/**
+ * Codex CLI 的原生 Responses 请求用 `role: developer` 下发指令（还有顶层
+ * `instructions`）。但逆向平台（workbuddy / workbuddyintl 的 /v2/chat/completions）
+ * 的渠道校验会拒掉大体积的 system/developer 消息：实测 17KB 的 developer 消息
+ * （无论叫 developer 还是 system、无论内容是什么）一律 400 code:11-128
+ * "Illegal API invocation from an unapproved channel"，而同样内容作为 user 消息
+ * 完全放行。这正是「ccswitch 路由模式（转成 chat/completions 时把开发者指令当
+ * user 处理）能用、Codex 直连 responses 失败」的根因。
+ * 因此这里把 developer/system 统一降为 user（前置指令消息），语义不丢、上游能收。
+ */
+function normalizeResponsesRole(role) {
+  return role === 'developer' || role === 'system' ? 'user' : role;
+}
 function responsesInputToMessages(input, instructions) {
   const msgs = [];
-  if (instructions) msgs.push({ role: 'system', text: String(instructions) });
+  if (instructions) msgs.push({ role: 'user', text: String(instructions) });
   if (typeof input === 'string') {
     msgs.push({ role: 'user', text: input });
     return msgs;
@@ -67,12 +81,19 @@ function responsesInputToMessages(input, instructions) {
         text = pp.filter(p => p.type === 'text').map(p => p.text).join('\n');
         if (pp.some(p => p.type === 'image_url')) parts = pp;
       }
-      msgs.push({ role: item.role, text, parts });
+      msgs.push({ role: normalizeResponsesRole(item.role), text, parts });
     } else if (item.type === 'function_call') {
-      // prior assistant tool call in history
-      msgs.push({ role: 'assistant', text: '', raw: { tool_calls: [{ id: item.call_id || item.id, type: 'function', function: { name: item.name, arguments: typeof item.arguments === 'string' ? item.arguments : JSON.stringify(item.arguments || {}) } }] } });
+      // prior assistant tool call in history — tool_calls / tool_call_id 必须放在
+      // 规范消息的顶层（provider 只读顶层字段，塞进 raw 会被静默丢弃，导致多轮工具会话断链）
+      msgs.push({
+        role: 'assistant', text: '',
+        tool_calls: [{ id: item.call_id || item.id, type: 'function', function: { name: item.name, arguments: typeof item.arguments === 'string' ? item.arguments : JSON.stringify(item.arguments || {}) } }],
+      });
     } else if (item.type === 'function_call_output') {
-      msgs.push({ role: 'tool', text: typeof item.output === 'string' ? item.output : JSON.stringify(item.output), raw: { tool_call_id: item.call_id } });
+      msgs.push({
+        role: 'tool', text: typeof item.output === 'string' ? item.output : JSON.stringify(item.output),
+        tool_call_id: item.call_id,
+      });
     } else if (item.type === 'reasoning') {
       // internal reasoning echo — ignore content, it's not replayable
     }
@@ -90,15 +111,20 @@ function responsesToolsToOpenAI(tools) {
 }
 
 // ---------- response building ----------
-function buildResponseObject(id, model, { text, reasoning, toolCalls, status = 'completed', usage, incomplete }) {
+// fcIds: 流式阶段为每个 function_call 预分配的 [{id, call_id}]（与 toolCalls 对齐）；
+// 非流式不传，随机生成。复用可让 response.completed 里的 output 与流式事件的 item_id 对得上。
+function buildResponseObject(id, model, { text, reasoning, toolCalls, status = 'completed', usage, incomplete, fcIds }) {
   const output = [];
   if (reasoning) {
     output.push({ type: 'reasoning', id: 'rs_' + crypto.randomBytes(8).toString('hex'), summary: [{ type: 'summary_text', text: reasoning }] });
   }
   if (toolCalls && toolCalls.length) {
-    for (const tc of toolCalls) {
-      output.push({ type: 'function_call', id: 'fc_' + crypto.randomBytes(8).toString('hex'), call_id: tc.id || 'call_' + crypto.randomBytes(8).toString('hex'), name: tc.function?.name || '', arguments: tc.function?.arguments || '{}' });
-    }
+    toolCalls.forEach((tc, i) => {
+      const callId = tc.id || 'call_' + crypto.randomBytes(8).toString('hex');
+      // 流式阶段按 call_id 对齐预分配的 item id；找不到时退回数组下标（连续 index 的常规情形）
+      const ids = fcIds?.find(x => x.call_id === callId) || fcIds?.[i] || {};
+      output.push({ type: 'function_call', id: ids.id || 'fc_' + crypto.randomBytes(8).toString('hex'), call_id: ids.call_id || callId, name: tc.function?.name || '', arguments: tc.function?.arguments || '{}' });
+    });
   }
   output.push({ type: 'message', id: 'msg_' + crypto.randomBytes(8).toString('hex'), role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: text || '', annotations: [] }] });
   return {
@@ -201,46 +227,128 @@ router.post('/responses', checkModelAllowed, async (req, res) => {
   const sse = sseInit(res);
   const acc = accumulate();
   let seq = 0;
-  const send = (event, data) => { if (!sse.isClosed) { sse.send(null, JSON.stringify({ type: event, sequence_number: seq++, ...data })); } };
+  // 官方 Responses 流每个事件都带 `event:` 行（严格按 SSE event 分发的客户端
+  // 只认 event:，不认 data 里的 type）；同时补 item 生命周期事件，让 Codex 能
+  // 正确累加输出。
+  const send = (event, data) => {
+    if (sse.isClosed) return;
+    sse.send(event, JSON.stringify({ type: event, sequence_number: seq++, ...data }));
+  };
+  let outIdx = 0;
+  const allocOutIdx = () => outIdx++;
   try {
-    send('response.created', { response: buildResponseObject(id, model, { text: '', status: 'in_progress' }) });
-    let textOpened = false, reasoningOpened = false, outIdx = 0;
-    const openBlock = (type) => {
-      if (type === 'reasoning') { send('response.reasoning_summary_text.delta', { item_id: 'rs_' + id, output_index: outIdx, delta: '' }); reasoningOpened = true; }
-      else { send('response.output_text.delta', { item_id: 'msg_' + id, output_index: outIdx, content_index: 0, delta: '' }); textOpened = true; }
+    const inProgress = () => buildResponseObject(id, model, { text: '', status: 'in_progress' });
+    send('response.created', { response: inProgress() });
+    send('response.in_progress', { response: inProgress() });
+
+    let textItem = null;
+    let reasoningItem = null;
+    // function_call 分片按 index 聚合：上游（含 DSML 文本协议）把一次工具调用拆成
+    // 多个 delta（id/name 一段、arguments 若干段），逐个发 output_item.added 会让
+    // Codex 看到多个损坏的调用。这里每个 index 只发一次 added + 多次 arguments.delta。
+    const toolItems = new Map(); // index -> { itemId, callId, name, args, outputIndex }
+    // 所有 item 的收尾闭包按 output_index 排序后统一执行，保证 done 事件顺序与
+    // output_index 一致（Codex 等严格客户端按 index 累加状态，乱序会解析失败）。
+    const closers = [];
+
+    const openTextItem = () => {
+      if (textItem) return textItem;
+      const itemId = 'msg_' + crypto.randomBytes(8).toString('hex');
+      const outputIndex = allocOutIdx();
+      send('response.output_item.added', { output_index: outputIndex, item: { type: 'message', id: itemId, role: 'assistant', status: 'in_progress', content: [] } });
+      send('response.content_part.added', { item_id: itemId, output_index: outputIndex, content_index: 0, part: { type: 'output_text', text: '', annotations: [] } });
+      textItem = { itemId, outputIndex };
+      closers.push({
+        outputIndex, kind: 'text',
+        run: (text) => {
+          send('response.output_text.done', { item_id: itemId, output_index: outputIndex, content_index: 0, text });
+          send('response.content_part.done', { item_id: itemId, output_index: outputIndex, content_index: 0, part: { type: 'output_text', text, annotations: [] } });
+          send('response.output_item.done', { output_index: outputIndex, item: { type: 'message', id: itemId, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text, annotations: [] }] } });
+        },
+      });
+      return textItem;
     };
+    const openReasoningItem = () => {
+      if (reasoningItem) return reasoningItem;
+      const itemId = 'rs_' + crypto.randomBytes(8).toString('hex');
+      const outputIndex = allocOutIdx();
+      send('response.output_item.added', { output_index: outputIndex, item: { type: 'reasoning', id: itemId, summary: [] } });
+      send('response.reasoning_summary_part.added', { item_id: itemId, output_index: outputIndex, summary_index: 0, part: { type: 'summary_text', text: '' } });
+      reasoningItem = { itemId, outputIndex };
+      closers.push({
+        outputIndex, kind: 'reasoning',
+        run: (text) => {
+          send('response.reasoning_summary_text.done', { item_id: itemId, output_index: outputIndex, summary_index: 0, text });
+          send('response.reasoning_summary_part.done', { item_id: itemId, output_index: outputIndex, summary_index: 0, part: { type: 'summary_text', text } });
+          send('response.output_item.done', { output_index: outputIndex, item: { type: 'reasoning', id: itemId, summary: [{ type: 'summary_text', text }] } });
+        },
+      });
+      return reasoningItem;
+    };
+
     await engine.runChat({ publicModel: model, messages, tools: openaiTools, params, source: 'responses', apikeyId: req.apikey.id },
       (data) => {
         if (sse.isClosed) return false;
         const ev = parseUpstreamEvent(data);
-        if (!ev) return true;
+        if (!ev || ev.done) return true;
         acc.fn(ev);
         const d = ev.delta || {};
         if (d.reasoning) {
-          if (!reasoningOpened) { openBlock('reasoning'); }
-          send('response.reasoning_summary_text.delta', { item_id: 'rs_' + id, output_index: outIdx, delta: d.reasoning });
+          const r = openReasoningItem();
+          send('response.reasoning_summary_text.delta', { item_id: r.itemId, output_index: r.outputIndex, summary_index: 0, delta: d.reasoning });
         }
         if (d.content) {
-          if (reasoningOpened) { send('response.reasoning_summary_text.done', { item_id: 'rs_' + id, output_index: outIdx }); outIdx++; reasoningOpened = false; }
-          if (!textOpened) openBlock('text');
-          send('response.output_text.delta', { item_id: 'msg_' + id, output_index: outIdx, content_index: 0, delta: d.content });
+          const t = openTextItem();
+          send('response.output_text.delta', { item_id: t.itemId, output_index: t.outputIndex, content_index: 0, delta: d.content });
         }
         if (d.tool_calls) {
           for (const tc of d.tool_calls) {
-            send('response.output_item.added', { output_index: outIdx, item: { type: 'function_call', call_id: tc.id || 'call_x', name: tc.function?.name || '', arguments: tc.function?.arguments || '' } });
+            const idx = tc.index ?? 0;
+            let ti = toolItems.get(idx);
+            if (!ti) {
+              const itemId = 'fc_' + crypto.randomBytes(8).toString('hex');
+              ti = {
+                itemId, callId: tc.id || 'call_' + crypto.randomBytes(8).toString('hex'),
+                name: '', args: '', outputIndex: allocOutIdx(),
+              };
+              toolItems.set(idx, ti);
+              // added 事件里带上首个分片的名字（展示用）；ti.name 仍从空开始累加，避免重复
+              send('response.output_item.added', { output_index: ti.outputIndex, item: { type: 'function_call', id: itemId, call_id: ti.callId, name: tc.function?.name || '', arguments: '', status: 'in_progress' } });
+              closers.push({
+                outputIndex: ti.outputIndex, kind: 'function_call',
+                run: () => {
+                  const args = ti.args || '{}';
+                  send('response.function_call_arguments.done', { item_id: ti.itemId, output_index: ti.outputIndex, arguments: args, name: ti.name });
+                  send('response.output_item.done', { output_index: ti.outputIndex, item: { type: 'function_call', id: ti.itemId, call_id: ti.callId, name: ti.name, arguments: args, status: 'completed' } });
+                },
+              });
+            }
+            if (tc.id) ti.callId = tc.id;
+            // 与 mergeToolCalls 一致：name 分片无条件累加（同一 index 的 delta 才带 name）
+            if (tc.function?.name) ti.name += tc.function.name;
+            const argDelta = tc.function?.arguments;
+            if (argDelta) {
+              ti.args += argDelta;
+              send('response.function_call_arguments.delta', { item_id: ti.itemId, output_index: ti.outputIndex, delta: argDelta });
+            }
           }
         }
         return true;
       }, (u) => Object.assign(usageAcc, u));
+
     const s = acc.state;
-    const final = buildResponseObject(id, model, { text: s.text, reasoning: s.reasoning, toolCalls: s.toolCalls, usage: usageAcc });
-    if (textOpened) send('response.output_text.done', { item_id: 'msg_' + id, output_index: outIdx, text: s.text });
+    // 按 output_index 顺序统一收尾：reasoning(0) → message/tool(…)，
+    // 保证 done 事件序列与 index 一致，严格客户端状态机不会错乱。
+    closers.sort((a, b) => a.outputIndex - b.outputIndex);
+    for (const c of closers) c.run(c.kind === 'reasoning' ? s.reasoning : s.text);
+    const fcIds = [...toolItems.entries()].sort((a, b) => a[0] - b[0]).map(([, ti]) => ({ id: ti.itemId, call_id: ti.callId }));
+    const final = buildResponseObject(id, model, { text: s.text, reasoning: s.reasoning, toolCalls: s.toolCalls, usage: usageAcc, fcIds });
     send('response.completed', { response: final });
-    sse.end();
+    sse.end({ done: false });
   } catch (err) {
     if (!sse.isClosed) {
       send('response.failed', { response: { id, error: { code: String(err.status || 500), message: err.message } } });
-      sse.end();
+      sse.end({ done: false });
     }
   }
 });

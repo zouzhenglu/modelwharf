@@ -2,6 +2,17 @@
 
 本文件记录面向用户的显著变更。版本与 git tag 一一对应；日期为 tag 创建日期。
 
+## [0.12.1] - 2026-11-04
+
+### Fixed
+- **Codex CLI 直连 Responses 协议（`wire_api = "responses"`）稳定报错 `11-128 Illegal API invocation from an unapproved channel`**：抓包 Codex 原生请求体（约 50KB）后逐字段二分定位——上游 workbuddy / workbuddyintl 的 `/v2/chat/completions` 渠道校验会拒掉大体积的 `system` / `developer` 消息（17KB 的开发者指令无论叫 `developer` 还是 `system`、无论内容是什么都必现 11-128；短 system 放行，同样内容作为 `user` 消息完全放行）。Codex CLI 原生正是用 `role: developer` 下发指令的，此前 `responsesInputToMessages` 原样保留该角色，导致直连必挂；而 ccswitch 路由模式把请求转成 `/v1/chat/completions` 时把开发者指令当 user 处理，所以一直可用。现把 `input` 里的 `developer` / `system`（及顶层 `instructions`）统一降为 `user` 前置消息，语义不丢、上游能收。已用真实 Codex CLI 直连端到端验证（出字、无 Reconnecting）
+- **Responses / Anthropic 多轮工具历史丢失（agent 循环断链）**：`responses.js` 把历史 `function_call` / `function_call_output` 的 `tool_calls` / `tool_call_id` 塞进 `raw` 子对象（provider 只读顶层，静默丢弃）；`anthropic.js` 把 `tool_use` 降级成纯文本、`tool_result` 丢了 `tool_use_id`。真实上游第二轮直接报 `tool calls and tool results do not match`。现两条链路都还原成结构化顶层字段，Claude Code / Codex 的「调用工具 → 回传结果 → 继续」循环可用
+- **Responses 流式事件不符合协议规范**：补 `event:` 行（严格按 SSE event 分发的客户端不认 data 里的 type）；工具调用分片按 index 聚合成**一个** `function_call`（`output_item.added` 一次 + `function_call_arguments.delta` 多次 + `done`），修复流式中 name 被重复累加（如 `get_timeget_time`）；补全 `output_item.added/done`、`content_part.added/done`、reasoning 生命周期，且 `output_item.done` 按 `output_index` 升序收尾；以 `response.completed` 结束
+- **Anthropic / Responses 流式尾部多出发 OpenAI 的 `data: [DONE]`**：`sse.end({done:false})`，两条链路现在分别以 `message_stop` / `response.completed` 收尾
+- **workbuddy 上游要求首条消息为 system prompt**（否则 400 `11-128 first message is not system prompt`）：缺 system 时补一条最小默认 system；历史 `assistant.tool_calls` 的 `content` 强制为字符串。`workbuddyintl` 复用同一 `chat()` 同样受益
+- `config.js` 版本号与 `package.json` 对齐（此前 `/health` 报 0.11.0）
+- 补充回归测试：三协议多轮工具历史结构化、Responses 流式事件格式/工具聚合/done 顺序、Anthropic 流式无 `[DONE]`、developer 指令映射；并把 `qwen-tools.test.js` 纳入 `npm test`
+
 ## [0.12.0] - 2026-10-25
 
 ### Added

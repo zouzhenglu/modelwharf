@@ -336,22 +336,33 @@ module.exports = {
   async *chat({ account, upstreamModel, messages, tools, params, signal, onUsage }) {
     const token = await ensureToken(account);
     const convId = crypto.randomUUID();
+    const mapped = messages.map(m => {
+      const out = { role: m.role === 'tool' ? 'tool' : m.role };
+      // vision: OpenAI-style image_url parts pass through directly (upstream is OpenAI-shaped)
+      if (m.parts?.some(p => p.type === 'image_url')) {
+        out.content = m.parts.map(p => p.type === 'text'
+          ? { type: 'text', text: p.text }
+          : { type: 'image_url', image_url: { url: p.url } });
+      } else if (m.role === 'assistant' && m.tool_calls?.length) {
+        // 历史里的工具调用：上游要求 content 是字符串，不能是 null
+        out.content = typeof m.text === 'string' ? m.text : '';
+      } else {
+        out.content = m.text ?? '';
+      }
+      if (m.tool_calls) out.tool_calls = m.tool_calls;
+      if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
+      return out;
+    });
+    // 该上游要求首条消息必须是 system prompt（否则 400 code:11-128
+    // "first message is not system prompt"）。Claude Code / Codex 一般自带 system，
+    // 但裸请求 / 只带 messages 的客户端会失败——统一补一条最小 system 兜底，
+    // 不改变已带 system 的请求。workbuddyintl 复用本 chat() 同样受益。
+    if (!mapped.length || mapped[0].role !== 'system') {
+      mapped.unshift({ role: 'system', content: 'You are a helpful assistant.' });
+    }
     const body = {
       model: upstreamModel,
-      messages: messages.map(m => {
-        const out = { role: m.role === 'tool' ? 'tool' : m.role };
-        // vision: OpenAI-style image_url parts pass through directly (upstream is OpenAI-shaped)
-        if (m.parts?.some(p => p.type === 'image_url')) {
-          out.content = m.parts.map(p => p.type === 'text'
-            ? { type: 'text', text: p.text }
-            : { type: 'image_url', image_url: { url: p.url } });
-        } else {
-          out.content = m.text ?? '';
-        }
-        if (m.tool_calls) out.tool_calls = m.tool_calls;
-        if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
-        return out;
-      }),
+      messages: mapped,
       stream: true,
       stream_options: { include_usage: true },
       ...(params.max_tokens ? { max_tokens: params.max_tokens } : {}),

@@ -22,8 +22,13 @@ function sseInit(res) {
     },
     // OpenAI-style chunk
     chunk(obj) { return this.send(null, obj); },
-    end() {
-      if (!closed) { res.write('data: [DONE]\n\n'); res.end(); }
+    // done=false 用于 Anthropic/Responses 协议：它们各自以 message_stop /
+    // response.completed 收尾，不应再出现 OpenAI 的 [DONE] 哨兵。
+    end(opts = {}) {
+      if (!closed) {
+        if (opts.done !== false) res.write('data: [DONE]\n\n');
+        res.end();
+      }
       closed = true;
     },
     raw(str) { if (!closed) res.write(str); },

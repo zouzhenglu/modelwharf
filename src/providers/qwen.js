@@ -16,6 +16,7 @@
  */
 const { httpJson, httpRequest, config, logger } = require('../utils/http');
 const { sseParse } = require('../utils/sse');
+const { DSMLStreamFilter, newToolCallId, qwenToolDoc, mapQwenToolMessage } = require('../utils/dsml');
 const crypto = require('crypto');
 
 const BASE = 'https://chat.qwen.ai';
@@ -36,15 +37,24 @@ function headers(account, extra = {}) {
   };
 }
 
-/** fold multi-turn history into the JSONL envelope upstream requires (single user message) */
-function foldHistory(messages, model, imageUrls = []) {
+/** fold multi-turn history into the JSONL envelope upstream requires (single user message).
+ *  tool_calls / tool 消息按 Qwen 原生 XML 协议回填，工具清单作为协议说明前置。 */
+function foldHistory(messages, model, imageUrls = [], tools = null, useTools = false) {
   const last = messages[messages.length - 1];
-  let content = last?.text || '';
+  const lastMapped = mapQwenToolMessage(last);
+  const content = lastMapped ? lastMapped.content : (last?.text || '');
+  const doc = useTools ? qwenToolDoc(tools) : '';
+  const withDoc = (text) => (doc ? doc + '\n\n' + text : text);
   if (messages.length <= 1) {
-    return { text: content, images: imageUrls, feature: { thinking_enabled: true } };
+    return { text: withDoc(content), images: imageUrls, feature: { thinking_enabled: true } };
   }
-  const history = messages.slice(0, -1).map(m => ({ role: m.role, content: m.text || '' }));
-  const lines = ['# Conversation history (JSONL)'];
+  const history = messages.slice(0, -1).map(m => {
+    const mapped = mapQwenToolMessage(m);
+    return mapped
+      ? { role: mapped.role, content: mapped.content }
+      : { role: m.role, content: m.text || '' };
+  });
+  const lines = [...(doc ? [doc, ''] : []), '# Conversation history (JSONL)'];
   for (const h of history) lines.push(JSON.stringify(h));
   lines.push('# Current message');
   lines.push(JSON.stringify({ role: 'user', content }));
@@ -134,13 +144,15 @@ module.exports = {
     }
   },
 
-  async *chat({ account, upstreamModel, messages, params, signal, onUsage }) {
+  async *chat({ account, upstreamModel, messages, tools, params, signal, onUsage }) {
     const token = await ensureToken(account);
     const chatId = crypto.randomUUID().replace(/-/g, '');
     // collect images from the last user message (vision models only)
     const lastUser = [...messages].reverse().find(m => m.role === 'user');
     const imageUrls = (lastUser?.parts || []).filter(p => p.type === 'image_url').map(p => p.url);
-    const folded = foldHistory(messages, upstreamModel, imageUrls);
+    // chat.qwen.ai 没有可用的原生 tools 通道：工具清单注入文本，响应侧解析 Qwen XML 调用
+    const useTools = Array.isArray(tools) && tools.length > 0 && params.tool_choice !== 'none';
+    const folded = foldHistory(messages, upstreamModel, imageUrls, tools, useTools);
     // upstream requires a pre-created chat id via /api/v2/chats/new; many deployments accept a fresh id — create properly:
     try {
       await httpJson(`${BASE}/api/v2/chats/new?chat_id=${chatId}`, {
@@ -188,6 +200,16 @@ module.exports = {
       const text = await resp.body.text().catch(() => '');
       throw Object.assign(new Error(`qwen ${resp.statusCode}: ${text.slice(0, 300)}`), { status: resp.statusCode });
     }
+    // 正文里的 <tool_call> 块在流式增量里解析成 OpenAI tool_calls（Qwen 训练格式；
+    // 请求不带 tools 时模型也会自发输出，裸透传就是标签汤）
+    const filter = new DSMLStreamFilter(tools);
+    let callIndex = 0, finishSent = false;
+    const emitCall = function* ({ name, arguments: args }) {
+      const id = newToolCallId();
+      yield JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: callIndex, id, type: 'function', function: { name, arguments: '' } }] } }] });
+      yield JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: callIndex, function: { name: '', arguments: args } }] } }] });
+      callIndex++;
+    };
     for await (const { data } of sseParse(resp.body)) {
       if (data === '[DONE]') break;
       let j; try { j = JSON.parse(data); } catch { continue; }
@@ -199,7 +221,27 @@ module.exports = {
       const choice = j.choices?.[0];
       if (choice?.delta?.role === 'function') continue;
       if (j.usage) onUsage?.({ input_tokens: j.usage.input_tokens ?? j.usage.prompt_tokens, output_tokens: j.usage.output_tokens ?? j.usage.completion_tokens });
-      yield JSON.stringify(j);
+      if (!choice) { yield JSON.stringify(j); continue; }
+      const d = choice.delta || {};
+      if (d.reasoning_content) {
+        yield JSON.stringify({ ...j, choices: [{ ...choice, delta: { reasoning_content: d.reasoning_content } }] });
+      }
+      if (d.tool_calls?.length) {
+        yield JSON.stringify({ ...j, choices: [{ ...choice, delta: { tool_calls: d.tool_calls } }] });
+      }
+      if (typeof d.content === 'string' && d.content) {
+        const { content, calls } = filter.push(d.content);
+        if (content) yield JSON.stringify({ ...j, choices: [{ ...choice, delta: { content } }] });
+        for (const call of calls) yield* emitCall(call);
+      }
+      if (choice.finish_reason) {
+        finishSent = true;
+        yield JSON.stringify({ ...j, choices: [{ ...choice, delta: {}, finish_reason: filter.sawCalls ? 'tool_calls' : choice.finish_reason }] });
+      }
     }
+    const tail = filter.flush();
+    if (tail.content) yield JSON.stringify({ choices: [{ delta: { content: tail.content } }] });
+    for (const call of tail.calls) yield* emitCall(call);
+    if (filter.sawCalls && !finishSent) yield JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] });
   },
 };

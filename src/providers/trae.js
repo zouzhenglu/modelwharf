@@ -294,8 +294,8 @@ module.exports = {
     const token = await ensureToken(account);
     // 上游没有原生 tools 通道，且对 OpenAI 形态的 tool_calls/tool 消息一律拒绝
     // （legacy function_call -> 4027，现代 tool_calls -> 2001 proto 错误）：
-    // 统一走文本工具协议——工具清单注入提示词、历史工具消息转 DSML 文本/观察文本、
-    // 响应侧把正文 DSML 块解析回结构化 tool_calls
+    // 统一走文本工具协议——工具清单注入提示词、历史工具消息转文本/观察文本、
+    // 响应侧把正文工具块解析回结构化 tool_calls（DSML / Qwen XML / V3.1 特殊 token 都认）
     const useTools = Array.isArray(tools) && tools.length > 0 && params.tool_choice !== 'none';
     const hasToolHistory = messages.some(m => m.tool_calls?.length || m.role === 'tool');
     const conv = [

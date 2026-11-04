@@ -680,7 +680,8 @@ module.exports = {
     const userMsg = [...messages].reverse().find(m => m.role === 'user');
     const lastUserParts = userMsg?.parts;
     // 上游没有原生 tools 字段：带 tools 的请求走文本工具协议——提示词注入工具清单，
-    // 历史里的 tool_calls/tool 消息转成文本（DSML 协议），响应侧再把 DSML 解析回 tool_calls
+    // 历史里的 tool_calls/tool 消息转成文本，响应侧再把工具块解析回 tool_calls
+    // （DSML / Qwen XML / V3.1 特殊 token 都认）
     const useTools = Array.isArray(tools) && tools.length > 0 && params.tool_choice !== 'none';
     const toWire = (m) => {
       const out = { role: m.role, content: m.text ?? '' };
