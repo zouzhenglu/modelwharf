@@ -158,7 +158,7 @@ function cosyBearer(account, { path, bodyObj, accept, modelKey } = {}) {
 async function exchangePAT(account) {
   const c = account.credentials;
   const pat = c.pat || '';
-  if (!pat) throw Object.assign(new Error('Qoder 聊天/在线目录需要 PAT：客户端 → 设置 → 集成/Integrations 创建（pt- 开头）'), { status: 401 });
+  if (!pat) throw Object.assign(new Error('Qoder 聊天/在线目录需要 PAT：浏览器打开 qoder.com/account/integrations → Personal Access Tokens 创建（pt- 开头）'), { status: 401 });
   const { httpJson } = require('../utils/http');
   const { db } = require('../store');
   const { signatureHeaders, qoderEncode } = require('../utils/cosy');
@@ -220,8 +220,8 @@ function ensureSession(account) {
   if (cached && !expired) return cached;
   if (c.pat) return exchangePAT(account);
   const { db } = require('../store');
-  db.prepare("UPDATE accounts SET status='invalid', status_message=? WHERE id=?").run('缺少 PAT：聊天通道需要 pt- 令牌（客户端 → 设置 → 集成 创建后填入）', account.id);
-  throw Object.assign(new Error('Qoder 聊天/在线目录需要 PAT（pt-）：客户端 → 设置 → 集成/Integrations 创建后填入账号'), { status: 401 });
+  db.prepare("UPDATE accounts SET status='invalid', status_message=? WHERE id=?").run('缺少 PAT：聊天通道需要 pt- 令牌（qoder.com/account/integrations → Personal Access Tokens 创建后填入）', account.id);
+  throw Object.assign(new Error('Qoder 聊天/在线目录需要 PAT（pt-）：qoder.com/account/integrations → Personal Access Tokens 创建后填入账号'), { status: 401 });
 }
 
 /**
@@ -277,7 +277,7 @@ function scanLocal(regionFilter = null) {
   const home = os.homedir();
   const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
   const usable = (c) => c.pat || String(c.securityOauthToken || '').startsWith('pt-');
-  const noPatHint = (r) => `${REGIONS[r].scanLabel}（本机登录态无 PAT，聊天不可用；在客户端 设置 → 集成 创建 pt- PAT 后到面板手动添加）`;
+  const noPatHint = (r) => `${REGIONS[r].scanLabel}（本机登录态无 PAT，聊天不可用；浏览器打开 qoder.com/account/integrations → Personal Access Tokens 创建 pt- PAT 后到面板手动添加）`;
 
   // 1) 桌面端（国内版 + 国际版各自独立安装、独立登录）
   for (const { dir, region } of DESKTOP_DIRS) {
@@ -340,12 +340,12 @@ module.exports = {
   importLocal: true,
   region: 'intl',
   credFields: [
-    { name: 'pat', label: 'PAT（推荐，客户端 → 设置 → 集成/Integrations 生成）', secret: true, placeholder: 'pt-...' },
+    { name: 'pat', label: 'PAT（推荐，qoder.com/account/integrations → Personal Access Tokens 创建）', secret: true, placeholder: 'pt-...' },
     { name: 'securityOauthToken', label: 'securityOauthToken（或 jobToken）', secret: true },
     { name: 'region', label: '区域', placeholder: 'intl（默认）或 cn' },
     { name: 'deviceToken', label: '机器指纹 Cosy-MachineToken（签到需要，可选）', secret: true },
   ],
-  docs: '推荐用 PAT：Qoder 客户端 → 设置/账号 → Integrations 创建 Personal Access Token（pt- 开头）。也可「导入本机登录」自动读取本机客户端凭证。',
+  docs: '推荐用 PAT：浏览器打开 https://qoder.com/account/integrations（国内 https://qoder.com.cn/account/integrations）→ Integrations 页的 Personal Access Tokens / 访问令牌 → New Token，创建 pt- 令牌。桌面端 Settings → Integrations 是 Hooks/Agent 等，不含 PAT。也可「导入本机登录」自动读取本机客户端凭证。',
 
   // display -> internal mapping (from qoder2api research)
   _modelMap: {

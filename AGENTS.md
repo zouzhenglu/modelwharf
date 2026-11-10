@@ -170,7 +170,7 @@ curl -s -X POST http://localhost:8317/admin/api/accounts \
 |---|---|---|
 | `trae` | `token`（JWT）、`refreshToken`?、`region`? | ① 扫描（A）② 读 `%APPDATA%/Trae CN/User/globalStorage/storage.json` 里 `"iCubeAuthInfo://icube.cloudide"` 的值 ③ 抓 IDE 请求头 `Authorization` |
 | `workbuddy` / `workbuddyintl` | `token`、`refreshToken`?、`userId`?、`region`? | ① 授权登录（B，国内/国际版各自的通道）② 扫描（A，客户端 `auth.domain` 为 workbuddy.ai/codebuddy.ai 的登录态自动挂国际版通道）③ 读 `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\*.info` ④ 抓包对应域名的 `Authorization`。国内版挂 `workbuddy`，国际版挂 `workbuddyintl`（无积分/签到，账单接口对插件 token 不可用） |
-| `qoder` / `qodercn` | `pat`（`pt-`开头）、`region`? | ① **PAT 最稳**：Qoder 客户端 → 设置 → Integrations 创建 ② 扫描（A）。国内版账号挂 `qodercn`，国际版挂 `qoder` |
+| `qoder` / `qodercn` | `pat`（`pt-`开头）、`region`? | ① **PAT 最稳**：浏览器打开 `https://qoder.com/account/integrations`（国内 `https://qoder.com.cn/account/integrations`）→ Personal Access Tokens / 访问令牌 → New Token 创建（桌面端 Settings → Integrations 是 Hooks/Agent 等，不含 PAT）② 扫描（A）。国内版账号挂 `qodercn`，国际版挂 `qoder` |
 | `qwen` | `token` 或 `email`+`password` | ① 填邮箱+密码，网关自动登录续期（最省心）② 浏览器登录 chat.qwen.ai → Cookie 里 `token` 字段 |
 | `qwenwork` | `token`、`refreshToken`?、`uid`（**必需**） | ① 授权登录（B）② 扫描（A，会自动带 uid）③ 手动：token+uid（uid 在 `~/.qoderworkcn` 或客户端数据目录） |
 | 官方 24 家（`zhipu`/`moonshot`/`siliconflow`/`deepseek`/…） | `apiKey` | 用户到对应官网注册拿 key，即用。`GET /admin/api/providers` 查全部 id 与字段定义（`credFields`） |

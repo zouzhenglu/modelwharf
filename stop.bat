@@ -4,7 +4,7 @@ setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 title modelwharf - stop
 
-rem 兼容旧/新环境变量与旧 PID 文件名（dsh.pid）
+rem Compatible old/new env vars and legacy PID file (dsh.pid)
 set "PORT=8317"
 if defined WH_PORT set "PORT=%WH_PORT%"
 if defined DSH_PORT set "PORT=%DSH_PORT%"
@@ -13,14 +13,14 @@ if not exist "%PIDFILE%" set "PIDFILE=%~dp0data\dsh.pid"
 
 set "TARGET="
 
-rem ---- 1) 优先用 PID 文件（用 for /f 读取，避免 if 块内 %PID% 提前展开）----
+rem ---- 1) Prefer PID file (read with for /f so %PID% is not expanded too early) ----
 if exist "%PIDFILE%" (
   for /f "usebackq delims=" %%P in ("%PIDFILE%") do set "TARGET=%%P"
   if defined TARGET (
     echo [modelwharf] stopping PID !TARGET! ^(from %PIDFILE%^) ...
     taskkill /F /PID !TARGET! >nul 2>&1
     if errorlevel 1 (
-      echo [modelwharf] PID !TARGET! 不存在，改按进程查找...
+      echo [modelwharf] PID !TARGET! not found, falling back to process lookup...
       set "TARGET="
     ) else (
       del "%PIDFILE%" >nul 2>&1
@@ -29,31 +29,31 @@ if exist "%PIDFILE%" (
   )
 )
 
-rem ---- 2) 按命令行查找 node src\server.js ----
-rem 不用 netstat：部分 Windows 环境 netstat 不显示 LISTENING，查不到端口占用者。
-echo [modelwharf] PID 文件无效，按进程查找 node src\server.js ...
+rem ---- 2) Fall back to command line node src\server.js ----
+rem Do not use netstat: some Windows setups do not show LISTENING, so the port owner is missed.
+echo [modelwharf] PID file invalid, looking up node src\server.js ...
 for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -like '*src\server.js*' }).ProcessId"`) do set "TARGET=%%P"
 if defined TARGET (
   echo [modelwharf] stopping PID !TARGET! ...
   taskkill /F /T /PID !TARGET! >nul 2>&1
   if errorlevel 1 (
-    echo [modelwharf] taskkill 失败，尝试直接停止进程...
+    echo [modelwharf] taskkill failed, trying to stop the process directly...
     powershell -NoProfile -Command "Stop-Process -Id !TARGET! -Force -ErrorAction SilentlyContinue"
   )
   del "%PIDFILE%" >nul 2>&1
   goto :stopped
 )
 
-rem ---- 3) 实在找不到，也别默默闪退 ----
-echo [modelwharf] 没有找到运行中的网关进程（端口 %PORT% 可能已被其它程序占用，或网关未启动）。
+rem ---- 3) If nothing is found, do not exit silently ----
+echo [modelwharf] no running gateway process found (port %PORT% may be occupied by another program, or the gateway is not running).
 echo.
-echo 按任意键关闭本窗口...
+echo Press any key to close this window...
 pause >nul
 exit /b 1
 
 :stopped
 echo [modelwharf] stopped.
 echo.
-echo 按任意键关闭本窗口...
+echo Press any key to close this window...
 pause >nul
 exit /b 0

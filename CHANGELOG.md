@@ -9,6 +9,8 @@
 - **Codex 并行工具调用导致 workbuddy 400 code:11148**：Responses 历史里的连续 `function_call` 此前被转成多条 assistant 消息（`assistant(call1) → assistant(call2) → tool(...)`），而上游要求 tool 消息紧跟携带全部 tool_calls 的那条 assistant。现在连续 function_call 合并进同一条 assistant 消息；engine 对 OpenAI / Anthropic / Responses 三条链路统一合并相邻 assistant 的 tool_calls，也兼容把一轮拆成多条 assistant 的客户端
 - **Claude Code 并行工具结果丢失**：Anthropic 一条 user 消息里的多个 `tool_result` 此前只保留最后一个，现在每个都还原成独立的 tool 消息（tool_call_id 对齐），同消息里的正文保留为后续 user 消息
 - **模型上下文窗口元数据偏大**：workbuddy `/v3/config` 同时返回名义 `maxInputTokens` 与聊天通道 `maxAllowedSize` 时此前优先取前者（如 `deepseek-v4.1-flash` 标 1M，实际超过 100k 即报 11115）；改为取较小值。`/v1/models`（OpenAI / Anthropic / Responses）新增 `context_window` / `max_output_tokens` 字段，客户端可据此提前压缩上下文
+- **Windows 启停脚本在中文系统下解析错乱**：UTF-8 中文注释在 GBK 代码页下被 cmd 误解，注释里的 `node` 会被当成命令执行（启动时报 `Cannot find module ...\的`）；三个 `.bat` 的注释与提示改为纯 ASCII，`stop.bat` / `start-hidden.bat` 实测可正常停止与拉起
+- **Qoder PAT 文档入口错误**：桌面端 Settings → Integrations 实际是 Hooks / Agents / Computer control 等，不提供 PAT；PAT 要打开网页版 `https://qoder.com/account/integrations`（国内 `https://qoder.com.cn/account/integrations`），在 **Personal Access Tokens / 访问令牌** 区域点 New Token 创建。`AGENTS.md` 与插件提示已更正
 
 ### Tests
 - 新增回归：请求级 400 / 5xx 上下文错误不冷却账号、Responses 并行 `function_call` 合并、Anthropic 多 `tool_result` 保留、OpenAI 拆分 assistant 合并（72 项端到端全绿）；并用真实 workbuddy / qodercn 上游验证并行工具历史请求返回 200

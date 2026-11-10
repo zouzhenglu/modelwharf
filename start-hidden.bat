@@ -3,10 +3,10 @@ chcp 65001 >nul
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
-rem modelwharf 隐藏启动（纯 bat，无黑窗口）。
-rem 原理：conhost.exe --headless 创建一个不显示窗口的控制台来承载 node，
-rem 因此 node 的 MainWindowHandle = 0，登录时不会弹出黑框。
-rem 若系统不支持 --headless，则退回 start /min（最小化窗口）。
+rem modelwharf hidden start (pure batch, no console window).
+rem How: conhost.exe --headless creates a hidden console to host node,
+rem so node MainWindowHandle = 0 and no black window appears at logon.
+rem If the system does not support --headless, fall back to start /min.
 set "NODE_EXE=D:\Program Files\nodejs\node.exe"
 if not exist "%NODE_EXE%" set "NODE_EXE=node"
 set "CONHOST=%SystemRoot%\System32\conhost.exe"
