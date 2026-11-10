@@ -135,7 +135,10 @@ for (const [id, label, baseUrl, homepage, models, docs] of VENDORS) {
         model: opts.upstreamModel,
         messages: opts.messages.map(m => {
           const out = { role: m.role };
-          if (m.parts?.some(p => p.type === 'image_url')) {
+          // 历史工具调用：content 必须是字符串；优先于 vision 判断
+          if (m.role === 'assistant' && m.tool_calls?.length) {
+            out.content = typeof m.text === 'string' ? m.text : '';
+          } else if (m.parts?.some(p => p.type === 'image_url')) {
             out.content = m.parts.map(p => p.type === 'text'
               ? { type: 'text', text: p.text }
               : { type: 'image_url', image_url: { url: p.url } });

@@ -32,6 +32,31 @@ function normalizeMessages(openaiMessages = []) {
 }
 
 /**
+ * 合并相邻的 assistant 消息（至少一条带 tool_calls）。
+ *
+ * Responses 协议的历史里，并行工具调用是连续的 function_call item；有些 OpenAI
+ * 客户端也会把同一轮拆成多条 assistant。上游（workbuddy 等）要求 tool 消息紧跟
+ * 携带全部 tool_calls 的那条 assistant，否则报 "tool calls and tool results do not
+ * match"。合并后 text 按行拼接，tool_calls 保持原顺序。
+ */
+function coalesceAssistantToolCalls(messages = []) {
+  const out = [];
+  for (const m of messages) {
+    const prev = out[out.length - 1];
+    if (m.role === 'assistant' && prev?.role === 'assistant' && (m.tool_calls?.length || prev.tool_calls?.length)) {
+      const merged = { ...prev };
+      if (m.text) merged.text = prev.text ? `${prev.text}\n${m.text}` : m.text;
+      if (m.parts?.length) merged.parts = [...(prev.parts || []), ...m.parts];
+      if (m.tool_calls?.length) merged.tool_calls = [...(prev.tool_calls || []), ...m.tool_calls];
+      out[out.length - 1] = merged;
+    } else {
+      out.push(m);
+    }
+  }
+  return out;
+}
+
+/**
  * Model-name suffix conventions (思考深度控制):
  *   <model>-think        -> reasoning enabled, medium effort
  *   <model>-think-high   -> reasoning enabled, high effort
@@ -132,4 +157,4 @@ function estimateAnthropicInputTokens(body = {}) {
   return total;
 }
 
-module.exports = { normalizeMessages, parseModelSuffix, reasoningParamsFor, reasoningFromThinking, estimateTokens, estimateAnthropicInputTokens };
+module.exports = { normalizeMessages, coalesceAssistantToolCalls, parseModelSuffix, reasoningParamsFor, reasoningFromThinking, estimateTokens, estimateAnthropicInputTokens };

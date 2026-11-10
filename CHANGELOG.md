@@ -2,6 +2,17 @@
 
 本文件记录面向用户的显著变更。版本与 git tag 一一对应；日期为 tag 创建日期。
 
+## [0.12.3] - 2026-11-10
+
+### Fixed
+- **一次超长请求把整池账号冷却，Codex / Claude Code 随后全线 503**：workbuddy 的 `11115 prompt is too long`、`11148 tool calls and tool results do not match`，以及 qoder 的 `Prompt exceeds max length` 等确定性请求错误此前按账号故障冷却 30s；客户端重试会依次把每个平台的账号打进冷却，最终所有请求都返回 `no healthy account available for provider ...`。现在 4xx 请求错误（400/404/409/413/415/422）与上下文/工具历史类错误不再冷却账号，qoder 包在 5xx 业务体里的同类错误映射回 400；客户端主动断开也不计失败
+- **Codex 并行工具调用导致 workbuddy 400 code:11148**：Responses 历史里的连续 `function_call` 此前被转成多条 assistant 消息（`assistant(call1) → assistant(call2) → tool(...)`），而上游要求 tool 消息紧跟携带全部 tool_calls 的那条 assistant。现在连续 function_call 合并进同一条 assistant 消息；engine 对 OpenAI / Anthropic / Responses 三条链路统一合并相邻 assistant 的 tool_calls，也兼容把一轮拆成多条 assistant 的客户端
+- **Claude Code 并行工具结果丢失**：Anthropic 一条 user 消息里的多个 `tool_result` 此前只保留最后一个，现在每个都还原成独立的 tool 消息（tool_call_id 对齐），同消息里的正文保留为后续 user 消息
+- **模型上下文窗口元数据偏大**：workbuddy `/v3/config` 同时返回名义 `maxInputTokens` 与聊天通道 `maxAllowedSize` 时此前优先取前者（如 `deepseek-v4.1-flash` 标 1M，实际超过 100k 即报 11115）；改为取较小值。`/v1/models`（OpenAI / Anthropic / Responses）新增 `context_window` / `max_output_tokens` 字段，客户端可据此提前压缩上下文
+
+### Tests
+- 新增回归：请求级 400 / 5xx 上下文错误不冷却账号、Responses 并行 `function_call` 合并、Anthropic 多 `tool_result` 保留、OpenAI 拆分 assistant 合并（72 项端到端全绿）；并用真实 workbuddy / qodercn 上游验证并行工具历史请求返回 200
+
 ## [0.12.2] - 2026-11-10
 
 ### Fixed

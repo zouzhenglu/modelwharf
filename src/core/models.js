@@ -159,12 +159,12 @@ function stripRateTag(name) {
 /** public model list for clients: regular enabled models + virtual models (免费模型排最前) */
 function listPublicModels() {
   const regular = db.prepare(`
-    SELECT m.public_name, m.provider_id, m.upstream_model, m.multiplier, m.is_free, m.ctx_window,
+    SELECT m.public_name, m.provider_id, m.upstream_model, m.multiplier, m.is_free, m.ctx_window, m.max_output,
            (SELECT COUNT(*) FROM accounts a WHERE a.provider_id=m.provider_id AND a.enabled=1 AND a.status NOT IN ('invalid','banned')) AS accounts
     FROM models m WHERE m.enabled=1
     ORDER BY m.is_free DESC, m.public_name`).all().filter(m => m.accounts > 0);
   const virtual = db.prepare('SELECT * FROM virtual_models WHERE enabled=1').all()
-    .map(v => ({ public_name: v.public_name, provider_id: 'virtual', upstream_model: null, multiplier: 1, is_free: 0, ctx_window: null, accounts: 1, virtual: 1 }));
+    .map(v => ({ public_name: v.public_name, provider_id: 'virtual', upstream_model: null, multiplier: 1, is_free: 0, ctx_window: null, max_output: null, accounts: 1, virtual: 1 }));
   return [...regular, ...virtual];
 }
 

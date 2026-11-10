@@ -35,7 +35,7 @@ router.get('/models', (req, res) => {
   const list = modelsCore.listPublicModels();
   res.json({ data: list.map(m => {
     const id = modelsCore.decoratePublicModel(m.public_name, m);
-    return { id, type: 'model', display_name: id };
+    return { id, type: 'model', display_name: id, context_window: m.ctx_window ?? null, max_output_tokens: m.max_output ?? null };
   }), has_more: false });
 });
 
@@ -61,7 +61,7 @@ function toCanonical(body) {
     // content blocks
     const parts = [];
     const toolUses = [];
-    let toolResult = null;
+    const toolResults = [];
     for (const b of m.content || []) {
       if (b.type === 'text') parts.push({ type: 'text', text: b.text });
       else if (b.type === 'image') parts.push({ type: 'image_url', url: b.source?.data ? `data:${b.source.media_type};base64,${b.source.data}` : b.source?.url });
@@ -71,12 +71,20 @@ function toCanonical(body) {
         // 否则上游收到「一句纯文本 + 孤儿 tool 结果」会报
         // "tool calls and tool results do not match"（Claude Code 第二轮即断链）。
         toolUses.push({ id: b.id || `toolu_${crypto.randomBytes(8).toString('hex')}`, type: 'function', function: { name: b.name, arguments: typeof b.input === 'string' ? b.input : JSON.stringify(b.input ?? {}) } });
-      } else if (b.type === 'tool_result') toolResult = b;
+      } else if (b.type === 'tool_result') toolResults.push(b);
     }
-    if (toolResult) {
-      const inner = typeof toolResult.content === 'string' ? toolResult.content
-        : (toolResult.content || []).map(c => c.text || '').join('\n');
-      msgs.push({ role: 'tool', text: inner, tool_call_id: toolResult.tool_use_id });
+    if (toolResults.length) {
+      // Claude Code 并行工具调用时，一个 user 消息里会带多个 tool_result。
+      // 每个结果都要单独成一条 tool 消息（tool_call_id 对齐），只取最后一个会丢结果、
+      // 上游直接报 "tool calls and tool results do not match"。
+      for (const tr of toolResults) {
+        const inner = typeof tr.content === 'string' ? tr.content
+          : (tr.content || []).map(c => c.text || '').join('\n');
+        msgs.push({ role: 'tool', text: inner, tool_call_id: tr.tool_use_id });
+      }
+      // 同一条消息里可能还有正文（tool_result 之外的 text），保留为后续 user 消息
+      const text = parts.filter(p => p.type === 'text').map(p => p.text).join('\n');
+      if (text) msgs.push({ role: 'user', text });
     } else if (toolUses.length) {
       msgs.push({
         role: m.role, text: parts.filter(p => p.type === 'text').map(p => p.text).join('\n'),

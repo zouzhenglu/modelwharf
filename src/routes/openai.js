@@ -57,14 +57,14 @@ router.get('/models', (req, res) => {
   const allowed = req.apikey?.allowed_models || '*';
   const data = list
     .filter(m => allowed === '*' || allowed.split(',').map(s => s.trim()).includes(m.public_name))
-    .map(m => ({ id: modelsCore.decoratePublicModel(m.public_name, m), object: 'model', created: Math.floor(Date.now() / 1000), owned_by: m.provider_id, x_free: !!m.is_free, x_multiplier: m.multiplier ?? null }));
+    .map(m => ({ id: modelsCore.decoratePublicModel(m.public_name, m), object: 'model', created: Math.floor(Date.now() / 1000), owned_by: m.provider_id, x_free: !!m.is_free, x_multiplier: m.multiplier ?? null, context_window: m.ctx_window ?? null, max_output_tokens: m.max_output ?? null }));
   res.json({ object: 'list', data });
 });
 router.get('/models/:id', (req, res) => {
   const clean = modelsCore.stripRateTag(req.params.id);
   const m = modelsCore.listPublicModels().find(x => x.public_name === clean || x.public_name === req.params.id);
   if (!m) return res.status(404).json({ error: { message: 'model not found', type: 'invalid_request_error' } });
-  res.json({ id: modelsCore.decoratePublicModel(m.public_name, m), object: 'model', created: 0, owned_by: m.provider_id, x_free: !!m.is_free, x_multiplier: m.multiplier ?? null });
+  res.json({ id: modelsCore.decoratePublicModel(m.public_name, m), object: 'model', created: 0, owned_by: m.provider_id, x_free: !!m.is_free, x_multiplier: m.multiplier ?? null, context_window: m.ctx_window ?? null, max_output_tokens: m.max_output ?? null });
 });
 
 // 客户端可透传给 OpenAI 兼容上游的采样参数（逆向平台插件各自白名单，多收无害）

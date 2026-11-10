@@ -11,7 +11,8 @@
 const registry = require('./registry');
 const accounts = require('./accounts');
 const models = require('./models');
-const { parseModelSuffix, reasoningParamsFor } = require('./messages');
+const { parseModelSuffix, reasoningParamsFor, coalesceAssistantToolCalls } = require('./messages');
+const { isContextOrToolRequestError } = require('./upstream-errors');
 const logger = require('../logger');
 const config = require('../config');
 const { db } = require('../store');
@@ -97,6 +98,13 @@ async function runChat(opts, onEvent, onUsage) {
   // gets canonical messages with .text set
   if (opts.messages?.length && opts.messages[0].text === undefined && opts.messages[0].content !== undefined) {
     opts = { ...opts, messages: require('./messages').normalizeMessages(opts.messages) };
+  }
+  // 并行工具调用：部分客户端（Codex / 分片下发的 OpenAI 客户端）把一次 assistant
+  // 轮次拆成多条 assistant 消息，每条只带一个 tool_call。上游要求 tool 消息紧跟
+  // 携带全部 tool_calls 的那条 assistant 消息，否则报
+  // "tool calls and tool results do not match"。统一合并后再下发。
+  if (opts.messages?.length) {
+    opts = { ...opts, messages: coalesceAssistantToolCalls(opts.messages) };
   }
   // forceAccountId (playground per-account testing) -> concrete account object
   if (opts.forceAccountId && !opts.forceAccount) {
@@ -211,7 +219,9 @@ async function runSingle(opts, model, onEvent, onUsage, started, usagePublicMode
     return { latencyMs: latency, account, model, usage };
   } catch (err) {
     const latency = Date.now() - started;
-    const status = err.status || 502;
+    const rawStatus = err.status || 502;
+    // 上游把上下文超限/工具历史不匹配包在 5xx 里时回 400（客户端请求问题，不是网关/账号故障）
+    const status = rawStatus >= 500 && isContextOrToolRequestError(err) ? 400 : rawStatus;
     accounts.reportFailure(account.id, err);
     models.recordUsage({
       apikeyId: opts.apikeyId, providerId: model.provider_id, accountId: account.id,
@@ -309,7 +319,8 @@ async function runSingleEmbeddings(opts, model, started) {
     });
     return out;
   } catch (err) {
-    const status = err.status || 502;
+    const rawStatus = err.status || 502;
+    const status = rawStatus >= 500 && isContextOrToolRequestError(err) ? 400 : rawStatus;
     accounts.reportFailure(account.id, err);
     models.recordUsage({
       apikeyId: opts.apikeyId, providerId: model.provider_id, accountId: account.id,

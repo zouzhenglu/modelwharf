@@ -160,12 +160,16 @@ module.exports = {
       if (free) tags.push('free');
       if (raw?.reasoning?.effort) tags.push(`effort:${raw.reasoning.effort}`);
       if (raw?.vendor) tags.push('vendor:' + raw.vendor);
+      // maxInputTokens 是模型名义容量，maxAllowedSize 是聊天通道实际放行上限
+      // （实测 deepseek-v4.1-flash 名义 1M，超过 100k 直接 400 code:11115）。
+      // 取两者较小值，客户端据此提前压缩上下文。
+      const ctxSizes = raw ? [raw.maxInputTokens, raw.maxAllowedSize].map(Number).filter(n => n > 0) : [];
       models.push({
         upstream: id,
         publicName: id.toLowerCase(),
         free,
         multiplier: free ? 0 : rate,
-        ctx: raw ? (raw.maxInputTokens || raw.maxAllowedSize || null) : null,
+        ctx: ctxSizes.length ? Math.min(...ctxSizes) : null,
         maxOutput: raw?.maxOutputTokens || null,
         images: raw?.supportsImages === true,
         reasoning: !!(raw?.supportsReasoning || raw?.onlyReasoning),
@@ -338,14 +342,15 @@ module.exports = {
     const convId = crypto.randomUUID();
     const mapped = messages.map(m => {
       const out = { role: m.role === 'tool' ? 'tool' : m.role };
-      // vision: OpenAI-style image_url parts pass through directly (upstream is OpenAI-shaped)
-      if (m.parts?.some(p => p.type === 'image_url')) {
+      // 历史里的工具调用：上游要求 content 是字符串（不能是 null，也不能是 parts 数组）；
+      // 优先于 vision 判断，避免「图片 + tool_calls」的历史消息写成数组 content。
+      if (m.role === 'assistant' && m.tool_calls?.length) {
+        out.content = typeof m.text === 'string' ? m.text : '';
+      } else if (m.parts?.some(p => p.type === 'image_url')) {
+        // vision: OpenAI-style image_url parts pass through directly (upstream is OpenAI-shaped)
         out.content = m.parts.map(p => p.type === 'text'
           ? { type: 'text', text: p.text }
           : { type: 'image_url', image_url: { url: p.url } });
-      } else if (m.role === 'assistant' && m.tool_calls?.length) {
-        // 历史里的工具调用：上游要求 content 是字符串，不能是 null
-        out.content = typeof m.text === 'string' ? m.text : '';
       } else {
         out.content = m.text ?? '';
       }

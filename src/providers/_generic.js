@@ -45,8 +45,11 @@ function makeGeneric(id, label, docs, defaults = {}) {
         model: upstreamModel,
         messages: messages.map(m => {
           const out = { role: m.role };
-          // vision: parts carry images (data URLs and http URLs)
-          if (m.parts?.some(p => p.type === 'image_url')) {
+          // 历史工具调用：content 必须是字符串；优先于 vision 判断
+          if (m.role === 'assistant' && m.tool_calls?.length) {
+            out.content = typeof m.text === 'string' ? m.text : '';
+          } else if (m.parts?.some(p => p.type === 'image_url')) {
+            // vision: parts carry images (data URLs and http URLs)
             out.content = m.parts.map(p => p.type === 'text'
               ? { type: 'text', text: p.text }
               : { type: 'image_url', image_url: { url: p.url } });

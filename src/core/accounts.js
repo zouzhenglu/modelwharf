@@ -6,6 +6,7 @@
  */
 const { db } = require('../store');
 const logger = require('../logger');
+const { isRequestError } = require('./upstream-errors');
 
 const inflight = new Map();   // accountId -> count
 const cooldown = new Map();   // accountId -> unlock timestamp
@@ -78,14 +79,23 @@ function release(accountId) {
   inflight.set(accountId, Math.max(0, (inflight.get(accountId) || 1) - 1));
 }
 
-/** mark account failure -> cooldown for a while; 401/403 style errors -> invalid */
+/** mark account failure -> cooldown for a while; 401/403 style errors -> invalid
+ *  确定性请求错误（上下文超限、工具历史不匹配等）不冷却账号：同一请求重试也不会
+ *  成功，冷却只会把整个账号池熔断，后续正常请求全部 503。 */
 function reportFailure(accountId, err) {
   const status = err && err.status;
   const acct = getAccount(accountId);
   if (!acct) return;
-  if (status === 401 || status === 403) {
+  // 客户端主动断开（Codex 重连 / 用户取消）不代表账号有问题
+  if (err && (err.name === 'AbortError' || err.code === 'ABORT_ERR')) {
+    logger.warn(`account #${accountId}(${acct.provider_id}/${acct.name}) aborted by client, keeping status`);
+    return;
+  }
+  if (status === 401 || status === 403 || err?.accountStatus === 'invalid') {
     db.prepare('UPDATE accounts SET status=?, status_message=? WHERE id=?').run('invalid', `auth failed (${status})`, accountId);
     logger.warn(`account #${accountId}(${acct.provider_id}/${acct.name}) marked invalid: ${status}`);
+  } else if (isRequestError(err)) {
+    logger.warn(`account #${accountId}(${acct.provider_id}/${acct.name}) request error, keeping status: ${err.message}`);
   } else {
     const ms = Math.min(10 * 60 * 1000, 30 * 1000 * Math.pow(2, (acct._failStreak = (acct._failStreak || 0) + 1) - 1));
     cooldown.set(accountId, Date.now() + ms);

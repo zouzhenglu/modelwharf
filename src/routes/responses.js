@@ -84,16 +84,28 @@ function responsesInputToMessages(input, instructions) {
       msgs.push({ role: normalizeResponsesRole(item.role), text, parts });
     } else if (item.type === 'function_call') {
       // prior assistant tool call in history — tool_calls / tool_call_id 必须放在
-      // 规范消息的顶层（provider 只读顶层字段，塞进 raw 会被静默丢弃，导致多轮工具会话断链）
-      msgs.push({
-        role: 'assistant', text: '',
-        tool_calls: [{ id: item.call_id || item.id, type: 'function', function: { name: item.name, arguments: typeof item.arguments === 'string' ? item.arguments : JSON.stringify(item.arguments || {}) } }],
-      });
+      // 规范消息的顶层（provider 只读顶层字段，塞进 raw 会被静默丢弃，导致多轮工具会话断链）。
+      // Codex 的并行调用是连续的 function_call item：必须合并进同一条 assistant 消息，
+      // 否则会生成「assistant(call1) → assistant(call2) → tool(out1)」，workbuddy 校验
+      // 直接报 400 code:11148 "tool calls and tool results do not match"。
+      const call = {
+        id: item.call_id || item.id, type: 'function',
+        function: { name: item.name, arguments: typeof item.arguments === 'string' ? item.arguments : JSON.stringify(item.arguments || {}) },
+      };
+      const prev = msgs[msgs.length - 1];
+      if (prev?.role === 'assistant') {
+        (prev.tool_calls ||= []).push(call);
+      } else {
+        msgs.push({ role: 'assistant', text: '', tool_calls: [call] });
+      }
     } else if (item.type === 'function_call_output') {
-      msgs.push({
-        role: 'tool', text: typeof item.output === 'string' ? item.output : JSON.stringify(item.output),
-        tool_call_id: item.call_id,
-      });
+      // output 可能是字符串，也可能是 input_text/input_image 内容数组
+      const output = typeof item.output === 'string'
+        ? item.output
+        : Array.isArray(item.output)
+          ? item.output.map(o => typeof o === 'string' ? o : (o?.text ?? JSON.stringify(o))).join('\n')
+          : JSON.stringify(item.output ?? '');
+      msgs.push({ role: 'tool', text: output, tool_call_id: item.call_id });
     } else if (item.type === 'reasoning') {
       // internal reasoning echo — ignore content, it's not replayable
     }
@@ -171,7 +183,7 @@ router.get('/models', async (req, res) => {
   res.json({
     object: 'list',
     data: list.filter(m => allowed === '*' || allowed.split(',').map(s => s.trim()).includes(m.public_name))
-      .map(m => ({ id: m.public_name, object: 'model', created: Math.floor(Date.now() / 1000), owned_by: m.provider_id })),
+      .map(m => ({ id: m.public_name, object: 'model', created: Math.floor(Date.now() / 1000), owned_by: m.provider_id, context_window: m.ctx_window ?? null, max_output_tokens: m.max_output ?? null })),
   });
 });
 

@@ -154,7 +154,7 @@ async function main() {
   const mock = http.createServer((req, res) => {
     if (req.url === '/v1/models') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ data: [{ id: 'mock-model-a' }, { id: 'mock-model-b' }, { id: 'mock-echo' }, { id: 'mock-tool' }, { id: 'mock-mixed' }] }));
+      return res.end(JSON.stringify({ data: [{ id: 'mock-model-a' }, { id: 'mock-model-b' }, { id: 'mock-echo' }, { id: 'mock-tool' }, { id: 'mock-mixed' }, { id: 'mock-400' }, { id: 'mock-context' }] }));
     }
     if (req.url === '/v1/embeddings') {
       let body = '';
@@ -172,6 +172,16 @@ async function main() {
       req.on('end', () => {
         const j = JSON.parse(body || '{}');
         lastUpstreamBody = j;
+        // mock-400: 模拟 workbuddy 的确定性请求错误（上下文超长 / 工具历史不匹配）
+        if (j.model === 'mock-400') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ code: 11115, msg: 'prompt is too long: 100001 tokens > 100000 maximum', requestId: 'mock-400' }));
+        }
+        // mock-context: 模拟 qoder 把上下文超限包在 5xx 业务体里（应映射回 400）
+        if (j.model === 'mock-context') {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: { code: 1261, message: 'Prompt exceeds max length' } }));
+        }
         // mock-mixed: 同一条流里依次出现 reasoning → text → tool，验证 done 事件按 output_index 顺序收尾
         if (j.model === 'mock-mixed') {
           res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -293,6 +303,26 @@ async function main() {
     const r = await call('POST', '/v1/chat/completions', { model: 'nope', messages: [{ role: 'user', content: 'x' }] });
     assert.equal(r.status, 404);
   });
+  await t('request-level 400 does not cool the account pool', async () => {
+    // workbuddy 的 11115/11148 是请求形状问题：冷却账号会让整池 30s 不可用，
+    // 后续正常请求全部 503 "no healthy account"（Codex 里的实际故障链）。
+    const before = await call('GET', '/admin/api/accounts?provider_id=openai-compat', null, auth);
+    const acct = before.json.find(a => a.name === 'mock');
+    assert.equal(acct.status, 'active');
+    const r = await call('POST', '/v1/chat/completions', { model: 'mock-400', messages: [{ role: 'user', content: 'x' }] });
+    assert.equal(r.status, 400, r.text);
+    const after = await call('GET', '/admin/api/accounts?provider_id=openai-compat', null, auth);
+    assert.equal(after.json.find(a => a.name === 'mock').status, 'active', '400 must not cool the account');
+    // 同一账号紧接着仍能正常服务
+    const ok = await call('POST', '/v1/chat/completions', { model: 'mock-a', messages: [{ role: 'user', content: 'hi' }] });
+    assert.equal(ok.status, 200, ok.text);
+  });
+  await t('upstream 5xx wrapping context error -> 400 and account stays healthy', async () => {
+    const r = await call('POST', '/v1/chat/completions', { model: 'mock-context', messages: [{ role: 'user', content: 'x' }] });
+    assert.equal(r.status, 400, r.text);
+    const after = await call('GET', '/admin/api/accounts?provider_id=openai-compat', null, auth);
+    assert.equal(after.json.find(a => a.name === 'mock').status, 'active');
+  });
   await t('rate-tagged model id routes to base model', async () => {
     // 客户端原样回传 /v1/models 里带费率标签的 id（`mock-a ·免费`）应照常路由
     const list = await call('GET', '/v1/models');
@@ -392,6 +422,27 @@ async function main() {
     assert.equal(ms[2].role, 'tool');
     assert.equal(ms[2].tool_call_id, 'call_1');
   });
+  await t('split assistant tool_calls are coalesced into one message', async () => {
+    // 有的客户端把一轮并行调用拆成多条 assistant 消息；上游要求 tool 消息
+    // 紧跟携带全部 tool_calls 的那条 assistant，否则 400 "tool calls and tool
+    // results do not match"。
+    const r = await call('POST', '/v1/chat/completions', {
+      model: 'mock-a', messages: [
+        { role: 'user', content: 'two cities?' },
+        { role: 'assistant', content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'get_time', arguments: '{"tz":"Tokyo"}' } }] },
+        { role: 'assistant', content: null, tool_calls: [{ id: 'call_2', type: 'function', function: { name: 'get_time', arguments: '{"tz":"Paris"}' } }] },
+        { role: 'tool', tool_call_id: 'call_1', content: '12:00' },
+        { role: 'tool', tool_call_id: 'call_2', content: '05:00' },
+      ],
+      tools: [{ type: 'function', function: { name: 'get_time', description: 'd', parameters: { type: 'object', properties: { tz: { type: 'string' } } } } }],
+    });
+    assert.equal(r.status, 200, r.text);
+    const ms = lastUpstreamBody.messages;
+    const assistants = ms.filter(m => m.role === 'assistant');
+    assert.equal(assistants.length, 1, 'assistant messages not coalesced: ' + JSON.stringify(ms.map(m => m.role)));
+    assert.equal(assistants[0].tool_calls.length, 2, JSON.stringify(assistants[0]));
+    assert.equal(ms.filter(m => m.role === 'tool').length, 2);
+  });
 
   console.log('== gateway (anthropic) ==');
   await t('/v1/messages non-stream', async () => {
@@ -457,6 +508,32 @@ async function main() {
     assert.equal(ms[2].role, 'tool');
     assert.equal(ms[2].tool_call_id, 'toolu_1', 'tool_result tool_use_id lost: ' + JSON.stringify(ms[2]));
     assert.equal(ms[2].content, '12:00');
+  });
+  await t('/v1/messages parallel tool results are all preserved', async () => {
+    // Claude Code 并行工具调用：一条 user 消息里带多个 tool_result，必须每条都
+    // 变成独立的 tool 消息；只取最后一个会丢结果并触发上游 11148。
+    const r = await call('POST', '/v1/messages', {
+      model: 'mock-a', max_tokens: 100,
+      messages: [
+        { role: 'user', content: 'two cities?' },
+        { role: 'assistant', content: [
+          { type: 'tool_use', id: 'toolu_1', name: 'get_time', input: { tz: 'Tokyo' } },
+          { type: 'tool_use', id: 'toolu_2', name: 'get_time', input: { tz: 'Paris' } },
+        ] },
+        { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: 'toolu_1', content: '12:00' },
+          { type: 'tool_result', tool_use_id: 'toolu_2', content: '05:00' },
+        ] },
+      ],
+      tools: [{ name: 'get_time', description: 'd', input_schema: { type: 'object', properties: { tz: { type: 'string' } } } }],
+    });
+    assert.equal(r.status, 200, r.text);
+    const ms = lastUpstreamBody.messages;
+    const assistants = ms.filter(m => m.role === 'assistant');
+    assert.equal(assistants.length, 1, JSON.stringify(ms.map(m => m.role)));
+    assert.equal(assistants[0].tool_calls.length, 2);
+    const tools = ms.filter(m => m.role === 'tool');
+    assert.deepEqual(tools.map(t => t.tool_call_id), ['toolu_1', 'toolu_2']);
   });
   await t('/v1/messages stream: no [DONE], stops at message_stop', async () => {
     const resp = await fetch(BASE + '/v1/messages', {
@@ -781,6 +858,30 @@ async function main() {
     assert.equal(ms[1].tool_calls[0].id, 'call_1');
     assert.equal(ms[2].role, 'tool');
     assert.equal(ms[2].tool_call_id, 'call_1', 'function_call_output call_id lost: ' + JSON.stringify(ms[2]));
+  });
+  await t('POST /v1/responses parallel function_call items merge into one assistant', async () => {
+    // Codex 并行工具调用：连续的 function_call item 必须合并为一条 assistant
+    // 消息，后面紧跟全部 tool 输出。拆成多条 assistant 会让 workbuddy 报
+    // 400 code:11148 "tool calls and tool results do not match"。
+    const r = await call('POST', '/v1/responses', {
+      model: 'mock-a', input: [
+        { type: 'message', role: 'user', content: 'two cities?' },
+        { type: 'function_call', call_id: 'call_1', name: 'get_time', arguments: '{"tz":"Tokyo"}' },
+        { type: 'function_call', call_id: 'call_2', name: 'get_time', arguments: '{"tz":"Paris"}' },
+        { type: 'function_call_output', call_id: 'call_1', output: '12:00' },
+        { type: 'function_call_output', call_id: 'call_2', output: [{ type: 'input_text', text: '05:00' }] },
+      ],
+      tools: [{ type: 'function', name: 'get_time', parameters: { type: 'object', properties: { tz: { type: 'string' } } } }],
+    }, { Authorization: 'Bearer ' + fullKey });
+    assert.equal(r.status, 200, r.text);
+    const ms = lastUpstreamBody.messages;
+    const assistants = ms.filter(m => m.role === 'assistant');
+    assert.equal(assistants.length, 1, 'assistant messages not merged: ' + JSON.stringify(ms.map(m => m.role)));
+    assert.equal(assistants[0].tool_calls.length, 2, JSON.stringify(assistants[0]));
+    assert.deepEqual(assistants[0].tool_calls.map(t => t.id), ['call_1', 'call_2']);
+    const tools = ms.filter(m => m.role === 'tool');
+    assert.deepEqual(tools.map(t => t.tool_call_id), ['call_1', 'call_2']);
+    assert.equal(tools[1].content, '05:00');
   });
   await t('POST /v1/responses maps developer/instructions to user (Codex native)', async () => {
     // Codex CLI 原生用 role:developer + 顶层 instructions 下发大段指令；workbuddy

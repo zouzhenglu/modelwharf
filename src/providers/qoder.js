@@ -24,6 +24,7 @@ const { sseParse } = require('../utils/sse');
 const crypto = require('crypto');
 const { REGIONS, normalizeRegion } = require('./_qoder_names');
 const { dsmlToolDoc, mapToolMessage, DSMLStreamFilter, newToolCallId } = require('../utils/dsml');
+const { isContextOrToolRequestError } = require('../core/upstream-errors');
 
 // Qoder 桌面端在本机的存放目录（%APPDATA%），国内版与国际版各自独立安装、独立登录
 const DESKTOP_DIRS = [
@@ -735,7 +736,10 @@ module.exports = {
     });
     if (resp.statusCode >= 400) {
       const text = await resp.body.text().catch(() => '');
-      throw Object.assign(new Error(`qoder ${resp.statusCode}: ${text.slice(0, 300)}`), { status: resp.statusCode === 401 || resp.statusCode === 403 ? 401 : resp.statusCode });
+      // 上下文超限/会话被卡这类请求错误即使被上游包成 5xx，也按 400 回客户端
+      const status = resp.statusCode === 401 || resp.statusCode === 403 ? 401
+        : (resp.statusCode >= 500 && isContextOrToolRequestError({ message: text })) ? 400 : resp.statusCode;
+      throw Object.assign(new Error(`qoder ${resp.statusCode}: ${text.slice(0, 300)}`), { status });
     }
     // 正文里的 DSML 块一律在流式增量里解析成 OpenAI tool_calls（请求不带 tools 时模型也会按
     // 训练格式自发输出，裸透传就是标签汤）；tools 供缺失 invoke 名字时按参数 schema 推断
@@ -766,7 +770,8 @@ module.exports = {
       if (!inner || typeof inner !== 'object' || !inner.choices) {
         // error/finish frames carry a code/message instead of choices — surface them
         if (inner?.code && inner.code !== 'OK' && inner.code !== 0) {
-          throw Object.assign(new Error(`qoder: ${inner.message || inner.code}${inner.details ? ' · ' + String(inner.details).slice(0, 120) : ''}`), { status: 502 });
+          const msg = `qoder: ${inner.message || inner.code}${inner.details ? ' · ' + String(inner.details).slice(0, 120) : ''}`;
+          throw Object.assign(new Error(msg), { status: isContextOrToolRequestError({ message: msg }) ? 400 : 502 });
         }
         continue;
       }
