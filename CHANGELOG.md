@@ -2,6 +2,17 @@
 
 本文件记录面向用户的显著变更。版本与 git tag 一一对应；日期为 tag 创建日期。
 
+## [0.12.2] - 2026-11-10
+
+### Fixed
+- **本机扫描一次导入多条时报 `provider_id is not defined`**：`localcred.importFound()` 写入结果时引用了不存在的 `provider_id`（应为 `providerId`），同一轮扫描插入第一条后就抛错、其余账号全部漏导。已修复并补单测 `test/localcred.test.js`（纳入 `npm test`）
+- **同名模型被无健康账号的平台抢占，请求一律 503**：同一公开模型名存在于多个平台时（如 `glm-5.2` 同时在 trae/qoder/qodercn/workbuddy），此前总取最早插入的那一行；若其账号池已无可用账号，即使别的平台有健康账号也直接 503。现按账号池健康度选行（新增无副作用的 `hasHealthyAccount`，不推进轮询计数），指定账号/模型时行为不变；全无健康行时仍回退首行，保留原有「no healthy account」报错语义
+- **禁用的统一模型遮蔽同名真实模型**：禁用的统一模型仍先于真实模型命中并按其 targets 路由，未配 targets 时直接 404/503（`qoder-auto`、`qwen3.7-*` 等与真实模型同名的场景）。现在禁用的统一模型不参与路由，请求回落到 models 表里的同名真实模型（`/v1/models` 本就只列启用中的）；聊天与 embeddings 两条路径一致，并补回归测试
+
+### Changed
+- **单实例防重**：启动前先探测端口，已有实例在跑时直接退出且**不写/不删 pid 文件**。此前登录自启的实例与手动 `start.bat` 并存时，后启动进程退出会删掉 `wharf.pid`，`stop.bat` 随即失效。Windows 上改用连接端口判断而非解析 netstat（部分环境 netstat 不显示 LISTENING）
+- **Windows 启停脚本加固**：`stop.bat` 兼容 `WH_PORT`/旧 `DSH_PORT`，PID 文件失效时按 `node src\server.js` 命令行查找进程（PowerShell CIM），找不到时明确提示而非闪退；`start.bat` 区分「已在后台运行」与启动失败并等待按键；新增 `start-hidden.bat`（`conhost --headless` 无窗口启动，供登录自启使用）；`.gitattributes` 固定 `*.bat` / `*.cmd` 为 CRLF，避免中文注释被 cmd.exe 解析错乱
+
 ## [0.12.1] - 2026-11-04
 
 ### Fixed

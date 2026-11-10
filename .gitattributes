@@ -1,0 +1,3 @@
+# Windows 批处理文件必须用 CRLF 行尾，否则 cmd.exe 会把中文 rem 注释行解析错乱
+*.bat text eol=crlf
+*.cmd text eol=crlf

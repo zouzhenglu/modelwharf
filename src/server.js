@@ -93,7 +93,33 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: { message: err.message } });
 });
 
-function start() {
+/**
+ * Pre-flight single-instance guard: if something is already accepting TCP
+ * connections on our port, a second start must exit WITHOUT touching the pid
+ * file — otherwise its exit cleanup would delete the live instance's pid file
+ * and stop.bat would no longer work (common when the logon autostart fires
+ * and the user also launches start.bat manually).
+ *
+ * We probe by connecting rather than parsing netstat output: netstat does not
+ * expose LISTENING sockets in some sandboxed/minimal Windows environments.
+ */
+function portInUse(port, host) {
+  return new Promise(resolve => {
+    const net = require('net');
+    const target = host && host !== '0.0.0.0' && host !== '::' ? host : '127.0.0.1';
+    const sock = net.connect({ port, host: target });
+    const done = (inUse) => { sock.destroy(); resolve(inUse); };
+    sock.setTimeout(1000, () => done(true));   // connect timed out: assume busy, don't risk a double start
+    sock.once('connect', () => done(true));
+    sock.once('error', () => done(false));     // ECONNREFUSED => port is free
+  });
+}
+
+async function start() {
+  if (await portInUse(config.port, config.host)) {
+    logger.warn(`port ${config.port} already in use — gateway is already running, exiting without touching wharf.pid`);
+    return null;
+  }
   registry.loadAll();
   adminRoutes.setupAutoRefresh?.();
   adminRoutes.setupCheckin?.();   // 自动签到调度（默认每日 09:00，启动补签）

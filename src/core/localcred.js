@@ -76,7 +76,7 @@ function importFound(providerId, found, names = [], opts = {}) {
     while (db.prepare('SELECT 1 FROM accounts WHERE provider_id=? AND name=?').get(providerId, name)) name = `${base}-${n++}`;
     db.prepare('INSERT INTO accounts(provider_id,name,credentials,extra) VALUES(?,?,?,?)')
       .run(providerId, name, JSON.stringify(f.credentials), JSON.stringify(f.extra || {}));
-    existing.push({ name, provider_id: provider_id, fp });
+    existing.push({ name, provider_id: providerId, fp });
     imported++;
     results.push({ label: f.label, imported: true, name });
   }

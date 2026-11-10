@@ -37,6 +37,20 @@ function getAccount(id) {
  * Pick an account for provider: candidates ordered by priority; among the
  * lowest priority tier, round-robin. Skip disabled/cooldown/at-capacity.
  */
+/** Side-effect-free health probe: is there any account that pickAccount() could return?
+ *  Used by model resolution to prefer a healthy provider without advancing the
+ *  round-robin counter or any other pool state. Mirrors pickAccount's filters. */
+function hasHealthyAccount(providerId) {
+  const now = Date.now();
+  return listAccounts(providerId).some(a => {
+    if (a.status === 'banned' || a.status === 'invalid') return false;
+    if ((cooldown.get(a.id) || 0) > now) return false;
+    const cur = inflight.get(a.id) || 0;
+    if (a.max_concurrency > 0 && cur >= a.max_concurrency) return false;
+    return true;
+  });
+}
+
 function pickAccount(providerId) {
   const now = Date.now();
   const candidates = listAccounts(providerId).filter(a => {
@@ -91,4 +105,4 @@ function setAccountStatus(id, status, message) {
   db.prepare('UPDATE accounts SET status=?, status_message=? WHERE id=?').run(status, message || null, id);
 }
 
-module.exports = { listAccounts, getAccount, pickAccount, acquire, release, reportFailure, reportSuccess, setAccountStatus };
+module.exports = { listAccounts, getAccount, hasHealthyAccount, pickAccount, acquire, release, reportFailure, reportSuccess, setAccountStatus };

@@ -572,6 +572,17 @@ async function main() {
     // trae-glm not in key's allowed list? allowed_models='mock-a' -> 403 expected; create a wider key instead
     assert.ok(r2.status === 403 || r2.status === 503, `got ${r2.status}`);
   });
+  await t('same-named model prefers provider with healthy account', async () => {
+    // 同名模型先插 trae（无健康账号），再插 openai-compat（mock 可用）：不应被 trae 抢走而 503
+    await call('POST', '/admin/api/models', { provider_id: 'trae', upstream_model: 'shared-x', public_name: 'shared-model' }, auth);
+    await call('POST', '/admin/api/models', { provider_id: 'openai-compat', upstream_model: 'mock-model-a', public_name: 'shared-model' }, auth);
+    // 该 key 白名单只有 mock-a，临时放宽以验证纯粹的路由行为；测完立即恢复
+    await call('PUT', '/admin/api/apikeys/' + keyId, { allowed_models: '*' }, auth);
+    const r = await call('POST', '/v1/chat/completions', { model: 'shared-model', messages: [{ role: 'user', content: 'hi' }] }, { Authorization: 'Bearer ' + fullKey });
+    await call('PUT', '/admin/api/apikeys/' + keyId, { allowed_models: 'mock-a' }, auth);
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.choices[0].message.content, '你好，世界！');
+  });
 
   console.log('== batch model ops ==');
   await t('batch disable+enable', async () => {
@@ -635,6 +646,27 @@ async function main() {
     const chat = await call('POST', '/v1/chat/completions', { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] }, { Authorization: 'Bearer ' + fullKey });
     assert.equal(chat.status, 200);
     assert.equal(chat.json.model, 'gpt-4o');
+  });
+  // 回归：禁用的统一模型若与真实模型同名（qoder-auto / qwen3.7-* 等），不应抢先命中
+  // 而报 404；/v1/models 列的真实模型必须能正常路由（见 #disabled-virtual-shadowing）
+  await t('disabled virtual model does not shadow same-named real model', async () => {
+    const up = await call('POST', '/admin/api/virtual-models', {
+      public_name: 'mock-a',
+      targets: [{ provider_id: 'openai-compat', public_name: 'mock-echo', priority: 10 }],
+    }, auth);
+    assert.equal(up.status, 200, up.text);
+    const off = await call('PUT', '/admin/api/virtual-models/mock-a', { enabled: false }, auth);
+    assert.equal(off.status, 200, off.text);
+    const chat = await call('POST', '/v1/chat/completions', { model: 'mock-a', messages: [{ role: 'user', content: 'hi' }] }, { Authorization: 'Bearer ' + fullKey });
+    assert.equal(chat.status, 200, chat.text);
+    assert.equal(chat.json.choices[0].message.content, '你好，世界！');
+    // 再启用：统一模型应重新接管（走 mock-echo）
+    const on = await call('PUT', '/admin/api/virtual-models/mock-a', { enabled: true }, auth);
+    assert.equal(on.status, 200, on.text);
+    const chat2 = await call('POST', '/v1/chat/completions', { model: 'mock-a', messages: [{ role: 'user', content: 'hi' }] }, { Authorization: 'Bearer ' + fullKey });
+    assert.equal(chat2.status, 200, chat2.text);
+    assert.ok(chat2.json.choices[0].message.content.startsWith('echo#0:'), 'enabled virtual should take over again');
+    await call('DELETE', '/admin/api/virtual-models/mock-a', null, auth);
   });
   // 负载均衡测试（账号路由已确定：dead-upstream 已禁用）
   await t('virtual weighted strategy spreads traffic', async () => {

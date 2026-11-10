@@ -20,6 +20,29 @@ class UpstreamError extends Error {
   constructor(status, message, upstream) { super(message); this.status = status; this.upstream = upstream; }
 }
 
+/**
+ * Resolve a public model name to an enabled model row.
+ *
+ * When several providers expose the same public name (glm-5.2 exists on
+ * trae/qoder/qodercn/workbuddy...), prefer one whose account pool is actually
+ * healthy — otherwise a dead provider's row (often the earliest inserted one)
+ * shadows the working ones and every request returns 503.
+ *  - forceAccount (playground per-account test) restricts to that provider.
+ *  - if no healthy row exists, fall back to the plain first row so callers still
+ *    get the usual 'no healthy account' error rather than a confusing 404.
+ */
+function resolveModel(publicName, { forceAccount, forceModel } = {}) {
+  if (forceModel) return forceModel;
+  const rows = db.prepare('SELECT * FROM models WHERE public_name=? AND enabled=1').all(publicName);
+  if (!rows.length) return null;
+  if (forceAccount) {
+    return rows.find(r => r.provider_id === forceAccount.provider_id)
+      || db.prepare('SELECT * FROM models WHERE provider_id=? AND enabled=1 ORDER BY multiplier ASC LIMIT 1').get(forceAccount.provider_id)
+      || rows[0];
+  }
+  return rows.find(r => accounts.hasHealthyAccount(r.provider_id)) || rows[0];
+}
+
 // ---------- virtual target selection (负载均衡策略) ----------
 // target key: provider_id/public_name — in-flight counter shared by chat + embeddings
 const targetInflight = new Map();
@@ -91,8 +114,10 @@ async function runChat(opts, onEvent, onUsage) {
     const { baseModel: vBase } = parseModelSuffix(opts.publicModel);
     if (vBase && vBase !== opts.publicModel) virtual = models.getVirtualModel(vBase);
   }
+  // 禁用的统一模型不参与路由（/v1/models 也只列启用中的），否则会抢先命中而挡住
+  // models 表里同名的真实模型（qoder-auto / qwen3.7-* 等即此情形）
+  if (virtual && !virtual.enabled) virtual = null;
   if (virtual) {
-    if (!virtual.enabled) throw new UpstreamError(404, `virtual model '${opts.publicModel}' is disabled`);
     const targets = orderTargets(virtual);
     if (!targets.length) throw new UpstreamError(503, `virtual model '${opts.publicModel}' has no enabled targets`);
     let lastErr = null;
@@ -115,21 +140,19 @@ async function runChat(opts, onEvent, onUsage) {
   // exact name first; if not found, try the base name after stripping a reasoning suffix
   // (-think / -think-high / -xhigh / -nothink) so suffix conventions work on any model
   let publicName = opts.publicModel;
-  let model = opts.forceModel || db.prepare('SELECT * FROM models WHERE public_name=? AND enabled=1').get(publicName);
+  let model = resolveModel(publicName, opts);
   if (!model) {
     const { baseModel, reasoning } = parseModelSuffix(publicName);
     if (reasoning !== undefined && baseModel) {
-      model = db.prepare('SELECT * FROM models WHERE public_name=? AND enabled=1').get(baseModel);
+      model = resolveModel(baseModel, opts);
       if (model) publicName = baseModel;
     }
   }
-  if (!model && opts.forceAccount) {
-    // forced account but model name unknown on it: fall back to its cheapest enabled model
-    model = db.prepare('SELECT * FROM models WHERE provider_id=? AND enabled=1 ORDER BY multiplier ASC LIMIT 1').get(opts.forceAccount.provider_id);
-  }
   if (!model) {
+    // 兜底：只有「启用的」统一模型才允许走到这里（正常路径上面已处理）；禁用的
+    // 统一模型若没有同名真实模型可回退，应明确 404，而不是把 null 传给 runSingle
     const v = models.getVirtualModel(opts.publicModel); // convenience: tolerate virtual lookup mismatch
-    if (!v) throw new UpstreamError(404, `model '${opts.publicModel}' not found`);
+    if (!v || !v.enabled) throw new UpstreamError(404, `model '${opts.publicModel}' not found`);
   }
   return runSingle(opts, model, onEvent, onUsage, started, opts.publicModel);
 }
@@ -224,8 +247,10 @@ async function runEmbeddings(opts) {
     const { baseModel: vBase } = parseModelSuffix(opts.publicModel);
     if (vBase && vBase !== opts.publicModel) virtual = models.getVirtualModel(vBase);
   }
+  // 禁用的统一模型不参与路由（/v1/models 也只列启用中的），否则会抢先命中而挡住
+  // models 表里同名的真实模型（qoder-auto / qwen3.7-* 等即此情形）
+  if (virtual && !virtual.enabled) virtual = null;
   if (virtual) {
-    if (!virtual.enabled) throw new UpstreamError(404, `virtual model '${opts.publicModel}' is disabled`);
     const targets = orderTargets(virtual);
     if (!targets.length) throw new UpstreamError(503, `virtual model '${opts.publicModel}' has no enabled targets`);
     let lastErr = null;
@@ -245,11 +270,11 @@ async function runEmbeddings(opts) {
     throw lastErr || new UpstreamError(502, 'all virtual targets failed');
   }
   let publicName = opts.publicModel;
-  let model = db.prepare('SELECT * FROM models WHERE public_name=? AND enabled=1').get(publicName);
+  let model = resolveModel(publicName, opts);
   if (!model) {
     const { baseModel } = parseModelSuffix(publicName);
     if (baseModel && baseModel !== publicName) {
-      model = db.prepare('SELECT * FROM models WHERE public_name=? AND enabled=1').get(baseModel);
+      model = resolveModel(baseModel, opts);
       if (model) publicName = baseModel;
     }
   }
