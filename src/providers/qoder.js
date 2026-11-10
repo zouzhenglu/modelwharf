@@ -347,12 +347,13 @@ module.exports = {
   ],
   docs: '推荐用 PAT：浏览器打开 https://qoder.com/account/integrations（国内 https://qoder.com.cn/account/integrations）→ Integrations 页的 Personal Access Tokens / 访问令牌 → New Token，创建 pt- 令牌。桌面端 Settings → Integrations 是 Hooks/Agent 等，不含 PAT。也可「导入本机登录」自动读取本机客户端凭证。',
 
-  // display -> internal mapping (from qoder2api research)
+  // display -> internal mapping（2026-11-10 在线目录实抓；静态兜底只保留当前在售模型）
   _modelMap: {
-    'Qwen3.8-Max': 'qmodel_38max', 'Qwen3.8-Flash': 'qfmodel', 'Qwen3.7-Max': 'qmodel_latest',
-    'Qwen3.7-Plus': 'qmodel', 'Qwen3.7-Flash': 'q37fmodel', 'DeepSeek-V4-Pro': 'dmodel', 'DeepSeek-Flash': 'dfmodel',
-    'GLM-5.3': 'gmodel', 'GLM-5.3-Flash': 'gfmodel', 'GLM-5.2': 'gm51model', 'Kimi-K3': 'kmodel_latest',
-    'Kimi-K2.8-Preview': 'kmodel', 'MiniMax-M2.7': 'mmodel', Auto: 'auto',
+    'Qwen3.8-Max': 'qmodel_38max', 'Qwen3.8-Flash': 'qfmodel',
+    'DeepSeek-V4-Pro': 'dmodel', 'DeepSeek-Flash': 'dfmodel',
+    'GLM-5.3': 'gmodel', 'GLM-5.3-Flash': 'gfmodel',
+    'Kimi-K3.1-Pro': 'kmodel_latest', 'Kimi-K2.8-Preview': 'kmodel',
+    'MiniMax-M3.1-Flash': 'mmodel', Auto: 'auto',
   },
 
   /**
@@ -398,7 +399,10 @@ module.exports = {
     const seen = new Set();
     for (const m of list) {
       const key = m.key || m.model_key || m.id;
-      if (!key || seen.has(key) || m.enable === false) continue;
+      // 上游对当前套餐未显式启用的模型也会返回 enable:false，但它们仍可正常聊天
+      // （2026-11-10 实测 qfmodel / dfmodel 等全部 enable:false，强制账号调用返回 200）。
+      // 是否可用由账号套餐/路由决定，这里不能按 enable 过滤，否则整份目录被当成空。
+      if (!key || seen.has(key)) continue;
       seen.add(key);
       const rate = m.price_factor != null ? Number(m.price_factor) : null;
       const tags = [];
@@ -413,6 +417,7 @@ module.exports = {
         multiplier: rate ?? 1,
         ctx: m.max_input_tokens || null,
         tags,
+        note: m.display_name || null,
         online: true,
       });
     }

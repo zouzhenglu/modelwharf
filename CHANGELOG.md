@@ -11,6 +11,7 @@
 - **模型上下文窗口元数据偏大**：workbuddy `/v3/config` 同时返回名义 `maxInputTokens` 与聊天通道 `maxAllowedSize` 时此前优先取前者（如 `deepseek-v4.1-flash` 标 1M，实际超过 100k 即报 11115）；改为取较小值。`/v1/models`（OpenAI / Anthropic / Responses）新增 `context_window` / `max_output_tokens` 字段，客户端可据此提前压缩上下文
 - **Windows 启停脚本在中文系统下解析错乱**：UTF-8 中文注释在 GBK 代码页下被 cmd 误解，注释里的 `node` 会被当成命令执行（启动时报 `Cannot find module ...\的`）；三个 `.bat` 的注释与提示改为纯 ASCII，`stop.bat` / `start-hidden.bat` 实测可正常停止与拉起
 - **Qoder PAT 文档入口错误**：桌面端 Settings → Integrations 实际是 Hooks / Agents / Computer control 等，不提供 PAT；PAT 要打开网页版 `https://qoder.com/account/integrations`（国内 `https://qoder.com.cn/account/integrations`），在 **Personal Access Tokens / 访问令牌** 区域点 New Token 创建。`AGENTS.md` 与插件提示已更正
+- **Qoder 在线模型目录被整份过滤**：上游对当前套餐未显式启用的模型统一返回 `enable:false`，旧代码据此跳过全部条目并回退到静态目录（Qwen3.7 / GLM-5.2 / MiniMax-M2.7 等旧模型），最新目录里的 Kimi-K3.1-Pro / MiniMax-M3.1-Flash 永远同步不到。现在忽略 `enable`（实测 `enable:false` 的模型仍可正常聊天），按 `display_name` 记录备注并同步 14 个在线模型；静态兜底目录同步更新
 
 ### Tests
 - 新增回归：请求级 400 / 5xx 上下文错误不冷却账号、Responses 并行 `function_call` 合并、Anthropic 多 `tool_result` 保留、OpenAI 拆分 assistant 合并（72 项端到端全绿）；并用真实 workbuddy / qodercn 上游验证并行工具历史请求返回 200
