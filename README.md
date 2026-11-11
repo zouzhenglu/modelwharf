@@ -86,6 +86,8 @@ npm start                 # 默认 http://localhost:8317
      - 千问：chat.qwen.ai 登录后 Cookie 里的 `token`；也可直接填邮箱+密码由网关自动登录续期
      - 千问办公(QwenWork)：推荐「扫描本机登录」自动读取客户端登录态（`%APPDATA%\QwenWorkCN\auth-v2.dat`）；或添加账号弹窗点「网页授权登录」（设备码流程，无需客户端）；聊天需本机装有千问办公客户端（wasm 签名）
 2. **同步模型**（仪表盘 → 平台「同步模型」；之后可逐个模型 启用/停用/改名/设倍率/打标签）
+   - 多账号平台按账号同步：每个模型只绑定到实际上报它的账号，路由不会再派给没有该模型的号。
+   - `/v1/models` 会额外列出 `模型@账号别名`（如 `glm-5.2@wb-9`），客户端可直接指定账号；别名由账号名生成（中文名回退 `acc<id>`），账号页可查看。
 3. **生成 API Key**（可限定该 key 能用的模型、限速）
 4. **测试**（测试台：选模型 → 流式/非流式 → 实时输出 + token/积分耗时）
 
@@ -224,7 +226,7 @@ node scripts/zcode-integrate.js --key wh-xxx --base $GW
 | 剩余积分 | 账号「检查」按钮调用各平台积分接口（trae 签到状态、qoder 官方 quota、codebuddy billing（个人/企业账号、Precise 字段、多段套餐）、qwen 档案、qwenwork 三池积分：每日免费/订阅/长期）；workbuddy 额外显示今日请求数与积分消耗 |
 | 用量/禁用启用/搜索筛选 | usage 全量日志（时间/平台/账号/模型/token/积分/耗时/状态），各列表页均带搜索+筛选 |
 | 扩展接口 | provider 插件协议（见 `src/core/registry.js` 注释）；新增平台=一个文件；已内置 24 个官方厂商 + openai-compat/ollama 通用插件 |
-| 账号-模型绑定管理 | 模型层面启停 + API key 级 `allowed_models` 白名单 |
+| 账号-模型绑定管理 | 模型按账号同步/绑定，`模型@账号别名` 可直连指定账号；模型层面启停 + API key 级 `allowed_models` 白名单 |
 | 本地集成 | 「导入本机登录」扫描 Trae/CodeBuddy/Qoder（国内版+国际版分别扫）/千问办公客户端 的本地凭证文件 |
 | 负载均衡/故障转移 | 虚拟（统一）模型多目标：顺序故障转移 / 加权随机 / 最少连接 三种策略，失败自动切换；单平台内账号按优先级+轮询 |
 | 主流协议 | OpenAI `/v1/chat/completions`、`/v1/completions`、`/v1/models`、`/v1/embeddings`；Responses `/v1/responses`；Anthropic `/v1/messages`（含 thinking/tool_use/count_tokens）；MCP 网关（tools/resources/prompts） |

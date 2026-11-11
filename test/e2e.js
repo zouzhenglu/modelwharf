@@ -32,7 +32,13 @@ module.exports = {
   label: 'E2E Checkin (test only)',
   importLocal: false,
   credFields: [{ name: 'baseUrl', label: 'Base URL', required: true }],
-  async listModels(account) { return [{ upstream: 'mock-model-a' }]; },
+  async listModels(account) {
+    const name = String(account?.name || '');
+    if (name.includes('acct-b')) return [{ upstream: 'acct-model-b' }];
+    if (name.includes('acct-c')) return [{ upstream: 'acct-model-c' }];
+    return [{ upstream: 'acct-model-a' }];
+  },
+  async listOnlineModels(account) { return { source: 'e2e', models: await this.listModels(account) }; },
   async checkAccount(account) { return { ok: true, message: 'e2e mock' }; },
   async checkin(account) {
     const base = String(account.credentials.baseUrl || '').replace(/\\/+$/, '');
@@ -47,7 +53,7 @@ module.exports = {
     if (cl.status !== 200) return { ok: false, message: 'HTTP ' + cl.status };
     return { ok: true, gained: cl.json.credits, message: '签到成功 +' + cl.json.credits, extra: { credits: cl.json.balance } };
   },
-  async *chat() { yield JSON.stringify({ choices: [{ delta: { content: 'e2e' } }] }); },
+  async *chat({ account }) { yield JSON.stringify({ choices: [{ delta: { content: account?.name || 'e2e' } }] }); },
 };
 `;
 function removeTestPlugin() { try { fs.rmSync(TEST_PLUGIN_PATH, { force: true }); } catch {} }
@@ -950,6 +956,95 @@ async function main() {
   await t('reasoning suffix -think routes to base model', async () => {
     const r = await call('POST', '/v1/chat/completions', { model: 'mock-a-think', messages: [{ role: 'user', content: 'hi' }] }, { Authorization: 'Bearer ' + fullKey });
     assert.equal(r.status, 200, r.text);
+  });
+
+  console.log('== account-scoped models ==');
+  let acctKey, acctKeyId, acctAId, acctBId;
+  await t('two accounts of one provider can expose disjoint model catalogs', async () => {
+    const k = await call('POST', '/admin/api/apikeys', { name: 'acct-test', allowed_models: '*' }, auth);
+    assert.equal(k.status, 200, k.text);
+    acctKeyId = k.json.id; acctKey = k.json.key;
+    const a = await call('POST', '/admin/api/accounts', {
+      provider_id: 'e2echeckin', name: 'acct-a', credentials: { baseUrl: 'http://127.0.0.1:8399' },
+    }, auth);
+    const b = await call('POST', '/admin/api/accounts', {
+      provider_id: 'e2echeckin', name: 'acct-b', credentials: { baseUrl: 'http://127.0.0.1:8399' },
+    }, auth);
+    assert.equal(a.status, 200, a.text);
+    assert.equal(b.status, 200, b.text);
+    acctAId = a.json.id; acctBId = b.json.id;
+    const sync = await call('POST', '/admin/api/providers/e2echeckin/refresh-models', {}, auth);
+    assert.equal(sync.status, 200, sync.text);
+    assert.ok(sync.json.added >= 2, `added=${sync.json.added}`);
+    assert.ok(sync.json.linked >= 2, `linked=${sync.json.linked}`);
+  });
+  await t('each model is bound only to the account that reported it', async () => {
+    const models = await call('GET', '/admin/api/models?provider_id=e2echeckin', null, auth);
+    const ma = models.json.find(m => m.upstream_model === 'acct-model-a');
+    const mb = models.json.find(m => m.upstream_model === 'acct-model-b');
+    assert.ok(ma && mb, 'two models expected');
+    assert.deepEqual(ma.accounts.map(x => x.name), ['acct-a']);
+    assert.deepEqual(mb.accounts.map(x => x.name), ['acct-b']);
+    assert.equal(ma.account_count, 1);
+    assert.equal(mb.account_count, 1);
+    const accounts = await call('GET', '/admin/api/accounts?provider_id=e2echeckin', null, auth);
+    const a = accounts.json.find(x => x.id === acctAId);
+    const b = accounts.json.find(x => x.id === acctBId);
+    assert.equal(a.model_count, 1);
+    assert.equal(b.model_count, 1);
+    assert.equal(a.alias, 'acct-a');
+    assert.equal(b.alias, 'acct-b');
+  });
+  await t('/v1/models exposes account aliases only for multi-account providers', async () => {
+    const r = await call('GET', '/v1/models', null, { Authorization: 'Bearer ' + acctKey });
+    assert.equal(r.status, 200, r.text);
+    const ids = r.json.data.map(m => m.id);
+    assert.ok(ids.includes('acct-model-a@acct-a'), ids.join(','));
+    assert.ok(ids.includes('acct-model-b@acct-b'), ids.join(','));
+    assert.ok(!ids.some(id => id.startsWith('mock-a@')), 'single-account provider must not add aliases');
+  });
+  await t('base model routes only to the account that provides it', async () => {
+    const r = await call('POST', '/v1/chat/completions', {
+      model: 'acct-model-a', messages: [{ role: 'user', content: 'hi' }],
+    }, { Authorization: 'Bearer ' + acctKey });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.choices[0].message.content, 'acct-a');
+  });
+  await t('model@alias pins the account; wrong alias is rejected', async () => {
+    const ok = await call('POST', '/v1/chat/completions', {
+      model: 'acct-model-a@acct-a', messages: [{ role: 'user', content: 'hi' }],
+    }, { Authorization: 'Bearer ' + acctKey });
+    assert.equal(ok.status, 200, ok.text);
+    assert.equal(ok.json.choices[0].message.content, 'acct-a');
+    const wrong = await call('POST', '/v1/chat/completions', {
+      model: 'acct-model-a@acct-b', messages: [{ role: 'user', content: 'hi' }],
+    }, { Authorization: 'Bearer ' + acctKey });
+    assert.equal(wrong.status, 404, wrong.text);
+    const b = await call('POST', '/v1/chat/completions', {
+      model: 'acct-model-b@acct-b', messages: [{ role: 'user', content: 'hi' }],
+    }, { Authorization: 'Bearer ' + acctKey });
+    assert.equal(b.status, 200, b.text);
+    assert.equal(b.json.choices[0].message.content, 'acct-b');
+  });
+  await t('resetting one account keeps the other account models', async () => {
+    const r = await call('POST', `/admin/api/accounts/${acctAId}/reset-online-models`, {}, auth);
+    assert.equal(r.status, 200, r.text);
+    const models = await call('GET', '/admin/api/models?provider_id=e2echeckin', null, auth);
+    const ma = models.json.find(m => m.upstream_model === 'acct-model-a');
+    const mb = models.json.find(m => m.upstream_model === 'acct-model-b');
+    assert.ok(ma && ma.accounts.some(x => x.name === 'acct-a'), 'account A model should be rebuilt');
+    assert.ok(!(ma.accounts || []).some(x => x.name === 'acct-b'));
+    assert.ok(mb, 'account B model must survive account A reset');
+    assert.deepEqual(mb.accounts.map(x => x.name), ['acct-b']);
+  });
+  await t('cleanup account-scoped test accounts/models', async () => {
+    await call('DELETE', `/admin/api/accounts/${acctAId}`, null, auth);
+    await call('DELETE', `/admin/api/accounts/${acctBId}`, null, auth);
+    const models = await call('GET', '/admin/api/models?provider_id=e2echeckin', null, auth);
+    for (const m of models.json.filter(x => x.provider_id === 'e2echeckin')) {
+      await call('DELETE', '/admin/api/models/' + m.id, null, auth);
+    }
+    await call('DELETE', '/admin/api/apikeys/' + acctKeyId, null, auth);
   });
 
   console.log('== checkin (自动签到) ==');
