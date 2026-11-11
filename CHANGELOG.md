@@ -2,6 +2,12 @@
 
 本文件记录面向用户的显著变更。版本与 git tag 一一对应；日期为 tag 创建日期。
 
+## [0.13.1] - 2026-11-11
+
+### Fixed
+- **Trae 模型列表混入大量内部配置**：`get_detail_param` 的 `config_info_list` 里除了用户模型，还包含 `custom_model_*`（编辑器自定义占位）、`*_subagent` / `*_agent` / `summary` 等内部项，以及每个模型的 `__dev` / `__max` 内部变体。旧实现把它们全部当模型同步，面板里出现 `custom_model_gpt-6` 等 Trae 界面根本看不到的条目（本次线上实测 126 个里 52 个是内部项，另有 20 组大小写重复）。现在只保留 `display_config.display_name` 非空的用户模型，模型 id 用 `config_name`，不再展开 `model_detail_list`；「恢复在线目录」也不再强制转小写，避免大小写重复
+- 升级后对 Trae 账号执行一次「恢复在线目录」即可清掉历史遗留的内部模型行
+
 ## [0.13.0] - 2026-11-11
 
 ### Added

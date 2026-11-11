@@ -133,6 +133,17 @@ async function ensureToken(account) {
   return c.token;
 }
 
+/** Trae get_detail_param 里的内部配置项：custom_model_* / *_agent / summary 等，不是用户可见模型 */
+function isUserFacingConfig(cfg) {
+  const name = cfg?.config_name;
+  const display = String(cfg?.display_config?.display_name || '').trim();
+  if (!name || !display || display === '-') return false;
+  if (/^custom_model_/i.test(name)) return false;
+  if (/(?:^|_)(?:subagent|agent)(?:$|_)/i.test(name) || /^(summary|sagitta|aquila)$/i.test(name)) return false;
+  if (/__(?:dev|max)$/i.test(name)) return false;
+  return true;
+}
+
 module.exports = {
   id: 'trae',
   label: 'Trae (字节)',
@@ -159,8 +170,12 @@ module.exports = {
       const list = r.json?.data?.config_info_list || r.json?.config_info_list || [];
       const models = new Map();
       for (const cfg of list) {
+        // config_info_list 混有内部配置（custom_model_* / 内部 agent / summary 等），
+        // 只保留 Trae 界面里真正展示给用户的模型。
+        if (!isUserFacingConfig(cfg)) continue;
         const name = cfg.config_name;
         const dc = cfg.display_config || {};
+        const display = String(dc.display_name || '').trim();
         // fee_model_level: 0/1 免费（含限时免费），2 标准计费，3+ 高档计费
         const feeLevel = dc.fee_model_level;
         const free = feeLevel === 0 || feeLevel === 1 || dc.is_free === true;
@@ -175,12 +190,11 @@ module.exports = {
           multiplier: free ? 0 : (feeLevel >= 3 ? 2 : 1), // trae 不给具体倍率数字，只给等级
           tags,
           ctx: cfg.context_window_tokens?.dev || null,
+          note: display, // Trae 里显示的名字（public_name 仍是实际调用用的 config_name）
           online: true,
         };
-        if (name && !models.has(name)) models.set(name, enriched);
-        for (const md of cfg.model_detail_list || []) {
-          if (md.model_name && !models.has(md.model_name)) models.set(md.model_name, { ...enriched, upstream: md.model_name });
-        }
+        if (!models.has(name)) models.set(name, enriched);
+        // 不再把 model_detail_list 的 __dev / __max 内部变体当独立模型暴露
       }
       return [...models.values()];
     } catch (e) {
@@ -194,17 +208,20 @@ module.exports = {
    * 恢复在线目录：get_detail_param 返回的就是 Trae 当前真实可用的模型目录，
    * 与 IDE 里看到的一致。标记 online 供 reset 流程替换现有列表。
    */
+  __testing: { isUserFacingConfig },
+
   async listOnlineModels(account) {
     const models = (await this.listModels(account)).filter(m => !m.static);
     if (!models.length) throw new Error('上游未返回可用模型（账号可能失效）');
     return {
       models: models.map(m => ({
         upstream: m.upstream,
-        publicName: m.upstream.toLowerCase(),
+        publicName: m.upstream,
         free: !!m.free,
         multiplier: m.multiplier,
         tags: m.tags,
         ctx: m.ctx,
+        note: m.note,
         online: true,
       })),
       replace: true,

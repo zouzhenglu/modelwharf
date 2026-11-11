@@ -1,6 +1,6 @@
 {
   "name": "modelwharf",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "description": "modelwharf — 模型码头: multi-platform AI proxy (workbuddy/trae/qwen/qoder + 24 official vendors) -> OpenAI & Anthropic & MCP compatible API with admin panel",
   "main": "src/server.js",
   "type": "commonjs",
@@ -12,7 +12,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node test/dsml.test.js && node test/qwen-tools.test.js && node test/workbuddy-billing.test.js && node test/localcred.test.js && node test/e2e.js"
+    "test": "node test/dsml.test.js && node test/qwen-tools.test.js && node test/workbuddy-billing.test.js && node test/trae-catalog.test.js && node test/localcred.test.js && node test/e2e.js"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",
