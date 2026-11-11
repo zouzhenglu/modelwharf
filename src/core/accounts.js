@@ -51,16 +51,18 @@ function findByIdentity(providerId, identity = {}) {
   }) || null;
 }
 
-/**
- * Pick an account for provider: candidates ordered by priority; among the
- * lowest priority tier, round-robin. Skip disabled/cooldown/at-capacity.
- */
-/** Side-effect-free health probe: is there any account that pickAccount() could return?
- *  Used by model resolution to prefer a healthy provider without advancing the
- *  round-robin counter or any other pool state. Mirrors pickAccount's filters. */
-function hasHealthyAccount(providerId) {
+/** ids of accounts that reported a given model; empty = legacy wildcard (all provider accounts) */
+function mappedAccountIds(modelId) {
+  if (modelId === undefined || modelId === null) return [];
+  return db.prepare('SELECT account_id FROM model_accounts WHERE model_id=?').all(modelId).map(r => r.account_id);
+}
+
+/** accounts allowed to serve a model: bound ones, or every account when no binding exists */
+function candidatesFor(providerId, modelId) {
+  const allowed = mappedAccountIds(modelId);
   const now = Date.now();
-  return listAccounts(providerId).some(a => {
+  return listAccounts(providerId).filter(a => {
+    if (allowed.length && !allowed.includes(a.id)) return false;
     if (a.status === 'banned' || a.status === 'invalid') return false;
     if ((cooldown.get(a.id) || 0) > now) return false;
     const cur = inflight.get(a.id) || 0;
@@ -69,24 +71,67 @@ function hasHealthyAccount(providerId) {
   });
 }
 
-function pickAccount(providerId) {
-  const now = Date.now();
-  const candidates = listAccounts(providerId).filter(a => {
-    if (a.status === 'banned' || a.status === 'invalid') return false;
-    const until = cooldown.get(a.id) || 0;
-    if (until > now) return false;
-    const cur = inflight.get(a.id) || 0;
-    if (a.max_concurrency > 0 && cur >= a.max_concurrency) return false;
-    return true;
-  });
+/** Side-effect-free health probe: is there any account that pickAccount() could return? */
+function hasHealthyAccount(providerId, { modelId } = {}) {
+  return candidatesFor(providerId, modelId).length > 0;
+}
+
+/** Pick an account for provider (optionally restricted to accounts bound to a model). */
+function pickAccount(providerId, { modelId } = {}) {
+  const candidates = candidatesFor(providerId, modelId);
   if (!candidates.length) return null;
   // round-robin within the top priority tier
   const top = candidates.filter(a => a.priority === candidates[0].priority);
-  const rr = (rrCounters.get(providerId) || 0) + 1;
-  rrCounters.set(providerId, rr);
+  const rrKey = modelId === undefined || modelId === null ? providerId : `${providerId}#${modelId}`;
+  const rr = (rrCounters.get(rrKey) || 0) + 1;
+  rrCounters.set(rrKey, rr);
   return top[rr % top.length];
 }
 const rrCounters = new Map();
+
+/** Guard for forced-account paths: does this account actually provide the model? */
+function accountServesModel(modelId, accountId) {
+  const allowed = mappedAccountIds(modelId);
+  return !allowed.length || allowed.includes(accountId);
+}
+
+/** 模型@别名 的别名单段：账号名转 ASCII slug，中文名兜底 acc<id>，同平台冲突加 id 后缀 */
+function aliasSlug(name) {
+  return String(name || '').normalize('NFKD').toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^[-._]+|[-._]+$/g, '');
+}
+
+/** Map<accountId, alias> for one provider (includes disabled accounts so aliases stay stable) */
+function aliasMap(providerId) {
+  const rows = listAccounts(providerId, { includeDisabled: true });
+  const used = new Set();
+  const map = new Map();
+  for (const a of rows) {
+    let base = aliasSlug(a.name);
+    // 中文/符号名 slug 后往往只剩前缀（wb-路宇心 -> wb），带上 id 才可读且稳定
+    if (!base || /[^\x00-\x7F]/.test(a.name) || base.length <= 2) {
+      base = `${base || 'acc'}-${a.id}`;
+    }
+    let alias = base;
+    if (used.has(alias)) alias = `${base}-${a.id}`;
+    let n = 2;
+    while (used.has(alias)) alias = `${base}-${a.id}-${n++}`;
+    used.add(alias);
+    map.set(a.id, alias);
+  }
+  return map;
+}
+
+function findByAlias(providerId, alias) {
+  const wanted = String(alias || '').toLowerCase();
+  if (!wanted) return null;
+  const map = aliasMap(providerId);
+  for (const a of listAccounts(providerId)) {
+    if (map.get(a.id) === wanted) return a;
+  }
+  return null;
+}
 
 function acquire(accountId) {
   inflight.set(accountId, (inflight.get(accountId) || 0) + 1);
@@ -132,4 +177,4 @@ function setAccountStatus(id, status, message) {
   db.prepare('UPDATE accounts SET status=?, status_message=? WHERE id=?').run(status, message || null, id);
 }
 
-module.exports = { listAccounts, getAccount, findByIdentity, hasHealthyAccount, pickAccount, acquire, release, reportFailure, reportSuccess, setAccountStatus };
+module.exports = { listAccounts, getAccount, findByIdentity, mappedAccountIds, accountServesModel, aliasSlug, aliasMap, findByAlias, hasHealthyAccount, pickAccount, acquire, release, reportFailure, reportSuccess, setAccountStatus };

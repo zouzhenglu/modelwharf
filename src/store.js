@@ -56,6 +56,14 @@ CREATE TABLE IF NOT EXISTS models (
   created_at INTEGER DEFAULT (unixepoch()),
   UNIQUE(provider_id, public_name)
 );
+-- model <-> account bindings: which accounts actually reported a model.
+-- 没有映射行的模型按「该平台所有账号都可用」处理（兼容旧库/手工插入的行）。
+CREATE TABLE IF NOT EXISTS model_accounts (
+  model_id   INTEGER NOT NULL,
+  account_id INTEGER NOT NULL,
+  created_at INTEGER DEFAULT (unixepoch()),
+  PRIMARY KEY (model_id, account_id)
+);
 CREATE TABLE IF NOT EXISTS apikeys (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   key TEXT UNIQUE NOT NULL,
@@ -120,6 +128,7 @@ CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage(ts);
 CREATE INDEX IF NOT EXISTS idx_usage_model ON usage(public_model);
 CREATE INDEX IF NOT EXISTS idx_usage_apikey ON usage(apikey_id);
 CREATE INDEX IF NOT EXISTS idx_checkin_ts ON checkin_log(ts);
+CREATE INDEX IF NOT EXISTS idx_model_accounts_account ON model_accounts(account_id);
 `);
 // migration: virtual_models.tags added in ui-redesign; older DBs lack the column
 try {
@@ -147,6 +156,19 @@ function getSetting(key, fallback = undefined) {
 }
 function setSetting(key, value) {
   stmts.setSetting.run(key, JSON.stringify(value));
+}
+
+// migration: model_accounts introduced in 0.13.0 — existing models inherit every account
+// of their provider (same behavior as before), then per-account sync tightens it.
+try {
+  if (!getSetting('migration.model_accounts.v1', false)) {
+    const seeded = db.prepare(`INSERT OR IGNORE INTO model_accounts(model_id, account_id)
+      SELECT m.id, a.id FROM models m JOIN accounts a ON a.provider_id = m.provider_id`).run();
+    setSetting('migration.model_accounts.v1', true);
+    if (seeded.changes) console.log(`[modelwharf] model_accounts 回填 ${seeded.changes} 条（存量模型继承平台全部账号）`);
+  }
+} catch (e) {
+  console.error('[modelwharf] model_accounts 回填失败:', e.message);
 }
 
 module.exports = { db, getSetting, setSetting };

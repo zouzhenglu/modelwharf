@@ -37,11 +37,16 @@ function resolveModel(publicName, { forceAccount, forceModel } = {}) {
   const rows = db.prepare('SELECT * FROM models WHERE public_name=? AND enabled=1').all(publicName);
   if (!rows.length) return null;
   if (forceAccount) {
-    return rows.find(r => r.provider_id === forceAccount.provider_id)
-      || db.prepare('SELECT * FROM models WHERE provider_id=? AND enabled=1 ORDER BY multiplier ASC LIMIT 1').get(forceAccount.provider_id)
-      || rows[0];
+    const bound = rows.find(r => r.provider_id === forceAccount.provider_id
+      && accounts.accountServesModel(r.id, forceAccount.id));
+    if (bound) return bound;
+    // playground fallback: any model of this provider the account actually provides
+    const fallback = db.prepare('SELECT * FROM models WHERE provider_id=? AND enabled=1 ORDER BY multiplier ASC')
+      .all(forceAccount.provider_id)
+      .find(r => accounts.accountServesModel(r.id, forceAccount.id));
+    return fallback || rows[0];
   }
-  return rows.find(r => accounts.hasHealthyAccount(r.provider_id)) || rows[0];
+  return rows.find(r => accounts.hasHealthyAccount(r.provider_id, { modelId: r.id })) || rows[0];
 }
 
 // ---------- virtual target selection (负载均衡策略) ----------
@@ -116,6 +121,21 @@ async function runChat(opts, onEvent, onUsage) {
       if (row) opts.forceModel = row;
     }
   }
+  // `模型@账号别名`：直接锁定账号；别名可写 `provider:alias` 消歧
+  if (!opts.forceModel) {
+    const alias = models.splitAlias(opts.publicModel);
+    if (alias) {
+      const hits = models.findModelByAlias(alias.base, alias.alias, alias.providerId);
+      if (!hits.length) {
+        throw new UpstreamError(404, `model '${opts.publicModel}' not found: account alias '${alias.alias}' does not serve '${alias.base}'`);
+      }
+      if (hits.length > 1) {
+        const candidates = hits.map(h => `${h.model.provider_id}:${h.model.public_name}`).join(', ');
+        throw new UpstreamError(400, `model '${opts.publicModel}' is ambiguous (${candidates}); use '${alias.base}@provider:${alias.alias}'`);
+      }
+      opts = { ...opts, publicModel: hits[0].model.public_name, forceModel: hits[0].model, forceAccount: hits[0].account };
+    }
+  }
   let virtual = models.getVirtualModel(opts.publicModel);
   if (!virtual) {
     // 统一模型同样吃 -think 系列后缀：剥掉后缀再查一次虚拟表
@@ -131,11 +151,22 @@ async function runChat(opts, onEvent, onUsage) {
     let lastErr = null;
     for (const t of targets) {
       if (opts.forceAccount && t.provider_id !== opts.forceAccount.provider_id) continue; // per-account test: restrict to that provider
-      const row = db.prepare('SELECT * FROM models WHERE provider_id=? AND public_name=? AND enabled=1').get(t.provider_id, t.public_name);
+      let row, targetAccount = null;
+      const parsedTarget = models.splitAlias(t.public_name);
+      if (parsedTarget) {
+        const hits = models.findModelByAlias(parsedTarget.base, parsedTarget.alias, parsedTarget.providerId || t.provider_id);
+        const hit = hits.find(h => h.model.provider_id === t.provider_id);
+        if (!hit) { lastErr = new UpstreamError(404, `target ${t.provider_id}/${t.public_name} alias not found`); continue; }
+        row = hit.model;
+        targetAccount = hit.account;
+      } else {
+        row = db.prepare('SELECT * FROM models WHERE provider_id=? AND public_name=? AND enabled=1').get(t.provider_id, t.public_name);
+      }
       if (!row) { lastErr = new UpstreamError(404, `target ${t.provider_id}/${t.public_name} missing or disabled`); continue; }
+      const runOpts = targetAccount ? { ...opts, forceAccount: targetAccount, forceModel: row } : opts;
       acquireTarget(t);
       try {
-        return await runSingle(opts, row, onEvent, onUsage, started, opts.publicModel);
+        return await runSingle(runOpts, row, onEvent, onUsage, started, opts.publicModel);
       } catch (err) {
         lastErr = err;
         logger.warn(`virtual '${opts.publicModel}' target ${t.provider_id}/${t.public_name} failed: ${err.message} — trying next`);
@@ -167,12 +198,20 @@ async function runChat(opts, onEvent, onUsage) {
 
 /** execute against one concrete model row */
 async function runSingle(opts, model, onEvent, onUsage, started, usagePublicModel) {
-  // forceAccount (probe path) bypasses pool routing; normal path uses the pool
-  const account = opts.forceAccount && opts.forceAccount.provider_id === model.provider_id
-    ? opts.forceAccount
-    : accounts.pickAccount(model.provider_id);
+  // forceAccount (probe/alias path) bypasses pool routing; normal path uses the pool
+  let account = null;
+  if (opts.forceAccount && opts.forceAccount.provider_id === model.provider_id) {
+    if (!accounts.accountServesModel(model.id, opts.forceAccount.id)) {
+      throw new UpstreamError(400, `account '${opts.forceAccount.name || opts.forceAccount.id}' does not provide model '${model.public_name}'`);
+    }
+    account = opts.forceAccount;
+  } else {
+    account = accounts.pickAccount(model.provider_id, { modelId: model.id });
+  }
   if (!account) {
-    throw new UpstreamError(503, `no healthy account available for provider '${model.provider_id}' (all cooling/invalid/disabled)`);
+    const bound = accounts.mappedAccountIds(model.id).length;
+    throw new UpstreamError(503, `no healthy account available for provider '${model.provider_id}' model '${model.public_name}'`
+      + (bound ? ` (${bound} bound account(s) cooling/invalid/disabled)` : ' (all cooling/invalid/disabled)'));
   }
   const plugin = registry.get(model.provider_id);
   if (!plugin) throw new UpstreamError(500, `provider plugin '${model.provider_id}' missing`);
@@ -252,6 +291,15 @@ async function runEmbeddings(opts) {
     const clean = models.stripRateTag(opts.publicModel);
     if (clean !== opts.publicModel) opts = { ...opts, publicModel: clean };
   }
+  if (!opts.forceModel) {
+    const alias = models.splitAlias(opts.publicModel);
+    if (alias) {
+      const hits = models.findModelByAlias(alias.base, alias.alias, alias.providerId);
+      if (!hits.length) throw new UpstreamError(404, `model '${opts.publicModel}' not found: account alias '${alias.alias}' does not serve '${alias.base}'`);
+      if (hits.length > 1) throw new UpstreamError(400, `model '${opts.publicModel}' is ambiguous; use '${alias.base}@provider:${alias.alias}'`);
+      opts = { ...opts, publicModel: hits[0].model.public_name, forceModel: hits[0].model, forceAccount: hits[0].account };
+    }
+  }
   let virtual = models.getVirtualModel(opts.publicModel);
   if (!virtual) {
     const { baseModel: vBase } = parseModelSuffix(opts.publicModel);
@@ -265,11 +313,22 @@ async function runEmbeddings(opts) {
     if (!targets.length) throw new UpstreamError(503, `virtual model '${opts.publicModel}' has no enabled targets`);
     let lastErr = null;
     for (const t of targets) {
-      const row = db.prepare('SELECT * FROM models WHERE provider_id=? AND public_name=? AND enabled=1').get(t.provider_id, t.public_name);
+      let row, targetAccount = null;
+      const parsedTarget = models.splitAlias(t.public_name);
+      if (parsedTarget) {
+        const hits = models.findModelByAlias(parsedTarget.base, parsedTarget.alias, parsedTarget.providerId || t.provider_id);
+        const hit = hits.find(h => h.model.provider_id === t.provider_id);
+        if (!hit) { lastErr = new UpstreamError(404, `target ${t.provider_id}/${t.public_name} alias not found`); continue; }
+        row = hit.model;
+        targetAccount = hit.account;
+      } else {
+        row = db.prepare('SELECT * FROM models WHERE provider_id=? AND public_name=? AND enabled=1').get(t.provider_id, t.public_name);
+      }
       if (!row) { lastErr = new UpstreamError(404, `target ${t.provider_id}/${t.public_name} missing or disabled`); continue; }
+      const runOpts = targetAccount ? { ...opts, forceAccount: targetAccount, forceModel: row } : opts;
       acquireTarget(t);
       try {
-        return await runSingleEmbeddings(opts, row, started);
+        return await runSingleEmbeddings(runOpts, row, started);
       } catch (err) {
         lastErr = err;
         logger.warn(`virtual '${opts.publicModel}' embeddings target ${t.provider_id}/${t.public_name} failed: ${err.message} — trying next`);
@@ -299,8 +358,18 @@ async function runSingleEmbeddings(opts, model, started) {
   if (typeof plugin.embeddings !== 'function') {
     throw new UpstreamError(501, `provider '${model.provider_id}' does not support embeddings — /v1/embeddings 仅 OpenAI 兼容上游（openai-compat / 官方厂商 / ollama）可用`);
   }
-  const account = accounts.pickAccount(model.provider_id);
-  if (!account) throw new UpstreamError(503, `no healthy account available for provider '${model.provider_id}' (all cooling/invalid/disabled)`);
+  let account = null;
+  if (opts.forceAccount && opts.forceAccount.provider_id === model.provider_id) {
+    if (!accounts.accountServesModel(model.id, opts.forceAccount.id)) {
+      throw new UpstreamError(400, `account '${opts.forceAccount.name || opts.forceAccount.id}' does not provide model '${model.public_name}'`);
+    }
+    account = opts.forceAccount;
+  } else {
+    account = accounts.pickAccount(model.provider_id, { modelId: model.id });
+  }
+  if (!account) {
+    throw new UpstreamError(503, `no healthy account available for provider '${model.provider_id}' model '${model.public_name}'`);
+  }
   accounts.acquire(account.id);
   try {
     const out = await plugin.embeddings({
