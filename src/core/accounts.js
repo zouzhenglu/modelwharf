@@ -35,6 +35,23 @@ function getAccount(id) {
 }
 
 /**
+ * Find an existing account row for the same upstream identity.
+ * Used by OAuth re-login / local import so the same WorkBuddy account refreshing
+ * its token updates the existing row instead of creating a duplicate.
+ * Matches extra.uid / extra.userId / credentials.userId within one provider.
+ */
+function findByIdentity(providerId, identity = {}) {
+  const wanted = [identity.uid, identity.userId].filter(Boolean).map(String);
+  if (!wanted.length) return null;
+  const rows = listAccounts(providerId, { includeDisabled: true });
+  return rows.find(a => {
+    const candidates = [a.extra?.uid, a.extra?.userId, a.credentials?.userId]
+      .filter(Boolean).map(String);
+    return candidates.some(v => wanted.includes(v));
+  }) || null;
+}
+
+/**
  * Pick an account for provider: candidates ordered by priority; among the
  * lowest priority tier, round-robin. Skip disabled/cooldown/at-capacity.
  */
@@ -115,4 +132,4 @@ function setAccountStatus(id, status, message) {
   db.prepare('UPDATE accounts SET status=?, status_message=? WHERE id=?').run(status, message || null, id);
 }
 
-module.exports = { listAccounts, getAccount, hasHealthyAccount, pickAccount, acquire, release, reportFailure, reportSuccess, setAccountStatus };
+module.exports = { listAccounts, getAccount, findByIdentity, hasHealthyAccount, pickAccount, acquire, release, reportFailure, reportSuccess, setAccountStatus };

@@ -45,9 +45,13 @@ function isExcluded(label) {
  */
 function importFound(providerId, found, names = [], opts = {}) {
   const pool = SHARED_CREDENTIAL_POOLS.find(g => g.includes(providerId)) || [providerId];
-  const existing = db.prepare(`SELECT id,name,provider_id,credentials FROM accounts WHERE provider_id IN (${pool.map(() => '?').join(',')})`)
+  const existing = db.prepare(`SELECT id,name,provider_id,credentials,extra FROM accounts WHERE provider_id IN (${pool.map(() => '?').join(',')})`)
     .all(...pool)
-    .map(r => ({ name: r.name, provider_id: r.provider_id, fp: fingerprint(JSON.parse(r.credentials || '{}')) }));
+    .map(r => {
+      const credentials = JSON.parse(r.credentials || '{}');
+      const extra = JSON.parse(r.extra || '{}');
+      return { id: r.id, name: r.name, provider_id: r.provider_id, credentials, extra, fp: fingerprint(credentials) };
+    });
   const results = [];
   const excluded = [];
   let imported = 0;
@@ -71,12 +75,28 @@ function importFound(providerId, found, names = [], opts = {}) {
       results.push({ label: f.label, imported: false, reason: msg });
       continue;
     }
+    // 同一账号 refresh 出了新 token：按 userId/uid 命中并更新凭据，不新增重复行
+    const incomingUid = f.credentials.userId || f.extra?.uid || f.extra?.userId || null;
+    const sameAccount = incomingUid
+      ? existing.find(a => a.provider_id === providerId
+        && String(a.extra?.uid || a.extra?.userId || a.credentials?.userId || '') === String(incomingUid))
+      : null;
+    if (sameAccount) {
+      const mergedExtra = { ...sameAccount.extra, ...(f.extra || {}) };
+      db.prepare('UPDATE accounts SET credentials=?, extra=? WHERE id=?')
+        .run(JSON.stringify(f.credentials), JSON.stringify(mergedExtra), sameAccount.id);
+      sameAccount.credentials = f.credentials;
+      sameAccount.extra = mergedExtra;
+      sameAccount.fp = fp;
+      results.push({ label: f.label, imported: false, updated: true, name: sameAccount.name, reason: `已更新（账号「${sameAccount.name}」）` });
+      continue;
+    }
     const base = names[i] || f.suggestName || `${providerId}-local`;
     let name = base, n = 2;
     while (db.prepare('SELECT 1 FROM accounts WHERE provider_id=? AND name=?').get(providerId, name)) name = `${base}-${n++}`;
     db.prepare('INSERT INTO accounts(provider_id,name,credentials,extra) VALUES(?,?,?,?)')
       .run(providerId, name, JSON.stringify(f.credentials), JSON.stringify(f.extra || {}));
-    existing.push({ name, provider_id: providerId, fp });
+    existing.push({ name, provider_id: providerId, credentials: f.credentials, extra: f.extra || {}, fp });
     imported++;
     results.push({ label: f.label, imported: true, name });
   }

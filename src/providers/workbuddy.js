@@ -14,6 +14,7 @@
  */
 const { httpJson, httpRequest, config, logger } = require('../utils/http');
 const { sseParse } = require('../utils/sse');
+const billing = require('./_workbuddy_billing');
 const crypto = require('crypto');
 
 const CN_BASE = 'https://copilot.tencent.com';
@@ -93,23 +94,27 @@ function classifyError(status, message) {
   return 'cooling';
 }
 
-/** 签到后回查积分余额（get-user-resource 汇总未过期的 capacity 包），失败抛错由调用方兜住 */
+/**
+ * 回查积分余额 + 今日用量（算法见 _workbuddy_billing.js）。
+ * 返回给 extra 的扁平字段；creditError/todayError 为 null 表示成功。
+ */
 async function refreshCredits(account) {
-  const realm = regionOf(account) === 'intl' ? INTL_BASE : CN_PORTAL;
-  const r = await httpJson(`${realm}/billing/meter/get-user-resource`, {
-    method: 'POST', headers: headers(account, { Accept: 'application/json', Origin: CN_PORTAL, Referer: CN_PORTAL + '/' }), body: {}, timeoutMs: 15000,
-  });
-  if (r.status !== 200) throw new Error(`get-user-resource ${r.status}`);
-  const items = r.json?.data?.Response?.Data?.Accounts || [];
-  let remain = 0, size = 0;
-  const now = Date.now();
-  for (const it of items) {
-    if (it.CapacityUnit !== 'credits') continue;
-    if (it.DeductionEndTime && Number(it.DeductionEndTime) < now) continue;
-    remain += Number(it.CapacityRemain || 0);
-    size += Number(it.CapacitySize || 0);
-  }
-  return { credits: remain, quota: size };
+  // 签到后只需余额，不拉今日用量（最多 100 页分页，没必要拖慢签到）
+  const m = await billing.fetchWorkBuddyMetrics(account, { includeToday: false });
+  return {
+    credits: m.credits,
+    quota: m.quota,
+    unlimited: m.unlimited === true,
+    segments: m.segments || [],
+    creditMode: m.mode || null,
+    creditError: m.creditError || null,
+    todayUsed: m.todayUsed,
+    todayCount: m.todayCount,
+    todayDate: m.todayDate,
+    todaySynced: m.todaySynced === true,
+    todayError: m.todayError || null,
+    creditsFetchedAt: m.fetchedAt || Date.now(),
+  };
 }
 
 module.exports = {
@@ -260,37 +265,59 @@ module.exports = {
       }
       return { ok: true, message: `token 已刷新可用（chat 探活 HTTP ${r.statusCode}）` };
     }
-    // identity + credits via CN portal (billing/meter/get-user-resource returns capacity packages)
+    // CN: 账号档案 + 积分 + 今日用量（算法见 _workbuddy_billing.js）
     if (regionOf(account) === 'cn') {
-      const r = await httpJson(`${CN_PORTAL}/billing/meter/get-user-resource`, {
-        method: 'POST', headers: headers(account, { Accept: 'application/json', Origin: CN_PORTAL, Referer: CN_PORTAL + '/' }), body: {}, timeoutMs: 15000,
-      });
-      if (r.status === 200) {
-        const items = r.json?.data?.Response?.Data?.Accounts || [];
-        // sum active capacity packages (CapacityRemain/CapacitySize are per-package credits)
-        let remain = 0, size = 0;
-        const now = Date.now();
-        for (const it of items) {
-          if (it.CapacityUnit !== 'credits') continue;
-          if (it.DeductionEndTime && Number(it.DeductionEndTime) < now) continue; // expired package
-          remain += Number(it.CapacityRemain || 0);
-          size += Number(it.CapacitySize || 0);
-        }
-        // identity: nickname/email/phone from JWT claims + uid/uin
-        const { decodeJwtClaims } = require('../utils/jwt');
-        const claims = decodeJwtClaims(account.credentials.token) || {};
-        const uid = account.credentials.userId || claims.sub || null;
-        return {
-          ok: true,
-          message: `${claims.nickname || claims.phone || uid?.slice(0, 8) || '有效'} · 积分 ${remain} / ${size}`,
-          extra: {
-            credits: remain, quota: size, packages: items.length,
-            uid, uin: items[0]?.Uin || claims.phone || null,
-            username: claims.nickname || null, email: claims.email || null, phone: claims.phone || null,
-          },
-        };
+      const { decodeJwtClaims } = require('../utils/jwt');
+      const claims = decodeJwtClaims(account.credentials.token) || {};
+      const identity = billing.normalizeAccountIdentity(account.extra || {}, account.credentials.token);
+      const uid = account.credentials.userId || identity.userId || claims.sub || null;
+
+      let metrics;
+      try {
+        metrics = await billing.fetchWorkBuddyMetrics(account);
+      } catch (e) {
+        metrics = { creditError: e.message };
       }
-      if (r.status === 401 || r.status === 403) return { ok: false, status: 'invalid', message: `auth ${r.status}` };
+
+      const extra = {
+        ...identity,
+        uid,
+        username: identity.displayName || claims.nickname || null,
+        email: identity.email || claims.email || null,
+        phone: identity.uin || claims.phone || null,
+        credits: metrics.credits ?? null,
+        quota: metrics.quota ?? null,
+        unlimited: metrics.unlimited === true,
+        segments: metrics.segments || [],
+        creditMode: metrics.mode || null,
+        creditError: metrics.creditError || null,
+        todayUsed: metrics.todayUsed ?? null,
+        todayCount: metrics.todayCount ?? null,
+        todayDate: metrics.todayDate ?? null,
+        todaySynced: metrics.todaySynced === true,
+        todayError: metrics.todayError || null,
+        creditsFetchedAt: metrics.fetchedAt || Date.now(),
+      };
+      // 企业号首次查询可能补出 enterpriseId，回写便于后续直接走企业接口
+      if (metrics.mode === 'enterprise' && !identity.enterpriseId && metrics.enterpriseId) {
+        extra.enterpriseId = metrics.enterpriseId;
+      }
+
+      const name = identity.displayName || claims.nickname || claims.phone
+        || (uid ? String(uid).slice(0, 8) : '有效');
+      let message;
+      if (metrics.creditError) {
+        message = `${name} · token 有效，积分暂不可用（${String(metrics.creditError).slice(0, 60)}）`;
+      } else if (metrics.unlimited) {
+        message = `${name} · 剩余积分 不限量`;
+      } else {
+        const today = metrics.todayUsed != null
+          ? `，今日 ${metrics.todayCount ?? 0} 次 · ${metrics.todayUsed} 积分`
+          : '';
+        const total = metrics.quota ? ` / ${metrics.quota}` : '';
+        message = `${name} · 剩余 ${metrics.credits ?? '?'}${total} 积分${today}`;
+      }
+      return { ok: true, message, extra };
     }
     return { ok: true, message: 'token 已刷新可用' };
   },
@@ -321,13 +348,13 @@ module.exports = {
       const msgText = String(j.message || j.msg || r.text || '');
       // "已签到"幂等：业务码/文案识别不挑 HTTP 状态码（实测 400 + code 10001）
       if (/已签到|已经签到|already/i.test(msgText) || Number(j.code) === 10001) {
-        const credits = await refreshCredits(account).catch(() => null);
+        const credits = region === 'cn' ? await refreshCredits(account).catch(() => null) : null;
         return { ok: true, already: true, message: '今日已签到', gained: 0, extra: credits ? { ...credits } : undefined };
       }
       if (r.status === 200) {
         if (j.code != null && j.code !== 0) return { ok: false, message: msgText || `code ${j.code}` };
         const gained = Number(j?.data?.credits ?? j?.data?.Credits ?? 0) || null;
-        const credits = await refreshCredits(account).catch(() => null);
+        const credits = region === 'cn' ? await refreshCredits(account).catch(() => null) : null;
         return { ok: true, gained, message: `签到成功${gained ? ` +${gained}` : ''}`, extra: credits ? { ...credits } : undefined };
       }
       lastStatus = r.status; lastRaw = { status: r.status, json: r.json, text: String(r.text || '').slice(0, 300) };
@@ -399,7 +426,15 @@ module.exports = {
         const msg = j.message || JSON.stringify(j);
         throw Object.assign(new Error(`workbuddy code ${j.code}: ${msg.slice(0, 200)}`), { status: j.code === 14003 ? 429 : 502 });
       }
-      if (j.usage) onUsage?.({ input_tokens: j.usage.prompt_tokens, output_tokens: j.usage.completion_tokens });
+      if (j.usage) {
+        // 上游 usage 若带积分字段则一并记账（字段不存在时保持只记 token，不猜）
+        const credit = Number(j.usage.credits ?? j.usage.total_credits ?? j.usage.credit);
+        onUsage?.({
+          input_tokens: j.usage.prompt_tokens,
+          output_tokens: j.usage.completion_tokens,
+          ...(Number.isFinite(credit) && credit >= 0 ? { credits: credit } : {}),
+        });
+      }
       yield data;
     }
   },
@@ -449,26 +484,32 @@ module.exports = {
           if (regionFilter && region !== normalizeRegion(regionFilter)) continue;
           // identity = uid or JWT sub; skip files from the same account (fresh token wins: files sorted newest first)
           const claims = decodeJwtClaims(token);
-          const identity = String(uid || claims?.sub || '') || null;
-          if (identity) {
-            if (seenIdentity.has(identity)) continue;
-            seenIdentity.add(identity);
+          const accountIdentity = billing.normalizeAccountIdentity(j.account || j, token);
+          const identityKey = String(uid || accountIdentity.userId || claims?.sub || '') || null;
+          if (identityKey) {
+            if (seenIdentity.has(identityKey)) continue;
+            seenIdentity.add(identityKey);
           } else {
             const fp = token.slice(-32);
             if (seenIdentity.has(fp)) continue;
             seenIdentity.add(fp);
           }
+          const displayName = accountIdentity.displayName || claims?.nickname || null;
           const prefix = region === 'intl' ? 'wbi' : 'wb';
           found.push({
-            label: (f === 'workbuddy-desktop.info' ? 'workbuddy-desktop (当前)' : f.replace(/workbuddy-desktop\.|\.info/g, '').slice(0, 16)) + (claims?.nickname ? ` (${claims.nickname})` : uid ? ` (${String(uid).slice(0, 8)})` : ''),
-            suggestName: claims?.nickname ? `${prefix}-${claims.nickname}` : (`${prefix}-` + (found.filter(x => x.credentials).length + 1)),
+            label: (f === 'workbuddy-desktop.info' ? 'workbuddy-desktop (当前)' : f.replace(/workbuddy-desktop\.|\.info/g, '').slice(0, 16)) + (displayName ? ` (${displayName})` : uid ? ` (${String(uid).slice(0, 8)})` : ''),
+            suggestName: displayName ? `${prefix}-${displayName}` : (`${prefix}-` + (found.filter(x => x.credentials).length + 1)),
             credentials: {
               token,
               refreshToken: auth.refreshToken || null,
-              userId: uid,
+              userId: uid || accountIdentity.userId || null,
+              enterpriseId: accountIdentity.enterpriseId || null,
+              type: accountIdentity.type || null,
+              domain: auth.domain || null,
               expiresAt: auth.expiresAt ? Number(auth.expiresAt) : (auth.expiresIn ? Date.now() + Number(auth.expiresIn) * 1000 : null),
               region,
             },
+            extra: { ...accountIdentity, uid: uid || accountIdentity.userId || null },
           });
         } catch { /* skip */ }
       }
@@ -515,16 +556,25 @@ module.exports = {
     const account = acct.json?.data || {};
     const { decodeJwtClaims } = require('../utils/jwt');
     const claims = decodeJwtClaims(auth.accessToken) || {};
+    const identity = billing.normalizeAccountIdentity(account, auth.accessToken);
+    const userId = account.userId || account.uid || identity.userId || claims.sub || null;
     return {
       pending: false,
       credentials: {
         token: auth.accessToken,
         refreshToken: auth.refreshToken || null,
-        userId: account.userId || account.uid || claims.sub || null,
+        userId,
+        enterpriseId: identity.enterpriseId || null,
+        type: identity.type || null,
         expiresAt: auth.expiresAt ? Number(auth.expiresAt) : (auth.expiresIn ? Date.now() + Number(auth.expiresIn) * 1000 : null),
         region: normalizeRegion(region),
       },
-      identity: { nickname: claims.nickname || account.displayName || null, email: claims.email || null, phone: claims.preferred_username || null },
+      identity: {
+        ...identity,
+        uid: userId,
+        nickname: identity.displayName || claims.nickname || account.displayName || null,
+        phone: identity.uin || claims.phone || claims.preferred_username || null,
+      },
     };
   },
 

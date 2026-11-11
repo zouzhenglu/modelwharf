@@ -260,6 +260,14 @@ router.post('/providers/:id/oauth/poll', async (req, res) => {
   try {
     const r = await plugin.pollOAuth(req.body?.state);
     if (r.pending) return res.json({ pending: true });
+    const identity = r.identity || {};
+    // 同一账号重新授权：刷新凭据并复用原行，避免多账号面板出现重复行
+    const existing = accountsCore.findByIdentity(req.params.id, identity);
+    if (existing) {
+      db.prepare('UPDATE accounts SET credentials=?, extra=?, status=?, status_message=NULL WHERE id=?')
+        .run(JSON.stringify(r.credentials), JSON.stringify({ ...existing.extra, ...identity }), 'active', existing.id);
+      return res.json({ pending: false, account_id: existing.id, name: existing.name, identity, deduped: true });
+    }
     const name = r.identity?.nickname ? `${plugin.oauthPrefix || req.params.id}-${r.identity.nickname}` : `${req.params.id}-oauth`;
     let finalName = name, n = 2;
     while (db.prepare('SELECT 1 FROM accounts WHERE provider_id=? AND name=?').get(req.params.id, finalName)) finalName = `${name}-${n++}`;
