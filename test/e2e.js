@@ -965,10 +965,10 @@ async function main() {
     assert.equal(k.status, 200, k.text);
     acctKeyId = k.json.id; acctKey = k.json.key;
     const a = await call('POST', '/admin/api/accounts', {
-      provider_id: 'e2echeckin', name: 'acct-a', credentials: { baseUrl: 'http://127.0.0.1:8399' },
+      provider_id: 'e2echeckin', name: 'acct-a', alias: 'acct-a', credentials: { baseUrl: 'http://127.0.0.1:8399' },
     }, auth);
     const b = await call('POST', '/admin/api/accounts', {
-      provider_id: 'e2echeckin', name: 'acct-b', credentials: { baseUrl: 'http://127.0.0.1:8399' },
+      provider_id: 'e2echeckin', name: 'acct-b', alias: 'acct-b', credentials: { baseUrl: 'http://127.0.0.1:8399' },
     }, auth);
     assert.equal(a.status, 200, a.text);
     assert.equal(b.status, 200, b.text);

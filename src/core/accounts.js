@@ -95,11 +95,27 @@ function accountServesModel(modelId, accountId) {
   return !allowed.length || allowed.includes(accountId);
 }
 
-/** 模型@别名 的别名单段：账号名转 ASCII slug，中文名兜底 acc<id>，同平台冲突加 id 后缀 */
+/** 模型@别名 的别名单段：保留中文/字母/数字，只把空格与 @:/ 等路由分隔符换成 - */
 function aliasSlug(name) {
-  return String(name || '').normalize('NFKD').toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/^[-._]+|[-._]+$/g, '');
+  return String(name || '').normalize('NFKC')
+    .replace(/[^\p{L}\p{N}._-]+/gu, '-')
+    .replace(/^[-._]+|[-._]+$/g, '')
+    .toLowerCase();
+}
+
+// 平台短前缀，让别名在不同平台之间也能一眼看出归属
+const PROVIDER_ALIAS_PREFIX = {
+  workbuddy: 'wb', workbuddyintl: 'wbi', trae: 'trae', qoder: 'qoder', qodercn: 'qdc',
+  qwen: 'qwen', qwenwork: 'qww',
+};
+
+function defaultAlias(a) {
+  const prefix = PROVIDER_ALIAS_PREFIX[a.provider_id] || a.provider_id;
+  const raw = a.extra?.displayName || a.extra?.username || a.name || '';
+  const slug = aliasSlug(raw) || `acc${a.id}`;
+  // 账号名本身已带平台前缀（trae-cn1-2）时不再重复加
+  if (slug.startsWith(`${aliasSlug(prefix)}-`)) return slug;
+  return `${aliasSlug(prefix)}-${slug}`;
 }
 
 /** Map<accountId, alias> for one provider (includes disabled accounts so aliases stay stable) */
@@ -108,11 +124,8 @@ function aliasMap(providerId) {
   const used = new Set();
   const map = new Map();
   for (const a of rows) {
-    let base = aliasSlug(a.name);
-    // 中文/符号名 slug 后往往只剩前缀（wb-路宇心 -> wb），带上 id 才可读且稳定
-    if (!base || /[^\x00-\x7F]/.test(a.name) || base.length <= 2) {
-      base = `${base || 'acc'}-${a.id}`;
-    }
+    // 手填别名优先；留空按显示名自动生成（wb-走正路）
+    const base = a.alias ? (aliasSlug(a.alias) || defaultAlias(a)) : defaultAlias(a);
     let alias = base;
     if (used.has(alias)) alias = `${base}-${a.id}`;
     let n = 2;

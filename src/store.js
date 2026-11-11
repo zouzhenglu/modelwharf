@@ -142,6 +142,12 @@ try {
 } catch {
   db.exec('ALTER TABLE virtual_models ADD COLUMN strategy TEXT DEFAULT \'priority\'');
 }
+// migration: accounts.alias (0.13.0) — 可读的 模型@账号别名；留空则按显示名自动生成
+try {
+  db.prepare('SELECT alias FROM accounts LIMIT 1').get();
+} catch {
+  db.exec('ALTER TABLE accounts ADD COLUMN alias TEXT');
+}
 
 const stmts = {
   getSetting: db.prepare('SELECT value FROM settings WHERE key=?'),

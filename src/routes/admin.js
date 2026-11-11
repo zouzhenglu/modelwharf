@@ -18,6 +18,18 @@ const logger = require('../logger');
 
 const router = express.Router();
 
+/** 账号模型别名：清洗 + 同平台唯一性校验（返回冲突账号名或 null） */
+function cleanAlias(value) { return accountsCore.aliasSlug(value); }
+function aliasConflict(providerId, alias, excludeId) {
+  if (!alias) return null;
+  for (const [id, value] of accountsCore.aliasMap(providerId)) {
+    if (id !== Number(excludeId) && value === alias) {
+      return accountsCore.getAccount(id)?.name || `#${id}`;
+    }
+  }
+  return null;
+}
+
 // ---------- session auth ----------
 const sessions = new Map(); // token -> expiry
 function requireAuth(req, res, next) {
@@ -76,9 +88,11 @@ router.get('/accounts', (req, res) => {
   const countStmt = db.prepare('SELECT COUNT(*) c FROM model_accounts WHERE account_id=?');
   const rows = db.prepare(sql).all(...args).map(r => {
     if (!aliasCache.has(r.provider_id)) aliasCache.set(r.provider_id, accountsCore.aliasMap(r.provider_id));
+    const aliasCustom = r.alias || null;
     return {
       ...r, credentials: JSON.parse(r.credentials || '{}'), extra: JSON.parse(r.extra || '{}'),
       alias: aliasCache.get(r.provider_id).get(r.id) || null,
+      alias_custom: aliasCustom,
       model_count: countStmt.get(r.id).c,
       // redact secret values
       credentials_summary: Object.fromEntries(Object.entries(JSON.parse(r.credentials || '{}')).map(([k, v]) => [k, typeof v === 'string' && v.length > 12 ? v.slice(0, 6) + '...' + v.slice(-4) : v])),
@@ -88,13 +102,17 @@ router.get('/accounts', (req, res) => {
   res.json(rows);
 });
 router.post('/accounts', (req, res) => {
-  const { provider_id, name, credentials, priority = 100, max_concurrency = 3 } = req.body || {};
+  const { provider_id, name, credentials, priority = 100, max_concurrency = 3, alias } = req.body || {};
   if (!provider_id || !name || !credentials) return res.status(400).json({ error: 'provider_id, name, credentials required' });
   if (!registry.get(provider_id)) return res.status(400).json({ error: `unknown provider ${provider_id}` });
+  const nextAlias = alias ? cleanAlias(alias) : null;
+  if (alias && !nextAlias) return res.status(400).json({ error: '模型别名不合法（不能为空或只含符号）' });
+  const conflict = aliasConflict(provider_id, nextAlias, 0);
+  if (conflict) return res.status(400).json({ error: `模型别名已被账号「${conflict}」占用` });
   try {
-    const r = db.prepare('INSERT INTO accounts(provider_id,name,credentials,priority,max_concurrency) VALUES(?,?,?,?,?)')
-      .run(provider_id, name, JSON.stringify(credentials), priority, max_concurrency);
-    res.json({ ok: true, id: r.lastInsertRowid });
+    const r = db.prepare('INSERT INTO accounts(provider_id,name,credentials,priority,max_concurrency,alias) VALUES(?,?,?,?,?,?)')
+      .run(provider_id, name, JSON.stringify(credentials), priority, max_concurrency, nextAlias);
+    res.json({ ok: true, id: r.lastInsertRowid, alias: nextAlias || accountsCore.aliasMap(provider_id).get(r.lastInsertRowid) });
   } catch (e) {
     res.status(400).json({ error: e.message.includes('UNIQUE') ? 'account name exists for this provider' : e.message });
   }
@@ -102,12 +120,23 @@ router.post('/accounts', (req, res) => {
 router.put('/accounts/:id', (req, res) => {
   const a = accountsCore.getAccount(req.params.id);
   if (!a) return res.status(404).json({ error: 'not found' });
-  const { name, credentials, enabled, priority, max_concurrency, status } = req.body || {};
-  db.prepare('UPDATE accounts SET name=?, credentials=?, enabled=?, priority=?, max_concurrency=?, status=? WHERE id=?')
+  const { name, credentials, enabled, priority, max_concurrency, status, alias } = req.body || {};
+  let nextAlias = a.alias ?? null;
+  if (alias !== undefined) {
+    if (alias === null || alias === '') {
+      nextAlias = null;
+    } else {
+      nextAlias = cleanAlias(alias);
+      if (!nextAlias) return res.status(400).json({ error: '模型别名不合法（不能为空或只含符号）' });
+      const conflict = aliasConflict(a.provider_id, nextAlias, a.id);
+      if (conflict) return res.status(400).json({ error: `模型别名已被账号「${conflict}」占用` });
+    }
+  }
+  db.prepare('UPDATE accounts SET name=?, credentials=?, enabled=?, priority=?, max_concurrency=?, status=?, alias=? WHERE id=?')
     .run(name ?? a.name, credentials ? JSON.stringify(credentials) : JSON.stringify(a.credentials),
       enabled === undefined ? a.enabled : (enabled ? 1 : 0), priority ?? a.priority, max_concurrency ?? a.max_concurrency,
-      status ?? a.status, a.id);
-  res.json({ ok: true });
+      status ?? a.status, nextAlias, a.id);
+  res.json({ ok: true, alias: nextAlias || accountsCore.aliasMap(a.provider_id).get(a.id) });
 });
 router.delete('/accounts/:id', (req, res) => {
   // bindings first (no FK cascade); keep model rows so re-adding the account can resync

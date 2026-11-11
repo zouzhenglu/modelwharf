@@ -824,6 +824,8 @@ function mFormAccount(acct, providers, p) {
       <span id="afOAuthStatus" class="muted" style="margin-left:10px;font-size:12px"></span>
     </div>` : ''}
     <div class="field"><label>名称（用于区分多账号，留空自动起名）</label><input id="afName" value="${esc(acct?.name || '')}" placeholder="如 main / 小号1"></div>
+    <div class="field"><label>模型别名 <span class="muted" style="font-weight:400">（客户端用 模型@别名 指定账号；留空按显示名自动生成${acct?.alias ? '，当前：' + esc(acct.alias) : ''}）</span></label>
+      <input id="afAlias" value="${esc(acct?.alias_custom || '')}" placeholder="如 wb-走正路"></div>
     <div id="afCreds">${credFieldsHtml(p, acct)}</div>
     <div class="row" style="margin-top:4px">
       <div class="field" style="width:140px"><label>优先级(小=优先)</label><input id="afPriority" type="number" value="${acct?.priority ?? 100}"></div>
@@ -880,7 +882,7 @@ async function saveAccount(id) {
   const credentials = {};
   for (const f of fields) { const v = $('#cf_' + f.name)?.value?.trim(); if (v) credentials[f.name] = v; }
   const body = {
-    provider_id, name: $('#afName').value.trim(), credentials,
+    provider_id, name: $('#afName').value.trim(), credentials, alias: $('#afAlias').value.trim(),
     priority: Number($('#afPriority').value || 100), max_concurrency: Number($('#afConcurrency').value || 3),
   };
   try {
