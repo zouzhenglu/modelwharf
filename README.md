@@ -224,7 +224,7 @@ node scripts/zcode-integrate.js --key wh-xxx --base $GW
 | 网页后端管理 | `/admin` 单页面板：账号/模型/Key/用量/MCP/测试台/签到/设置 |
 | 网页测试 | 测试台：选模型 → 流式/非流式 → 实时输出+token+积分耗时 |
 | 剩余积分 | 账号「检查」按钮调用各平台积分接口（trae 签到状态、qoder 官方 quota、codebuddy billing（个人/企业账号、Precise 字段、多段套餐）、qwen 档案、qwenwork 三池积分：每日免费/订阅/长期）；workbuddy 额外显示今日请求数与积分消耗 |
-| 用量/禁用启用/搜索筛选 | usage 全量日志（时间/平台/账号/模型/token/积分/耗时/状态），各列表页均带搜索+筛选 |
+| 用量/禁用启用/搜索筛选 | usage 全量日志（时间/平台/账号/模型/token/积分/耗时/状态），支持按平台/账号/模型筛选 |
 | 扩展接口 | provider 插件协议（见 `src/core/registry.js` 注释）；新增平台=一个文件；已内置 24 个官方厂商 + openai-compat/ollama 通用插件 |
 | 账号-模型绑定管理 | 模型按账号同步/绑定，`模型@账号别名` 可直连指定账号；模型层面启停 + API key 级 `allowed_models` 白名单 |
 | 本地集成 | 「导入本机登录」扫描 Trae/CodeBuddy/Qoder（国内版+国际版分别扫）/千问办公客户端 的本地凭证文件 |

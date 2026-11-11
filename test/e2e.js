@@ -1026,6 +1026,42 @@ async function main() {
     assert.equal(b.status, 200, b.text);
     assert.equal(b.json.choices[0].message.content, 'acct-b');
   });
+  await t('key restricted to a base model also allows its account alias', async () => {
+    const k = await call('POST', '/admin/api/apikeys', { name: 'acct-restricted', allowed_models: 'acct-model-a' }, auth);
+    assert.equal(k.status, 200, k.text);
+    const key = k.json.key;
+    const list = await call('GET', '/v1/models', null, { Authorization: 'Bearer ' + key });
+    const ids = list.json.data.map(x => x.id);
+    assert.ok(ids.includes('acct-model-a@acct-a'), ids.join(','));
+    assert.ok(!ids.some(id => id.startsWith('acct-model-b')), 'other account model must stay hidden');
+    const ok = await call('POST', '/v1/chat/completions', {
+      model: 'acct-model-a@acct-a', messages: [{ role: 'user', content: 'hi' }],
+    }, { Authorization: 'Bearer ' + key });
+    assert.equal(ok.status, 200, ok.text);
+    const blocked = await call('POST', '/v1/chat/completions', {
+      model: 'acct-model-b@acct-b', messages: [{ role: 'user', content: 'hi' }],
+    }, { Authorization: 'Bearer ' + key });
+    assert.equal(blocked.status, 403, blocked.text);
+    await call('DELETE', '/admin/api/apikeys/' + k.json.id, null, auth);
+  });
+  await t('virtual target can pin an account alias', async () => {
+    const v = await call('POST', '/admin/api/virtual-models', {
+      public_name: 'acct-uni', targets: [{ provider_id: 'e2echeckin', public_name: 'acct-model-a@acct-a', priority: 10 }],
+    }, auth);
+    assert.equal(v.status, 200, v.text);
+    const chat = await call('POST', '/v1/chat/completions', {
+      model: 'acct-uni', messages: [{ role: 'user', content: 'hi' }],
+    }, { Authorization: 'Bearer ' + acctKey });
+    assert.equal(chat.status, 200, chat.text);
+    assert.equal(chat.json.choices[0].message.content, 'acct-a');
+    await call('DELETE', '/admin/api/virtual-models/acct-uni', null, auth);
+  });
+  await t('usage can be filtered by account', async () => {
+    const r = await call('GET', '/admin/api/usage?account_id=' + acctAId, null, auth);
+    assert.equal(r.status, 200, r.text);
+    assert.ok(r.json.rows.length >= 1, 'expected usage rows for account A');
+    assert.ok(r.json.rows.every(x => x.account_id === acctAId), 'all rows must belong to account A');
+  });
   await t('resetting one account keeps the other account models', async () => {
     const r = await call('POST', `/admin/api/accounts/${acctAId}/reset-online-models`, {}, auth);
     assert.equal(r.status, 200, r.text);

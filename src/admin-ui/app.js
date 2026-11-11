@@ -459,7 +459,7 @@ async function renderDashboard(m) {
     }
     $('#dashAccounts').innerHTML = Object.entries(groups).map(([pid, list]) => `
       <div style="margin-bottom:8px"><b class="mono" style="font-size:12.5px">${esc(pid)}</b>
-      ${list.map(a => `<span title="${esc(a.status_message || '')}" style="margin-left:6px">${statusBadge(a.status)} <span style="font-size:12.5px">${esc(a.name)}</span></span>`).join('')}
+      ${list.map(a => `<span title="${esc(a.status_message || '')}${a.alias ? ' · 别名 ' + esc(a.alias) : ''}" style="margin-left:6px">${statusBadge(a.status)} <span style="font-size:12.5px">${esc(a.name)}</span>${a.alias && a.alias !== a.name ? ` <span class="badge gray" style="font-size:10px">${esc(a.alias)}</span>` : ''}${a.model_count != null ? ` <span class="muted" style="font-size:11px">${a.model_count} 模型</span>` : ''}</span>`).join('')}
       </div>`).join('') || '<div class="empty"><span class="ico">👥</span>暂无账号</div>';
   }).catch(() => {});
 }
@@ -543,7 +543,7 @@ async function renderAccounts(m) {
     <td>${esc(a.provider_id)}</td>
     <td><b>${esc(a.name)}</b>${a.alias ? `<span class="badge gray" style="margin-left:6px" title="模型别名：客户端可用 模型@${esc(a.alias)} 指定该账号">${esc(a.alias)}</span>` : ''}${a.extra?.username ? `<div class="muted" style="font-size:12px">${esc(a.extra.username)}${a.extra.email ? ' · ' + esc(a.extra.email) : ''}</div>` : ''}</td>
     <td>${statusBadge(a.status)}${a.status_message ? `<div class="muted" style="max-width:180px;font-size:12px">${esc(a.status_message)}</div>` : ''}</td>
-    <td>${a.model_count ?? 0}</td>
+    <td>${a.model_count ?? 0}${a.model_count === 0 ? ' <span class="badge yellow" title="该账号还没同步模型：点右侧「⋯ → 同步模型」">待同步</span>' : ''}</td>
     <td>${creditCellHtml(a.extra)}</td>
     <td>${a.priority}</td><td>${a.max_concurrency}</td>
     <td class="muted" style="font-size:12px">${fmtTime(a.last_used_at)}</td>
@@ -986,6 +986,7 @@ async function batchModels(action) {
   renderModels($('#main'));
 }
 async function batchScope(action) {
+  if (modelFilter.account_id) return toast('按账号筛选时不支持批量启停（模型启停是全局的）；请在模型编辑里调整「绑定账号」', true);
   const body = { action };
   if (modelFilter.provider_id) body.provider_id = modelFilter.provider_id;
   else if (!confirm(`对${modelFilter.enabled === '0' ? '已筛选' : '全部'}模型执行「${action === 'enable' ? '启用' : '禁用'}」？范围较大，请确认。`)) return;
@@ -1065,11 +1066,13 @@ function virtualSortBy(key) {
   renderVirtual($('#main'));
 }
 /** 统一模型目标链：垂直列表（上=先尝试），每行带平台账号池健康点 */
-function targetChainHtml(ts, health) {
+function targetChainHtml(ts, health, accountHealth) {
   if (!ts.length) return '<span class="muted">无目标</span>';
   return `<div class="tchain">${ts.map((t, i) => {
-    const h = health?.[t.provider_id] || 'none';
-    const tip = { ok: '该平台有可用账号', warn: '该平台账号均在冷却中', bad: '该平台账号失效/被禁', none: '该平台暂无账号' }[h];
+    const h = (t.account_id && accountHealth?.[t.account_id]) || health?.[t.provider_id] || 'none';
+    const tip = (t.account_id
+      ? { ok: '该账号可用', warn: '该账号冷却中', bad: '该账号失效/被禁', none: '该账号不可用' }
+      : { ok: '该平台有可用账号', warn: '该平台账号均在冷却中', bad: '该平台账号失效/被禁', none: '该平台暂无账号' })[h];
     return `<span class="tchip" title="${tip} · 优先级 ${t.priority ?? (i + 1) * 10}"><i>${i + 1}</i><span class="tdot ${h}"></span>${esc(t.provider_id)}/${esc(t.public_name)}</span>`;
   }).join('')}</div>`;
 }
@@ -1114,13 +1117,19 @@ async function renderVirtual(m) {
   for (const md of models) {
     if (String(md.public_name).endsWith('__dev')) continue;
     modelIndex[`${md.provider_id}/${md.public_name}`] = md;
+    // 别名 target 也指向同一模型行，能力标签沿用基础模型
+    for (const a of md.accounts || []) {
+      if ((md.accounts || []).length > 1) modelIndex[`${md.provider_id}/${md.public_name}@${a.alias}`] = md;
+    }
   }
   // 平台健康：active=ok；只有 cooling=warn；只有 invalid/banned=bad；没账号=none
   const health = {};
+  const accountHealth = {};
   for (const a of accounts) {
+    const st = a.status === 'active' ? 'ok' : a.status === 'cooling' ? 'warn' : 'bad';
+    accountHealth[a.id] = st;
     const cur = health[a.provider_id];
     const rank = { ok: 0, warn: 1, bad: 2, none: 3 };
-    const st = a.status === 'active' ? 'ok' : a.status === 'cooling' ? 'warn' : 'bad';
     if (cur == null || rank[st] < rank[cur]) health[a.provider_id] = st; // 取最好状态
   }
   // 搜索筛选（名称/目标平台/目标模型/备注/标签）
@@ -1173,7 +1182,7 @@ async function renderVirtual(m) {
     <th>操作</th></tr>
   ${rows.map(v => `<tr>
     <td class="mono"><b>${esc(v.public_name)}</b><div class="muted" style="font-size:11px">${v._n} 个目标${v.strategy === 'weighted' ? ' · <span class="badge blue" title="按权重随机分散流量，失败自动切换">加权随机</span>' : v.strategy === 'least_conn' ? ' · <span class="badge purple" title="优先选择并发中的目标，失败自动切换">最少连接</span>' : ''}${v.tags ? ' · ' + vtagChips(v.tags) : ''}</div></td>
-    <td>${targetChainHtml(v._ts, health)}</td>
+    <td>${targetChainHtml(v._ts, health, accountHealth)}</td>
     <td>${capabilityHtml(v._ts, modelIndex)}</td>
     <td>${switchHtml(v.enabled, `toggleVirtual('${esc(v.public_name)}', ${v.enabled ? 0 : 1})`)}</td>
     <td class="muted" style="max-width:160px;overflow:hidden;text-overflow:ellipsis">${esc(v.note || '')}</td>
@@ -1314,7 +1323,14 @@ async function openKeyForm(id) {
   const [models, virtuals, providers] = await Promise.all([api('/models'), api('/virtual-models'), api('/providers')]);
   // 候选只含「启用」的模型：禁用的统一模型/原始模型一律不出现（route() 本身也只路由 enabled）
   const unified = virtuals.filter(v => v.enabled).map(v => ({ name: v.public_name, tag: '统一' }));
-  const regular = models.filter(md => md.enabled).map(md => ({ name: md.public_name, tag: md.provider_id }));
+  const regular = models.filter(md => md.enabled).flatMap(md => {
+    const rows = [{ name: md.public_name, tag: md.provider_id }];
+    const accts = (md.accounts || []).filter(a => a.enabled !== 0);
+    if (accts.length > 1) {
+      for (const a of accts) rows.push({ name: `${md.public_name}@${a.alias}`, tag: `${md.provider_id} · ${a.alias}`, account: a.id });
+    }
+    return rows;
+  });
   const selected = new Set((k?.allowed_models || '*') === '*' ? [] : (k?.allowed_models || '').split(',').map(s => s.trim()).filter(Boolean));
   const isAll = (k?.allowed_models || '*') === '*';
   window._keyModels = { unified, regular, selected, ui: { type: '', platform: '', q: '' } };
@@ -1337,6 +1353,7 @@ async function openKeyForm(id) {
         </div>
         <div id="kfList" style="max-height:220px;overflow:auto;border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px;background:var(--bg-soft)"></div>
         <p class="muted" style="margin-top:6px" id="kfCount"></p>
+        <p class="muted" style="margin-top:2px;font-size:12px">允许基础模型名时，也允许它的 <span class="mono">模型@账号</span> 别名；只勾别名则仅该账号可用。</p>
       </div></div>
     <div class="row">
       <div class="field" style="width:130px"><label>RPM 限制(0=∞)</label><input id="kfRpm" type="number" value="${k?.rpm_limit ?? 0}"></div>
@@ -1407,14 +1424,17 @@ function showKeyOnce(key) {
 }
 
 // ---------- usage ----------
-let usageFilter = { provider_id: '', model: '', status: '', page: 1 };
+let usageFilter = { provider_id: '', account_id: '', model: '', status: '', page: 1 };
 let usageChartHours = 24;
 async function renderUsage(m) {
-  const [providers, usage, chart] = await Promise.all([
+  const [providers, usage, chart, accounts] = await Promise.all([
     api('/providers'),
     api('/usage?' + new URLSearchParams(Object.fromEntries(Object.entries({ ...usageFilter }).filter(([, v]) => v)))),
     api('/usage/chart?hours=' + usageChartHours),
+    api('/accounts'),
   ]);
+  const acctName = new Map(accounts.map(a => [a.id, a.alias || a.name]));
+  const byAccountNamed = chart.byAccount.map(r => ({ ...r, key: acctName.get(Number(r.key)) || r.key }));
   const statusData = chart.byStatus.map(r => ({ key: r.key, value: r.reqs, color: r.key === '失败' ? 'var(--red)' : 'var(--green)' }));
   const statusTotal = statusData.reduce((a, d) => a + d.value, 0);
   /** Top 榜：两行两列（名称 / 请求数·占比，明细 / 耗时）+ 通栏份额条；
@@ -1452,7 +1472,7 @@ async function renderUsage(m) {
   <div class="card" style="display:flex;gap:26px;flex-wrap:wrap">
     ${rankTable('模型 Top（请求数）', chart.byModel, r => ({ main: `<span style="color:var(--cyan)">入 ${fmtCompact(r.tin || 0)}</span> · <span style="color:var(--purple)">出 ${fmtCompact(r.tout || 0)}</span>`, full: `输入 ${fmtCompact(r.tin)} / 输出 ${fmtCompact(r.tout)} tok`, dur: fmtDur(r.lat) }))}
     ${rankTable('平台（请求/积分）', chart.byProvider, r => ({ main: '积分 ' + fmtCompact(r.credits), full: `积分 ${Number(r.credits).toFixed(2)}`, dur: fmtDur(r.lat) }))}
-    ${rankTable('账号', chart.byAccount, r => ({ main: '积分 ' + fmtCompact(r.credits), full: `积分 ${Number(r.credits).toFixed(2)}`, dur: fmtDur(r.lat) }))}
+    ${rankTable('账号', byAccountNamed, r => ({ main: '积分 ' + fmtCompact(r.credits), full: `积分 ${Number(r.credits).toFixed(2)}`, dur: fmtDur(r.lat) }))}
     <div style="flex:1;min-width:260px">
       <h4 style="font-size:13px;margin-bottom:8px;color:var(--text-dim)">结果分布</h4>
       ${statusData.length ? donutHtml(statusData, statusTotal, '总请求') : '<p class="muted">暂无数据</p>'}
@@ -1460,6 +1480,9 @@ async function renderUsage(m) {
   </div>
   <div class="toolbar">
     <select id="uProvider" style="width:150px"><option value="">全部平台</option>${providers.map(p => `<option value="${p.id}" ${usageFilter.provider_id === p.id ? 'selected' : ''}>${esc(p.label)}</option>`).join('')}</select>
+    <select id="uAccount" style="width:180px"><option value="">全部账号</option>
+      ${accounts.filter(a => !usageFilter.provider_id || a.provider_id === usageFilter.provider_id).map(a => `<option value="${a.id}" ${String(usageFilter.account_id) === String(a.id) ? 'selected' : ''}>${esc(a.provider_id)} / ${esc(a.alias || a.name)}</option>`).join('')}
+    </select>
     <input id="uModel" class="searchbox" placeholder="模型名…" value="${esc(usageFilter.model)}">
     <select id="uStatus" style="width:110px"><option value="">全部</option><option value="ok" ${usageFilter.status === 'ok' ? 'selected' : ''}>成功</option><option value="error" ${usageFilter.status === 'error' ? 'selected' : ''}>失败</option></select>
     <span class="spacer"></span><span class="muted">明细（最近在前）</span>
@@ -1467,7 +1490,7 @@ async function renderUsage(m) {
   <div class="table-wrap">
   <table><tr><th>时间</th><th>平台</th><th>账号</th><th>模型</th><th>输入</th><th>输出</th><th>积分</th><th>耗时</th><th>状态</th></tr>
   ${usage.rows.map(u => `<tr>
-    <td class="muted mono">${fmtTime(u.ts)}</td><td>${esc(u.provider_id || '')}</td><td>#${u.account_id ?? '-'}</td>
+    <td class="muted mono">${fmtTime(u.ts)}</td><td>${esc(u.provider_id || '')}</td><td title="${u.account_id ? '账号 #' + u.account_id : ''}">${esc(acctName.get(u.account_id) || (u.account_id ? '#' + u.account_id : '-'))}</td>
     <td class="mono">${esc(u.public_model || '')}</td><td>${u.input_tokens}</td><td>${u.output_tokens}</td>
     <td>${u.credits ? u.credits.toFixed(3) : '-'}</td><td style="${u.latency_ms > 30000 ? 'color:var(--red)' : u.latency_ms > 10000 ? 'color:var(--yellow)' : ''}">${u.latency_ms}ms</td>
     <td>${u.status < 400 ? badge(u.status, 'green') : badge(u.status + (u.error ? ' ' + u.error.slice(0, 40) : ''), 'red')}</td>
@@ -1479,7 +1502,8 @@ async function renderUsage(m) {
     <button class="small ghost" ${usageFilter.page * usage.size >= usage.total ? 'disabled' : ''} onclick="usageFilter.page++;renderUsage($('#main'))">下一页</button>
   </div></div>`;
   bindCharts();
-  $('#uProvider').onchange = e => { usageFilter.provider_id = e.target.value; usageFilter.page = 1; renderUsage(m); };
+  $('#uProvider').onchange = e => { usageFilter.provider_id = e.target.value; usageFilter.account_id = ''; usageFilter.page = 1; renderUsage(m); };
+  $('#uAccount').onchange = e => { usageFilter.account_id = e.target.value; usageFilter.page = 1; renderUsage(m); };
   $('#uStatus').onchange = e => { usageFilter.status = e.target.value; usageFilter.page = 1; renderUsage(m); };
   $('#ucHours').onchange = e => { usageChartHours = Number(e.target.value); renderUsage(m); };
   $('#uModel').onkeydown = e => { if (e.key === 'Enter') { usageFilter.model = e.target.value; usageFilter.page = 1; renderUsage(m); } };

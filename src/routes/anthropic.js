@@ -117,7 +117,7 @@ router.post('/messages', async (req, res) => {
     return res.status(400).json({ type: 'error', error: { type: 'invalid_request_error', message: 'model and messages required' } });
   }
   const allowed = req.apikey?.allowed_models || '*';
-  if (allowed !== '*' && !allowed.split(',').map(s => s.trim()).includes(modelsCore.stripRateTag(model))) {
+  if (!modelsCore.modelAllowedByList(model, allowed)) {
     return res.status(403).json({ type: 'error', error: { type: 'permission_error', message: `model '${model}' not allowed for this key` } });
   }
   const messages = toCanonical(body);

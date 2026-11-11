@@ -81,7 +81,7 @@ router.get('/accounts', (req, res) => {
   if (provider_id) { where.push('provider_id=?'); args.push(provider_id); }
   if (status) { where.push('status=?'); args.push(status); }
   if (enabled !== undefined && enabled !== '') { where.push('enabled=?'); args.push(Number(enabled)); }
-  if (search) { where.push('(name LIKE ? OR extra LIKE ?)'); args.push(`%${search}%`, `%${search}%`); }
+  if (search) { where.push('(name LIKE ? OR extra LIKE ? OR alias LIKE ?)'); args.push(`%${search}%`, `%${search}%`, `%${search}%`); }
   if (where.length) sql += ' WHERE ' + where.join(' AND ');
   sql += ' ORDER BY provider_id, priority, id';
   const aliasCache = new Map();
@@ -139,9 +139,19 @@ router.put('/accounts/:id', (req, res) => {
   res.json({ ok: true, alias: nextAlias || accountsCore.aliasMap(a.provider_id).get(a.id) });
 });
 router.delete('/accounts/:id', (req, res) => {
-  // bindings first (no FK cascade); keep model rows so re-adding the account can resync
-  db.prepare('DELETE FROM model_accounts WHERE account_id=?').run(req.params.id);
-  db.prepare('DELETE FROM accounts WHERE id=?').run(req.params.id);
+  // bindings first (no FK cascade); delete model rows that were served ONLY by this account
+  const id = Number(req.params.id);
+  const affected = db.prepare(`SELECT ma.model_id FROM model_accounts ma
+    JOIN models m ON m.id=ma.model_id WHERE ma.account_id=?`).all(id).map(r => r.model_id);
+  db.transaction(() => {
+    db.prepare('DELETE FROM model_accounts WHERE account_id=?').run(id);
+    for (const modelId of affected) {
+      if (!db.prepare('SELECT 1 FROM model_accounts WHERE model_id=? LIMIT 1').get(modelId)) {
+        db.prepare('DELETE FROM models WHERE id=?').run(modelId);
+      }
+    }
+    db.prepare('DELETE FROM accounts WHERE id=?').run(id);
+  })();
   res.json({ ok: true });
 });
 
@@ -482,9 +492,10 @@ router.delete('/apikeys/:id', (req, res) => { db.prepare('DELETE FROM apikeys WH
 
 // ---------- usage & stats ----------
 router.get('/usage', (req, res) => {
-  const { page = 1, size = 50, provider_id, model, apikey_id, status, since, until } = req.query;
+  const { page = 1, size = 50, provider_id, model, apikey_id, status, since, until, account_id } = req.query;
   const where = []; const args = [];
   if (provider_id) { where.push('provider_id=?'); args.push(provider_id); }
+  if (account_id) { where.push('account_id=?'); args.push(account_id); }
   if (model) { where.push('public_model LIKE ?'); args.push(`%${model}%`); }
   if (apikey_id) { where.push('apikey_id=?'); args.push(apikey_id); }
   if (status) { where.push('status>=?'); args.push(status === 'error' ? 400 : 200); if (status === 'ok') { where.pop(); args.pop(); where.push('status<400'); } }
@@ -582,8 +593,26 @@ router.delete('/virtual-models/:name', (req, res) => {
   res.json({ ok: true });
 });
 // available regular models for building virtual targets (grouped by provider)
+// 多账号平台同时给出 `模型@账号别名`，target 写别名即可把该目标锁定到具体账号。
 router.get('/virtual-models/targets', (req, res) => {
-  res.json(modelsCore.listEnabledModelNames());
+  const out = [];
+  for (const m of modelsCore.listModels({})) {
+    if (!m.enabled) continue;
+    out.push({ provider_id: m.provider_id, public_name: m.public_name });
+    const accts = (m.accounts || []).filter(a => a.enabled !== 0);
+    if (accts.length > 1) {
+      for (const a of accts) {
+        out.push({
+          provider_id: m.provider_id,
+          public_name: `${m.public_name}@${a.alias}`,
+          alias_of: m.public_name,
+          account_id: a.id,
+          account_name: a.name,
+        });
+      }
+    }
+  }
+  res.json(out);
 });
 
 // presets for one-click virtual model creation: group enabled real models by

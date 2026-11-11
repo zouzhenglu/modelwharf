@@ -202,6 +202,19 @@ function splitAlias(name) {
     : { base, providerId: null, alias: raw.toLowerCase() };
 }
 
+/**
+ * API key 白名单匹配：允许基础模型名时，同时允许它的 `模型@账号` 别名
+ * （反向不成立：白名单写死别名时不能用基础名绕过账号限制）。
+ */
+function modelAllowedByList(publicName, allowed) {
+  if (!allowed || allowed === '*') return true;
+  const clean = stripRateTag(publicName);
+  const list = String(allowed).split(',').map(s => s.trim()).filter(Boolean);
+  if (list.includes(clean)) return true;
+  const parsed = splitAlias(clean);
+  return !!(parsed && list.includes(parsed.base));
+}
+
 /** All (model, account) hits for a `model@alias` pair; empty when the alias doesn't serve it. */
 function findModelByAlias(baseName, alias, providerHint) {
   const wanted = String(alias || '').toLowerCase();
@@ -212,6 +225,7 @@ function findModelByAlias(baseName, alias, providerHint) {
     if (providerHint && row.provider_id !== providerHint) continue;
     const aliases = accounts.aliasMap(row.provider_id);
     for (const a of accounts.listAccounts(row.provider_id)) {
+      if (a.status === 'invalid' || a.status === 'banned') continue;
       if (aliases.get(a.id) !== wanted) continue;
       if (!accounts.accountServesModel(row.id, a.id)) continue;
       hits.push({ model: row, account: a });
@@ -338,5 +352,5 @@ module.exports = {
   syncProviderModels, listModels, listPublicModels, route, findModelByUpstream, recordUsage,
   getProviderConfig, setProviderConfig, listVirtualModels, getVirtualModel, upsertVirtualModel, deleteVirtualModel,
   listEnabledModelNames, resetProviderModelsToOnline, rateTag, decoratePublicModel, stripRateTag,
-  modelAccounts, decorateModelAccounts, splitAlias, findModelByAlias,
+  modelAccounts, decorateModelAccounts, splitAlias, findModelByAlias, modelAllowedByList,
 };
