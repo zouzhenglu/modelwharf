@@ -479,7 +479,7 @@ async function importLocalAll() {
 
 async function refreshModels(pid) {
   try { const r = await api(`/providers/${pid}/refresh-models`, { method: 'POST' });
-    toast(`同步完成：新增 ${r.added} 个模型${r.errors?.length ? '，错误: ' + r.errors.join('; ') : ''}`);
+    toast(`同步完成：新增 ${r.added} 个模型，关联 ${r.linked ?? 0} 个账号${r.errors?.length ? '，错误: ' + r.errors.join('; ') : ''}`);
     go(PAGE === 'accounts' ? 'accounts' : 'dashboard');
   } catch (e) { toast(e.message, true); }
 }
@@ -532,7 +532,7 @@ async function renderAccounts(m) {
     <button onclick="openAccountForm()">＋ 添加账号</button>
   </div>
   <div class="table-wrap">
-  <table><tr><th>平台</th><th>名称 / 身份</th><th>状态</th><th>积分与信息</th>
+  <table><tr><th>平台</th><th>名称 / 身份</th><th>状态</th><th title="该账号实际同步到并可路由的模型数量">模型</th><th>积分与信息</th>
     <th title="数字越小越优先被轮询使用。同平台多账号时，先用优先级小的，失败/冷却自动换下一个">优先级 ⓘ</th>
     <th title="该账号同时处理的最大请求数。达到上限后请求会分流到其他账号，避免单账号被上游限流">并发 ⓘ</th>
     <th>最近使用</th><th>启用</th><th>操作</th></tr>
@@ -541,8 +541,9 @@ async function renderAccounts(m) {
     const online = onlineIds.has(a.provider_id);
     return `<tr>
     <td>${esc(a.provider_id)}</td>
-    <td><b>${esc(a.name)}</b>${a.extra?.username ? `<div class="muted" style="font-size:12px">${esc(a.extra.username)}${a.extra.email ? ' · ' + esc(a.extra.email) : ''}</div>` : ''}</td>
+    <td><b>${esc(a.name)}</b>${a.alias ? `<span class="badge gray" style="margin-left:6px" title="模型别名：客户端可用 模型@${esc(a.alias)} 指定该账号">${esc(a.alias)}</span>` : ''}${a.extra?.username ? `<div class="muted" style="font-size:12px">${esc(a.extra.username)}${a.extra.email ? ' · ' + esc(a.extra.email) : ''}</div>` : ''}</td>
     <td>${statusBadge(a.status)}${a.status_message ? `<div class="muted" style="max-width:180px;font-size:12px">${esc(a.status_message)}</div>` : ''}</td>
+    <td>${a.model_count ?? 0}</td>
     <td>${creditCellHtml(a.extra)}</td>
     <td>${a.priority}</td><td>${a.max_concurrency}</td>
     <td class="muted" style="font-size:12px">${fmtTime(a.last_used_at)}</td>
@@ -900,18 +901,24 @@ function modelTagBadges(tags) {
     return `<span class="mtag ${cls}">${esc(t)}</span>`;
   }).join('');
 }
-let modelFilter = { provider_id: '', search: '', enabled: '', tag: '' };
+let modelFilter = { provider_id: '', search: '', enabled: '', tag: '', account_id: '' };
 async function renderModels(m) {
-  const [providers, models] = await Promise.all([
+  const [providers, models, accounts] = await Promise.all([
     api('/providers'),
     api('/models?' + new URLSearchParams(Object.fromEntries(Object.entries(modelFilter).filter(([, v]) => v !== '')))),
+    api('/accounts'),
   ]);
+  const filterAccounts = accounts.filter(a => !modelFilter.provider_id || a.provider_id === modelFilter.provider_id);
   const providerOpts = providerOptgroups(providers, modelFilter.provider_id, true);
   const providerOptsAll = providerOptgroups(providers, modelFilter.provider_id, false);
   m.innerHTML = `
   ${pageHead(`模型管理 <span class="muted" style="font-size:13px">(${models.length})</span>`)}
   <div class="toolbar">
     <select id="mfProvider" style="width:170px"><option value="">全部平台</option>${providerOpts}</select>
+    <select id="mfAccount" style="width:180px" title="只看某个账号实际提供的模型">
+      <option value="">全部账号</option>
+      ${filterAccounts.map(a => `<option value="${a.id}" ${String(modelFilter.account_id) === String(a.id) ? 'selected' : ''}>${esc(a.provider_id)} / ${esc(a.name)}${a.alias ? ' (' + esc(a.alias) + ')' : ''}</option>`).join('')}
+    </select>
     <input id="mfSearch" class="searchbox" placeholder="搜索模型名/标签…" value="${esc(modelFilter.search)}">
     <select id="mfEnabled" style="width:100px"><option value="">全部</option><option value="1" ${modelFilter.enabled === '1' ? 'selected' : ''}>仅启用</option><option value="0" ${modelFilter.enabled === '0' ? 'selected' : ''}>仅停用</option></select>
     <input id="mfTag" style="width:110px" placeholder="标签筛选" value="${esc(modelFilter.tag)}">
@@ -933,7 +940,7 @@ async function renderModels(m) {
   </div>
   <div class="table-wrap">
   <table style="table-layout:fixed">
-    <colgroup><col style="width:30px"><col style="width:22%"><col style="width:90px"><col style="width:14%"><col style="width:56px"><col style="width:64px"><col style="width:60px"><col><col style="width:52px"><col style="width:118px"></colgroup>
+    <colgroup><col style="width:30px"><col style="width:22%"><col style="width:90px"><col style="width:14%"><col style="width:56px"><col style="width:64px"><col style="width:120px"><col><col style="width:52px"><col style="width:118px"></colgroup>
     <tr><th style="width:26px"></th><th>对外名称</th><th>平台</th><th>上游模型</th><th>倍率</th><th>免费</th><th>账号</th><th>能力标签</th><th>启用</th><th>操作</th></tr>
   ${models.map(md => `<tr>
     <td><input type="checkbox" class="mfCheck" value="${md.id}" style="width:auto"></td>
@@ -942,7 +949,11 @@ async function renderModels(m) {
     <td class="mono muted" style="overflow:hidden;text-overflow:ellipsis" title="${esc(md.upstream_model)}">${esc(md.upstream_model)}</td>
     <td>${md.multiplier}x</td>
     <td>${md.is_free ? badge('免费', 'green') : '<span class="muted">计费</span>'}</td>
-    <td>${md.account_count}</td>
+    <td style="overflow:hidden;white-space:nowrap">${(() => {
+      if (!md.accounts || !md.accounts.length) return '<span class="muted" title="没有账号绑定，按平台全部账号处理">自动 *</span>';
+      const chips = md.accounts.slice(0, 3).map(a => `<span class="badge ${a.enabled ? 'gray' : ''}" title="${esc(a.name)}${a.status ? ' · ' + esc(a.status) : ''}">${esc(a.alias || a.name)}</span>`).join(' ');
+      return chips + (md.accounts.length > 3 ? ` <span class="muted">+${md.accounts.length - 3}</span>` : '');
+    })()}</td>
     <td style="overflow:hidden">${modelTagBadges(md.tags)}</td>
     <td>${switchHtml(md.enabled, `toggleModel(${md.id})`)}</td>
     <td style="white-space:nowrap"><button class="small ghost" onclick="openModelForm(${md.id})">编辑</button>
@@ -950,7 +961,8 @@ async function renderModels(m) {
   </tr>`).join('')}
   ${!models.length ? emptyRow(10, '🧩', '暂无模型 — 添加账号后在上方选择平台「开始同步」，或手动添加') : ''}
   </table></div>`;
-  $('#mfProvider').onchange = e => { modelFilter.provider_id = e.target.value; renderModels(m); };
+  $('#mfProvider').onchange = e => { modelFilter.provider_id = e.target.value; modelFilter.account_id = ''; renderModels(m); };
+  $('#mfAccount').onchange = e => { modelFilter.account_id = e.target.value; renderModels(m); };
   $('#mfEnabled').onchange = e => { modelFilter.enabled = e.target.value; renderModels(m); };
   $('#mfSearch').onkeydown = e => { if (e.key === 'Enter') { modelFilter.search = e.target.value; renderModels(m); } };
   $('#mfTag').onkeydown = e => { if (e.key === 'Enter') { modelFilter.tag = e.target.value; renderModels(m); } };
@@ -989,18 +1001,30 @@ async function refreshModelsAll() {
   try {
     const r = await api('/refresh-models-all', { method: 'POST' });
     const total = r.reduce((s, x) => s + (x.added || 0), 0);
+    const linked = r.reduce((s, x) => s + (x.linked || 0), 0);
     const errs = r.flatMap(x => x.errors || []);
-    toast(`同步完成：共新增 ${total} 个${errs.length ? '，错误: ' + errs.slice(0, 2).join('; ') : ''}`, errs.length > 0);
+    toast(`同步完成：共新增 ${total} 个模型、关联 ${linked} 项${errs.length ? '，错误: ' + errs.slice(0, 2).join('; ') : ''}`, errs.length > 0);
     go('models');
   } catch (e) { toast(e.message, true); }
 }
 async function toggleModel(id) { await api('/models/' + id + '/toggle', { method: 'POST' }); renderModels($('#main')); }
 async function delModel(id) { if (!confirm('删除该模型映射？')) return; await api('/models/' + id, { method: 'DELETE' }); renderModels($('#main')); }
+let mfAccountsCache = [];
+function mfRenderAccountBox(defaultIds) {
+  const sel = $('#mfProviderSel'); const box = $('#mfAccountBox');
+  if (!sel || !box) return;
+  const list = mfAccountsCache.filter(a => a.provider_id === sel.value);
+  const chosen = Array.isArray(defaultIds) ? defaultIds.map(Number) : list.filter(a => a.enabled).map(a => a.id);
+  box.innerHTML = list.length
+    ? list.map(a => `<label class="row" style="gap:6px;font-size:13px;padding:2px 0;cursor:pointer"><input type="checkbox" class="mfAcct" value="${a.id}" style="width:auto" ${chosen.includes(a.id) ? 'checked' : ''}> <span>${esc(a.name)}</span> <span class="muted" style="font-size:11px">${esc(a.alias || '')}${a.enabled ? '' : ' · 已停用'}</span></label>`).join('')
+    : '<span class="muted" style="font-size:12px">该平台暂无账号；模型保存后不可用，需先添加账号并同步</span>';
+}
 async function openModelForm(id) {
-  const [providers, models] = [await api('/providers'), await api('/models?size=1000')];
+  const [providers, models, accounts] = await Promise.all([api('/providers'), api('/models?size=1000'), api('/accounts')]);
   const md = id ? models.find(x => x.id === id) : null;
+  mfAccountsCache = accounts;
   openModal(md ? '编辑模型' : '添加模型', `
-    <div class="field"><label>平台</label><select id="mfProviderSel" ${md ? 'disabled' : ''}>${providerOptgroups(providers, md?.provider_id, false)}</select></div>
+    <div class="field"><label>平台</label><select id="mfProviderSel" onchange="mfRenderAccountBox()" ${md ? 'disabled' : ''}>${providerOptgroups(providers, md?.provider_id, false)}</select></div>
     <div class="field"><label>上游模型名（平台真实模型 id）</label><input id="mfUpstream" value="${esc(md?.upstream_model || '')}" placeholder="如 glm-5.2"></div>
     <div class="field"><label>对外名称（客户端填的 model）</label><input id="mfPublic" value="${esc(md?.public_name || '')}" placeholder="如 glm-5.2 或别名 my-model"></div>
     <div class="row">
@@ -1009,15 +1033,19 @@ async function openModelForm(id) {
       <div class="field" style="width:150px"><label>免费</label><select id="mfFree"><option value="0" ${!md?.is_free ? 'selected' : ''}>计费</option><option value="1" ${md?.is_free ? 'selected' : ''}>免费</option></select></div>
     </div>
     <div class="field"><label>标签（逗号分隔，用于筛选）</label><input id="mfTags" value="${esc(md?.tags || '')}" placeholder="如 free,coding"></div>
+    <div class="field"><label>绑定账号 <span class="muted" style="font-weight:400">（该模型只在这些账号之间路由；全不选 = 按平台全部账号）</span></label>
+      <div id="mfAccountBox" style="max-height:150px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:6px 8px"></div></div>
     <div class="field"><label>备注</label><input id="mfNote" value="${esc(md?.note || '')}"></div>
     <div class="row"><span class="spacer"></span><button class="ghost" onclick="closeModal()">取消</button>
     <button onclick="saveModel(${id || 'null'})">保存</button></div>`, {});
+  mfRenderAccountBox(md && md.accounts && md.accounts.length ? md.accounts.map(a => a.id) : null);
 }
 async function saveModel(id) {
   const body = {
     provider_id: $('#mfProviderSel').value, upstream_model: $('#mfUpstream').value.trim(), public_name: $('#mfPublic').value.trim(),
     multiplier: Number($('#mfMultiplier').value || 1), ctx_window: Number($('#mfCtx').value) || null,
     is_free: Number($('#mfFree').value), tags: $('#mfTags').value, note: $('#mfNote').value,
+    account_ids: [...document.querySelectorAll('.mfAcct:checked')].map(c => Number(c.value)),
   };
   try {
     if (id) await api('/models/' + id, { method: 'PUT', body }); else await api('/models', { method: 'POST', body });
@@ -1572,21 +1600,33 @@ async function renderPlayground(m) {
   <div class="card" id="pgOut" style="min-height:120px"><div class="empty"><span class="ico">🧪</span>配置上方并点「发送」— 结果与请求详情显示在这里（布局固定，不会跳动）</div></div>`;
   pgProviderChange();
 }
+function pgFillModels() {
+  const pid = $('#pgProvider').value;
+  const accountId = $('#pgAccount').value;
+  const modelSel = $('#pgModel');
+  let list = pid === '__virtual' ? (window._pg.virtuals || []).map(v => ({ public_name: v.public_name, provider_id: 'virtual' }))
+    : (window._pg.models[pid] || []);
+  // 指定账号时只列该账号实际提供的模型（无绑定 = 平台全部账号）
+  if (accountId) {
+    list = list.filter(md => md.wildcard || !md.accounts || !md.accounts.length
+      || md.accounts.some(a => Number(a.id) === Number(accountId)));
+  }
+  const current = modelSel.value;
+  modelSel.innerHTML = `<option value="">选模型…</option>` + list.map(md =>
+    `<option value="${esc(md.public_name)}">${esc(md.public_name)}${md.is_free ? ' · 免费' : ''}${md.multiplier && md.multiplier !== 1 ? ' · x' + md.multiplier : ''}</option>`).join('');
+  if ([...modelSel.options].some(o => o.value === current)) modelSel.value = current;
+}
 function pgProviderChange() {
   const pid = $('#pgProvider').value;
-  const acctSel = $('#pgAccount'), modelSel = $('#pgModel');
+  const acctSel = $('#pgAccount');
   // accounts of this provider
   const accts = (window._pg.accounts || []).filter(a => a.provider_id === pid && a.enabled);
   acctSel.innerHTML = `<option value="">自动轮询（该平台 ${accts.length} 个账号）</option>` +
-    accts.map(a => `<option value="${a.id}">${esc(a.name)}${a.extra?.username ? ' · ' + esc(a.extra.username) : ''}</option>`).join('');
-  // models of this provider + virtual models (platform = virtual)
-  const list = pid === '__virtual' ? (window._pg.virtuals || []).map(v => ({ public_name: v.public_name, provider_id: 'virtual' }))
-    : (window._pg.models[pid] || []);
-  modelSel.innerHTML = `<option value="">选模型…</option>` + list.map(md =>
-    `<option value="${esc(md.public_name)}">${esc(md.public_name)}${md.is_free ? ' · 免费' : ''}${md.multiplier && md.multiplier !== 1 ? ' · x' + md.multiplier : ''}</option>`).join('');
+    accts.map(a => `<option value="${a.id}">${esc(a.name)}${a.alias ? ' (' + esc(a.alias) + ')' : ''}${a.extra?.username ? ' · ' + esc(a.extra.username) : ''}</option>`).join('');
+  pgFillModels();
   pgUpdateEndpoint();
 }
-function pgAccountChange() { pgUpdateEndpoint(); }
+function pgAccountChange() { pgFillModels(); pgUpdateEndpoint(); }
 function pgUpdateEndpoint() {
   const model = $('#pgModel').value;
   const acct = $('#pgAccount').value;

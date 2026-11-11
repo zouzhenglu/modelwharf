@@ -72,12 +72,19 @@ router.get('/accounts', (req, res) => {
   if (search) { where.push('(name LIKE ? OR extra LIKE ?)'); args.push(`%${search}%`, `%${search}%`); }
   if (where.length) sql += ' WHERE ' + where.join(' AND ');
   sql += ' ORDER BY provider_id, priority, id';
-  const rows = db.prepare(sql).all(...args).map(r => ({
-    ...r, credentials: JSON.parse(r.credentials || '{}'), extra: JSON.parse(r.extra || '{}'),
-    // redact secret values
-    credentials_summary: Object.fromEntries(Object.entries(JSON.parse(r.credentials || '{}')).map(([k, v]) => [k, typeof v === 'string' && v.length > 12 ? v.slice(0, 6) + '...' + v.slice(-4) : v])),
-    credentials: undefined,
-  }));
+  const aliasCache = new Map();
+  const countStmt = db.prepare('SELECT COUNT(*) c FROM model_accounts WHERE account_id=?');
+  const rows = db.prepare(sql).all(...args).map(r => {
+    if (!aliasCache.has(r.provider_id)) aliasCache.set(r.provider_id, accountsCore.aliasMap(r.provider_id));
+    return {
+      ...r, credentials: JSON.parse(r.credentials || '{}'), extra: JSON.parse(r.extra || '{}'),
+      alias: aliasCache.get(r.provider_id).get(r.id) || null,
+      model_count: countStmt.get(r.id).c,
+      // redact secret values
+      credentials_summary: Object.fromEntries(Object.entries(JSON.parse(r.credentials || '{}')).map(([k, v]) => [k, typeof v === 'string' && v.length > 12 ? v.slice(0, 6) + '...' + v.slice(-4) : v])),
+      credentials: undefined,
+    };
+  });
   res.json(rows);
 });
 router.post('/accounts', (req, res) => {
@@ -102,7 +109,12 @@ router.put('/accounts/:id', (req, res) => {
       status ?? a.status, a.id);
   res.json({ ok: true });
 });
-router.delete('/accounts/:id', (req, res) => { db.prepare('DELETE FROM accounts WHERE id=?').run(req.params.id); res.json({ ok: true }); });
+router.delete('/accounts/:id', (req, res) => {
+  // bindings first (no FK cascade); keep model rows so re-adding the account can resync
+  db.prepare('DELETE FROM model_accounts WHERE account_id=?').run(req.params.id);
+  db.prepare('DELETE FROM accounts WHERE id=?').run(req.params.id);
+  res.json({ ok: true });
+});
 
 // check account: calls plugin.checkAccount
 router.post('/accounts/:id/check', async (req, res) => {
@@ -140,14 +152,18 @@ router.post('/accounts/check-all', async (req, res) => {
       // link probe: send a 1-token chat forced through THIS account to prove the full chain
       let probe = null;
       if (r.ok === true) {
-        const pm = db.prepare(`SELECT public_name FROM models WHERE provider_id=? AND enabled=1 ORDER BY (multiplier=0) DESC, multiplier ASC LIMIT 1`).get(a.provider_id);
+        // probe a model this account actually reports (fallback: provider-wide first model)
+        const pm = db.prepare(`SELECT m.id, m.public_name FROM models m
+          LEFT JOIN model_accounts ma ON ma.model_id=m.id AND ma.account_id=?
+          WHERE m.provider_id=? AND m.enabled=1
+          ORDER BY (ma.account_id IS NULL) ASC, (m.multiplier=0) DESC, m.multiplier ASC LIMIT 1`).get(a.id, a.provider_id);
         if (pm) {
           try {
             await engine.runSingle({
               messages: [{ role: 'user', text: 'hi' }], params: { max_tokens: 8 },
               source: 'probe', apikeyId: null, publicModel: pm.public_name,
               forceAccount: a,
-            }, db.prepare('SELECT * FROM models WHERE provider_id=? AND public_name=?').get(a.provider_id, pm.public_name),
+            }, db.prepare('SELECT * FROM models WHERE id=?').get(pm.id),
               () => true, null, Date.now(), pm.public_name);
             probe = { ok: true, model: pm.public_name };
           } catch (pe) {
@@ -204,15 +220,16 @@ router.post('/providers/:id/refresh-models', async (req, res) => {
   const plugin = registry.get(req.params.id);
   if (!plugin) return res.status(404).json({ error: 'no such provider' });
   const accts = accountsCore.listAccounts(req.params.id).filter(a => a.enabled);
-  let added = 0; const errors = [];
+  let added = 0, linked = 0; const errors = [];
   for (const a of accts) {
     if (!plugin.listModels) continue;
     try {
       const models = await plugin.listModels(a);
-      added += modelsCore.syncProviderModels(plugin, a, models, { live: !models[0]?.static });
+      const r = modelsCore.syncProviderModels(plugin, a, models, { live: !models[0]?.static });
+      added += r.added; linked += r.linked;
     } catch (e) { errors.push(`${a.name}: ${e.message}`); }
   }
-  res.json({ added, errors });
+  res.json({ added, linked, errors });
 });
 
 // 恢复在线模型（按账号）：只取该账号上游实际可用的目录，替换该平台模型列表
@@ -223,7 +240,7 @@ router.post('/accounts/:id/reset-online-models', async (req, res) => {
   if (typeof plugin?.listOnlineModels !== 'function') return res.status(400).json({ error: '该平台不支持在线目录恢复' });
   try {
     const { models, source } = await plugin.listOnlineModels(a);
-    const r = modelsCore.resetProviderModelsToOnline(plugin, models);
+    const r = modelsCore.resetProviderModelsToOnline(plugin, models, { account: a });
     res.json({ ok: true, source, deleted: r.deleted, added: r.added });
   } catch (e) { res.status(502).json({ error: `获取在线目录失败: ${e.message}` }); }
 });
@@ -238,7 +255,7 @@ router.post('/providers/:id/reset-online-models', async (req, res) => {
   if (typeof plugin.listOnlineModels !== 'function') return res.status(400).json({ error: '该平台不支持在线目录恢复' });
   try {
     const { models, source } = await plugin.listOnlineModels(account);
-    const r = modelsCore.resetProviderModelsToOnline(plugin, models);
+    const r = modelsCore.resetProviderModelsToOnline(plugin, models, { account });
     res.json({ ok: true, source, deleted: r.deleted, added: r.added, models: models.map(m => ({ name: m.publicName, ctx: m.ctx, vision: m.images })) });
   } catch (e) {
     res.status(502).json({ error: `获取在线目录失败: ${e.message}` });
@@ -289,8 +306,8 @@ router.post('/accounts/:id/refresh-models', async (req, res) => {
   if (!plugin?.listModels) return res.status(400).json({ error: 'provider has no model lister' });
   try {
     const models = await plugin.listModels(a);
-    const added = modelsCore.syncProviderModels(plugin, a, models, { live: !models[0]?.static });
-    res.json({ added, total: models.length });
+    const r = modelsCore.syncProviderModels(plugin, a, models, { live: !models[0]?.static });
+    res.json({ added: r.added, linked: r.linked, unlinked: r.unlinked, total: models.length });
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
@@ -302,46 +319,77 @@ router.post('/refresh-models-all', async (req, res) => {
     const plugin = registry.get(id);
     if (!plugin?.listModels) continue;
     const accts = accountsCore.listAccounts(id).filter(a => a.enabled);
-    let added = 0; const errors = [];
+    let added = 0, linked = 0; const errors = []; const accounts = [];
     for (const a of accts) {
       try {
         const models = await plugin.listModels(a);
-        added += modelsCore.syncProviderModels(plugin, a, models, { live: !models[0]?.static });
-      } catch (e) { errors.push(`${a.name}: ${e.message}`); }
+        const r = modelsCore.syncProviderModels(plugin, a, models, { live: !models[0]?.static });
+        added += r.added; linked += r.linked;
+        accounts.push({ id: a.id, name: a.name, added: r.added, linked: r.linked, unlinked: r.unlinked, total: models.length });
+      } catch (e) {
+        errors.push(`${a.name}: ${e.message}`);
+        accounts.push({ id: a.id, name: a.name, error: e.message });
+      }
     }
-    summary.push({ provider: id, added, errors });
+    summary.push({ provider: id, added, linked, accounts, errors });
   }
   res.json(summary);
 });
 
 // ---------- models ----------
+/** replace a model's account bindings (ids are validated against the provider) */
+function replaceModelAccounts(modelId, providerId, accountIds) {
+  db.prepare('DELETE FROM model_accounts WHERE model_id=?').run(modelId);
+  const valid = new Set(db.prepare('SELECT id FROM accounts WHERE provider_id=?').all(providerId).map(r => r.id));
+  const ins = db.prepare('INSERT OR IGNORE INTO model_accounts(model_id,account_id) VALUES(?,?)');
+  for (const raw of accountIds || []) {
+    const id = Number(raw);
+    if (valid.has(id)) ins.run(modelId, id);
+  }
+}
+function defaultAccountIds(providerId) {
+  return db.prepare('SELECT id FROM accounts WHERE provider_id=? AND enabled=1').all(providerId).map(r => r.id);
+}
 router.get('/models', (req, res) => {
-  const { provider_id, search, enabled, tag } = req.query;
+  const { provider_id, search, enabled, tag, account_id } = req.query;
   // enabled arrives as string from query; '0' must map to false (Number('0')=0 is falsy-safe here)
   const enabledFlag = enabled === '' || enabled === undefined ? undefined : Number(enabled) ? 1 : 0;
-  res.json(modelsCore.listModels({ providerId: provider_id, search, enabled: enabledFlag, tag }));
+  res.json(modelsCore.listModels({ providerId: provider_id, search, enabled: enabledFlag, tag, accountId: account_id }));
 });
 router.post('/models', (req, res) => {
-  const { provider_id, upstream_model, public_name, multiplier = 1, is_free = 0, ctx_window, tags = '', note } = req.body || {};
+  const { provider_id, upstream_model, public_name, multiplier = 1, is_free = 0, ctx_window, tags = '', note, account_ids } = req.body || {};
   if (!provider_id || !upstream_model || !public_name) return res.status(400).json({ error: 'provider_id, upstream_model, public_name required' });
   try {
-    const r = db.prepare('INSERT INTO models(provider_id,upstream_model,public_name,multiplier,is_free,ctx_window,tags,note) VALUES(?,?,?,?,?,?,?,?)')
-      .run(provider_id, upstream_model, public_name, multiplier, is_free ? 1 : 0, ctx_window || null, tags, note || null);
-    res.json({ ok: true, id: r.lastInsertRowid });
+    const id = db.transaction(() => {
+      const r = db.prepare('INSERT INTO models(provider_id,upstream_model,public_name,multiplier,is_free,ctx_window,tags,note) VALUES(?,?,?,?,?,?,?,?)')
+        .run(provider_id, upstream_model, public_name, multiplier, is_free ? 1 : 0, ctx_window || null, tags, note || null);
+      replaceModelAccounts(r.lastInsertRowid, provider_id, Array.isArray(account_ids) ? account_ids : defaultAccountIds(provider_id));
+      return r.lastInsertRowid;
+    })();
+    res.json({ ok: true, id });
   } catch (e) { res.status(400).json({ error: e.message.includes('UNIQUE') ? 'public_name already exists' : e.message }); }
 });
 router.put('/models/:id', (req, res) => {
   const m = db.prepare('SELECT * FROM models WHERE id=?').get(req.params.id);
   if (!m) return res.status(404).json({ error: 'not found' });
-  const { upstream_model, public_name, enabled, multiplier, is_free, ctx_window, max_output, tags, note } = req.body || {};
-  db.prepare('UPDATE models SET upstream_model=?, public_name=?, enabled=?, multiplier=?, is_free=?, ctx_window=?, max_output=?, tags=?, note=? WHERE id=?')
-    .run(upstream_model ?? m.upstream_model, public_name ?? m.public_name,
-      enabled === undefined ? m.enabled : (enabled ? 1 : 0), multiplier ?? m.multiplier,
-      is_free === undefined ? m.is_free : (is_free ? 1 : 0), ctx_window ?? m.ctx_window, max_output ?? m.max_output,
-      tags ?? m.tags, note ?? m.note, m.id);
+  const { upstream_model, public_name, enabled, multiplier, is_free, ctx_window, max_output, tags, note, account_ids } = req.body || {};
+  db.transaction(() => {
+    db.prepare('UPDATE models SET upstream_model=?, public_name=?, enabled=?, multiplier=?, is_free=?, ctx_window=?, max_output=?, tags=?, note=? WHERE id=?')
+      .run(upstream_model ?? m.upstream_model, public_name ?? m.public_name,
+        enabled === undefined ? m.enabled : (enabled ? 1 : 0), multiplier ?? m.multiplier,
+        is_free === undefined ? m.is_free : (is_free ? 1 : 0), ctx_window ?? m.ctx_window, max_output ?? m.max_output,
+        tags ?? m.tags, note ?? m.note, m.id);
+    if (Array.isArray(account_ids)) replaceModelAccounts(m.id, m.provider_id, account_ids);
+  })();
   res.json({ ok: true });
 });
-router.delete('/models/:id', (req, res) => { db.prepare('DELETE FROM models WHERE id=?').run(req.params.id); res.json({ ok: true }); });
+router.delete('/models/:id', (req, res) => {
+  db.transaction(() => {
+    db.prepare('DELETE FROM model_accounts WHERE model_id=?').run(req.params.id);
+    db.prepare('DELETE FROM models WHERE id=?').run(req.params.id);
+  })();
+  res.json({ ok: true });
+});
 router.post('/models/:id/toggle', (req, res) => {
   db.prepare('UPDATE models SET enabled = 1-enabled WHERE id=?').run(req.params.id);
   res.json({ ok: true, enabled: db.prepare('SELECT enabled FROM models WHERE id=?').get(req.params.id).enabled });
@@ -363,7 +411,11 @@ router.post('/models/batch', (req, res) => {
     }
   } else if (action === 'delete') {
     if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids required for delete' });
-    affected = db.prepare(`DELETE FROM models WHERE id IN (${ids.map(() => '?').join(',')})`).run(...ids).changes;
+    const placeholders = ids.map(() => '?').join(',');
+    affected = db.transaction(() => {
+      db.prepare(`DELETE FROM model_accounts WHERE model_id IN (${placeholders})`).run(...ids);
+      return db.prepare(`DELETE FROM models WHERE id IN (${placeholders})`).run(...ids).changes;
+    })();
   } else if (action === 'disable-dev-variants') {
     // hide internal __dev-style duplicates
     affected = db.prepare("UPDATE models SET enabled=0 WHERE public_name LIKE '%\\_\\_dev' ESCAPE '\\'").run().changes;
