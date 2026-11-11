@@ -218,10 +218,10 @@ node scripts/zcode-integrate.js --key wh-xxx --base $GW
 | 需求 | 实现 |
 |---|---|
 | 保留平台倍率/免费信息 | models 表 `multiplier`/`is_free` 字段；插件同步时带入；Qoder 错峰倍率、workbuddy hy3 免费、千问全免费等 |
-| 多账号登录与切换 | accounts 表按平台任意多账号；优先级+轮询+并发上限；401/403 自动标记失效，5xx 指数退避冷却 |
+| 多账号登录与切换 | accounts 表按平台任意多账号；优先级+轮询+并发上限；401/403 自动标记失效，5xx 指数退避冷却；同一账号重复登录/扫描按 userId 去重并更新凭据 |
 | 网页后端管理 | `/admin` 单页面板：账号/模型/Key/用量/MCP/测试台/签到/设置 |
 | 网页测试 | 测试台：选模型 → 流式/非流式 → 实时输出+token+积分耗时 |
-| 剩余积分 | 账号「检查」按钮调用各平台积分接口（trae 签到状态、qoder 官方 quota、codebuddy billing、qwen 档案、qwenwork 三池积分：每日免费/订阅/长期） |
+| 剩余积分 | 账号「检查」按钮调用各平台积分接口（trae 签到状态、qoder 官方 quota、codebuddy billing（个人/企业账号、Precise 字段、多段套餐）、qwen 档案、qwenwork 三池积分：每日免费/订阅/长期）；workbuddy 额外显示今日请求数与积分消耗 |
 | 用量/禁用启用/搜索筛选 | usage 全量日志（时间/平台/账号/模型/token/积分/耗时/状态），各列表页均带搜索+筛选 |
 | 扩展接口 | provider 插件协议（见 `src/core/registry.js` 注释）；新增平台=一个文件；已内置 24 个官方厂商 + openai-compat/ollama 通用插件 |
 | 账号-模型绑定管理 | 模型层面启停 + API key 级 `allowed_models` 白名单 |

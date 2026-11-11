@@ -683,20 +683,44 @@ function creditCellHtml(extra) {
     extra = { ...extra, credits: extra.credits.credits, quota: extra.credits.quota ?? extra.quota };
   }
   const parts = [];
-  if (extra.credits != null && extra.quota != null && extra.quota > 0) {
-    const pct = Math.min(100, Math.round(extra.credits / extra.quota * 100));
-    const color = pct > 40 ? 'var(--green)' : pct > 10 ? 'var(--yellow)' : 'var(--red)';
-    parts.push(`<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">
-      <b style="font-size:13px">${extra.credits}</b><span class="muted" style="font-size:11px">/ ${extra.quota}</span>
-      <div class="pbar" style="max-width:90px"><i style="width:${pct}%;background:${color}"></i></div>
-      <span class="muted" style="font-size:11px">${pct}%</span></div>`);
-    if (extra.baseQuota || extra.addOnQuota) {
-      parts.push(`<div class="muted" style="font-size:11px">${extra.baseQuota ? '基础 ' + extra.baseQuota : ''}${extra.baseQuota && extra.addOnQuota ? ' · ' : ''}${extra.addOnQuota ? '附加 ' + extra.addOnQuota : ''}</div>`);
+  const credits = Number(extra.credits);
+  const quota = Number(extra.quota);
+  if (extra.unlimited) {
+    parts.push('<b style="font-size:13px">积分 不限量</b>');
+  } else if (extra.creditError) {
+    parts.push(`<span class="muted" style="font-size:11px" title="${esc(extra.creditError)}">积分暂不可用</span>`);
+  } else if (Number.isFinite(credits) && credits >= 0) {
+    // 只有剩余 <= 总额时才画进度条（旧数据 quota 偏小时不再硬钳成 100%）
+    if (Number.isFinite(quota) && quota > 0 && credits <= quota) {
+      const pct = Math.max(0, Math.min(100, Math.round(credits / quota * 100)));
+      const color = pct > 40 ? 'var(--green)' : pct > 10 ? 'var(--yellow)' : 'var(--red)';
+      parts.push(`<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">
+        <b style="font-size:13px">${credits}</b><span class="muted" style="font-size:11px">/ ${quota}</span>
+        <div class="pbar" style="max-width:90px"><i style="width:${pct}%;background:${color}"></i></div>
+        <span class="muted" style="font-size:11px">${pct}%</span></div>`);
+    } else {
+      parts.push(`<b style="font-size:13px">剩余 ${credits} 积分</b>`);
     }
-  } else if (extra.credits != null) {
-    parts.push(`<b style="font-size:13px">积分 ${extra.credits}</b>`);
+    const meta = [];
+    if (extra.todayUsed != null) meta.push(`今日 ${extra.todayCount ?? 0} 次 · ${extra.todayUsed} 积分`);
+    if (Array.isArray(extra.segments) && extra.segments.length > 1) {
+      const next = extra.segments.find(segment => segment.expiresAt);
+      const nextText = next ? ` · 最近到期 ${new Date(Number(next.expiresAt)).toLocaleDateString('zh-CN')}` : '';
+      meta.push(`${extra.segments.length} 个套餐${nextText}`);
+    }
+    if (meta.length) parts.push(`<div class="muted" style="font-size:11px">${esc(meta.join(' · '))}</div>`);
+    if (extra.todayError && extra.todayUsed == null) {
+      parts.push(`<div class="muted" style="font-size:11px" title="${esc(extra.todayError)}">今日用量暂不可用</div>`);
+    }
+  } else {
+    parts.push('<span class="muted" style="font-size:11px">积分同步后显示</span>');
   }
-  if (extra.username) parts.push(`<div class="muted" style="font-size:11px">${esc(extra.username)}${extra.userType ? ' · ' + esc(extra.userType) : ''}</div>`);
+  // 身份行：displayName/username · email/phone · 账号类型
+  const who = extra.displayName || extra.username;
+  const contact = extra.email || extra.phone;
+  if (who || contact) {
+    parts.push(`<div class="muted" style="font-size:11px">${esc(who || '')}${who && contact ? ' · ' : ''}${esc(contact || '')}${extra.type ? ' · ' + esc(extra.type) : ''}</div>`);
+  }
   if (extra.checkin?.claimable) parts.push(`<div style="font-size:11px"><span class="badge yellow">签到可领</span></div>`);
   if (!parts.length) return `<span class="muted">${esc(summarizeExtra(extra)) || '同步后显示'}</span>`;
   return parts.join('');

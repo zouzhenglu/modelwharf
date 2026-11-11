@@ -2,6 +2,18 @@
 
 本文件记录面向用户的显著变更。版本与 git tag 一一对应；日期为 tag 创建日期。
 
+## [0.12.4] - 2026-11-11
+
+### Fixed
+- **workbuddy 积分数字不对（显示 0 / 偏大 / 偏小）**：旧实现按 `CapacityUnit === 'credits'` 过滤、只累加 `CapacityRemain`/`CapacitySize`。字段缺失或取值不同时会把整包跳过（显示 0）；字段层级选错会拿到日切片/周期/总容量中的错误值；`SlicePeriodUsageDetails` 多段套餐完全没算；过期判断只看 `DeductionEndTime`，其他到期字段的包会被当成有效。现按 `@axiaohungry/dsh-llm-workbuddy` 的算法重写：优先 `*Precise` → `SlicePeriod*` → `Cycle*` → `Capacity*`，展开并合并子套餐（packageCode + 到期时间去重），不再按 unit 过滤
+- **企业 workbuddy 账号积分走错接口**：`type` 为 `ultimate`/`exclusive` 或带 `enterpriseId` 的账号改走 `/v2/billing/meter/get-enterprise-user-usage`（额度 = `limitNum - credit`，`limitNum = -1` 显示不限量），不再一律调个人 `get-user-resource`
+- **workbuddy 没有今日用量**：新增 `/billing/meter/get-user-request-usage` 分页汇总（当天 00:00 至今），账号卡片显示「今日 N 次 · X 积分」；积分接口失败不再误判 token 失效，只标记「积分暂不可用」
+- **同一 workbuddy 账号重复授权 / 扫描产生重复行**：OAuth 重新登录与本机扫描导入现在按 `userId/uid` 命中已有账号并更新凭据，不再新增重复行；账号档案补齐 `enterpriseId/type/email/uin/displayName`
+- **账号卡片积分进度条失真**：`credits > quota` 时不再硬钳成 100%，改为只显示剩余积分；新增多套餐数量与最近到期日、失败原因 tooltip
+
+### Tests
+- 新增 `test/workbuddy-billing.test.js`：字段层级、`SlicePeriodUsageDetails` 合并、5 种响应包裹、企业额度/不限量、今日用量分页、计费请求头、身份归一化；`npm test` 72 项 e2e 全绿
+
 ## [0.12.3] - 2026-11-10
 
 ### Fixed
