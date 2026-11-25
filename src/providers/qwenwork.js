@@ -309,21 +309,45 @@ module.exports = {
   async checkAccount(account) {
     const c = await fetchUserInfo(account);
     const token = await ensureToken(account);
+    // 个人钱包（每日/订阅/长期三池）——企业/团队账号此处为空钱包
     const r = await httpJson(`${SITE}/user/wallets`, {
       headers: { Accept: 'application/json', 'User-Agent': USER_AGENT, Authorization: `Bearer ${token}` }, timeoutMs: 15000,
     });
     if (r.status === 401 || r.status === 403) return { ok: false, status: 'invalid', message: `auth ${r.status}` };
+    const daily = r.json?.data?.daily_credits?.total_balance ?? 0;
+    const monthly = r.json?.data?.monthly_credits?.total_balance ?? 0;
+    const longterm = r.json?.data?.longterm_credits?.total_balance ?? 0;
+    const walletTotal = daily + monthly + longterm;
+    // 企业/团队版：组织额度在 account-context 的 quota 上（is_biz/team-member），不进个人钱包
+    const ctx = await httpJson(`${GATEWAY}/api/v1/adapter/user/account-context?include=user,plan,quota`, {
+      headers: { Accept: 'application/json', 'User-Agent': USER_AGENT, Authorization: `Bearer ${token}` }, timeoutMs: 15000,
+    }).catch(() => ({ status: 0 }));
+    // quota 存在即代表组织额度（个人版该字段为 0/缺失，会落到下面的个人三池分支）
+    const q = ctx.status === 200 ? (ctx.json?.data?.quota || ctx.json?.quota) : null;
+    const orgName = ctx.json?.data?.user?.organization?.name || '';
+    if (q && Number.isFinite(Number(q.total)) && Number(q.total) > 0) {
+      // 企业/团队组织额度：credits=剩余，quota=总额（面板进度条语义）
+      const remaining = Number(q.remaining ?? (q.total - (q.used || 0)));
+      const total = Number(q.total);
+      const label = orgName ? `组织「${orgName}」` : '企业版';
+      return {
+        ok: true,
+        message: `${label}额度 ${remaining}/${total}（已用 ${Number(q.used || 0)}）· ${c.nickname || c.username || c.planName || '有效'}`,
+        extra: {
+          credits: remaining, quota: total, orgCredits: remaining, orgQuota: total, orgUsed: Number(q.used || 0),
+          dailyCredits: daily, monthlyCredits: monthly, longtermCredits: longterm,
+          uid: c.uid, nickname: c.nickname, username: c.username, email: c.email,
+          plan: c.planName || c.tier, planId: c.planId, tokenExpiresAt: c.expiresAt || null,
+        },
+      };
+    }
+    // 个人版：三池钱包汇总（无组织额度）
     if (r.status !== 200 || !r.json?.data) return { ok: false, status: 'cooling', message: `wallets ${r.status}` };
-    const d = r.json.data;
-    const daily = d.daily_credits?.total_balance ?? 0;
-    const monthly = d.monthly_credits?.total_balance ?? 0;
-    const longterm = d.longterm_credits?.total_balance ?? 0;
-    const total = daily + monthly + longterm;
     return {
       ok: true,
-      message: `积分 ${total}（每日 ${daily} · 订阅 ${monthly} · 长期 ${longterm}）· ${c.nickname || c.username || c.planName || '有效'}`,
+      message: `积分 ${walletTotal}（每日 ${daily} · 订阅 ${monthly} · 长期 ${longterm}）· ${c.nickname || c.username || c.planName || '有效'}`,
       extra: {
-        credits: total, dailyCredits: daily, monthlyCredits: monthly, longtermCredits: longterm,
+        credits: walletTotal, dailyCredits: daily, monthlyCredits: monthly, longtermCredits: longterm,
         uid: c.uid, nickname: c.nickname, username: c.username, email: c.email,
         plan: c.planName || c.tier, planId: c.planId, tokenExpiresAt: c.expiresAt || null,
       },
@@ -400,6 +424,12 @@ module.exports = {
           longtermCredits: d.longterm_credits?.total_balance ?? 0,
           credits: (d.daily_credits?.total_balance ?? 0) + (d.monthly_credits?.total_balance ?? 0) + (d.longterm_credits?.total_balance ?? 0),
         };
+        // 企业/团队账号的个人钱包为空（组织额度在 quota），保留 checkAccount 已同步的组织额度，避免被清零
+        // planId 标识或已同步过组织额度命中即保留；?? 确保首次同步无旧值时不写入 undefined
+        if (/enterprise|team|biz/i.test(c.planId || '') || account.extra?.orgQuota) {
+          extra.credits = account.extra?.credits ?? extra.credits;
+          extra.quota = account.extra?.orgQuota ?? account.extra?.quota;
+        }
       }
       if (names.length) return { ok: true, gained: earned || null, message: `领取成功 ${names.join('、')}${failures.length ? `；另有失败：${failures.join('；')}` : ''}`, extra };
       return { ok: false, message: `领取失败：${failures.join('；')}`, extra, raw: lastFailureRaw };

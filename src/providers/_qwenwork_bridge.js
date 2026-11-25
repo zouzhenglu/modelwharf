@@ -38,6 +38,24 @@ function versionRank(name) {
   return m ? (+m[1] * 1e6 + +m[2] * 1e3 + +m[3]) : 0;
 }
 
+/**
+ * Enumerate fixed drives present on this machine (Windows: C..Z; POSIX: root only).
+ * The scan used to be hard-coded to C/D/E, which missed installs on other drives
+ * (e.g. F:\Program Files\QwenWorkCN). Cached; resolveWasm already caches its result.
+ */
+let _drives = null;
+function availableDrives() {
+  if (_drives) return _drives;
+  if (process.platform === 'win32') {
+    _drives = 'CDEFGHIJKLMNOPQRSTUVWXYZ'.split('')
+      .map(l => l + ':')
+      .filter(d => { try { fs.accessSync(d + path.sep); return true; } catch { return false; } });
+  } else {
+    _drives = [''];
+  }
+  return _drives;
+}
+
 /** all plausible install roots, incl. vendor-nested layouts under Program Files */
 function candidateRoots() {
   const roots = [];
@@ -50,7 +68,7 @@ function candidateRoots() {
     process.env['ProgramFiles(x86)'] && path.join(process.env['ProgramFiles(x86)']),
   ].filter(Boolean);
   for (const p of parents) for (const b of BRAND_DIRS) roots.push(path.join(p, b));
-  for (const drive of ['C:', 'D:', 'E:']) {
+  for (const drive of availableDrives()) {
     for (const pf of ['Program Files', 'Program Files (x86)']) {
       const base = path.join(drive + path.sep, pf);
       for (const b of BRAND_DIRS) roots.push(path.join(base, b));
